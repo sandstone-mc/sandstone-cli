@@ -61,7 +61,7 @@ export default class Create extends Command {
     const datapackName = await getFlagOrPrompt(flags, 'datapack-name', {
       message: 'Name of your data pack (can be changed later) >',
       type: 'input',
-      default: projectPath,
+      default: projectName,
     })
 
     // Find the save directory

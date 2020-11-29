@@ -1,0 +1,10 @@
+{
+  "description": "A data pack created with Sandstone",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "scripts": {
+    "watch": "sand watch",
+    "build": "sand build"
+  }
+}

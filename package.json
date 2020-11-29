@@ -1,7 +1,7 @@
 {
   "name": "sandstone-cli",
   "description": "The CLI for Sandstone - the data pack creation library.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "author": "Florian ERNST @TheMrZZ",
   "bin": {
     "sand": "./bin/run"
@@ -14,7 +14,6 @@
     "chalk": "^4.1.0",
     "chokidar": "^3.4.3",
     "fs-extra": "^9.0.1",
-    "graceful-fs": "^4.2.4",
     "inquirer": "^7.3.3",
     "lodash.debounce": "^4.0.8",
     "tslib": "^1"
@@ -22,7 +21,6 @@
   "devDependencies": {
     "@oclif/dev-cli": "^1",
     "@types/fs-extra": "^9.0.4",
-    "@types/graceful-fs": "^4.1.4",
     "@types/inquirer": "^7.3.1",
     "@types/lodash.debounce": "^4.0.6",
     "@types/nodemon": "^1.19.0",
@@ -60,7 +58,7 @@
   "scripts": {
     "postpack": "rimraf oclif.manifest.json",
     "posttest": "eslint . --ext .ts --config .eslintrc",
-    "prepack": "rimraf lib && tsc -b && oclif-dev manifest && oclif-dev readme",
+    "prepack": "rimraf lib && tsc -b && node ./copyTemplate.js && oclif-dev manifest && oclif-dev readme",
     "test": "echo NO TESTS",
     "version": "oclif-dev readme && git add README.md"
   },

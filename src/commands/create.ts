@@ -121,6 +121,7 @@ export default class Create extends Command {
 
     const namespace = await getFlagOrPrompt(flags, 'namespace', {
       message: 'Default namespace (can be changed later) >',
+      default: 'default',
     })
 
     let useYarn = flags.yarn

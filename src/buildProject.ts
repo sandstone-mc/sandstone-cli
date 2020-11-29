@@ -2,19 +2,7 @@ import path from 'path'
 import crypto from 'crypto'
 import { promisify } from 'util'
 import { exit } from 'process'
-
-const fsCallback = require('graceful-fs')
-
-const fs = {
-  opendir: promisify(fsCallback.opendir),
-  mkdir: promisify(fsCallback.mkdir),
-  lstat: promisify(fsCallback.lstat),
-  readdir: promisify(fsCallback.readdir),
-  rmdir: promisify(fsCallback.rmdir),
-  readFile: promisify(fsCallback.readFile),
-  writeFile: promisify(fsCallback.writeFile),
-  rm: promisify(fsCallback.rm),
-}
+import fs from 'fs-extra'
 
 const sandstoneLocation = path.resolve('./node_modules/sandstone')
 
@@ -71,7 +59,12 @@ function hash(stringToHash: string): string {
 // Recursively create a directory, without failing if it already exists
 async function mkDir(dirPath: string) {
   try {
-    await fs.mkdir(dirPath, {recursive: true})
+    await new Promise((resolve, reject) => {
+      fs.mkdir(dirPath, { recursive: true }, (err) => {
+        if (err) reject(err)
+        resolve()
+      })
+    })
   }
   catch(error) {
     // Directory already exists
@@ -217,7 +210,7 @@ const sandstoneCachePath = path.join(sandstoneCacheFolder, 'cache.json')
   Object.keys(newCache.files).forEach(name => oldFilesNames.delete(name))
 
   await Promise.allSettled(
-    [...oldFilesNames.values()].map(name => fs.rm(name))
+    [...oldFilesNames.values()].map(name => promisify(fs.rm)(name))
   )
 
   // Delete all empty folders of previous directory

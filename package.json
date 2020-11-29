@@ -1,7 +1,7 @@
 {
   "name": "sandstone-cli",
   "description": "The CLI for Sandstone - the data pack creation library.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "Florian ERNST @TheMrZZ",
   "bin": {
     "sand": "./bin/run"

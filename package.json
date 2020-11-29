@@ -1,7 +1,7 @@
 {
   "name": "sandstone-cli",
   "description": "The CLI for Sandstone - the data pack creation library.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "author": "Florian ERNST @TheMrZZ",
   "bin": {
     "sand": "./bin/run"
@@ -16,6 +16,7 @@
     "fs-extra": "^9.0.1",
     "inquirer": "^7.3.3",
     "lodash.debounce": "^4.0.8",
+    "ts-node": "^9.0.0",
     "tslib": "^1"
   },
   "devDependencies": {
@@ -29,7 +30,6 @@
     "eslint-config-oclif-typescript": "^0.1",
     "globby": "^10",
     "rimraf": "^3.0.2",
-    "ts-node": "^9.0.0",
     "typescript": "^3.3"
   },
   "engines": {

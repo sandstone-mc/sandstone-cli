@@ -1,7 +1,7 @@
 import { Command, flags } from '@oclif/command'
-import { buildProject } from '../buildProject'
 import chokidar from 'chokidar'
 import debounce from 'lodash.debounce'
+import { buildProject } from '../buildProject'
 
 export default class Watch extends Command {
   static description = 'Build the datapack, and rebuild it on file change. ⛏'

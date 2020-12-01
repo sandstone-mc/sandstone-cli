@@ -1,8 +1,5 @@
-import { Command, flags } from '@oclif/command'
-import nodemon from 'nodemon'
-import path from 'path'
-import util from 'util'
-import { BuildOptions, buildProject } from '../buildProject'
+import { Command } from '@oclif/command'
+import { buildProject } from '../buildProject'
 import Watch from './watch'
 
 export default class Build extends Command {

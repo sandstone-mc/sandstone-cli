@@ -59,7 +59,7 @@ function hash(stringToHash: string): string {
 // Recursively create a directory, without failing if it already exists
 async function mkDir(dirPath: string) {
   try {
-    await new Promise((resolve, reject) => {
+    await new Promise<void>((resolve, reject) => {
       fs.mkdir(dirPath, { recursive: true }, (err) => {
         if (err) reject(err)
         resolve()

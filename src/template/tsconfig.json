@@ -6,13 +6,14 @@
     "moduleResolution": "node",
     // We target a minimum Node version of 14: https://stackoverflow.com/a/59787575
     "target": "es2020",
-    "outDir": "build",
-    "rootDir": "src",
-    "strict": true,
+    "strict": false,
     "esModuleInterop": true,
     "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    "noEmit": true,
+    "skipLibCheck": true
   },
   "include": [
-    "src/**/*"
+    "src"
   ],
 }

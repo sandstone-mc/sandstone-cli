@@ -7,16 +7,7 @@ import inquirer from 'inquirer'
 import path from 'path'
 import util from 'util'
 import templatePackage from '../package.template.json'
-import { getFlagOrPrompt, getWorldsList } from '../utils'
-
-function hasYarn(): boolean {
-  try {
-    execSync('yarn --version')
-    return true
-  } catch (error) {
-    return false
-  }
-}
+import { getFlagOrPrompt, getWorldsList, hasYarn } from '../utils'
 
 function toJson(obj: any, pretty: boolean = false): string {
   return util.inspect(obj, {
@@ -145,14 +136,14 @@ export default class Create extends Command {
 
       /** Install dependencies */
       execSync('yarn add sandstone', { cwd: projectPath })
-      execSync('yarn add --dev typescript @types/node sandstone-cli', { cwd: projectPath })
+      execSync('yarn add --dev typescript @types/node sandstone-cli tslib', { cwd: projectPath })
     } else {
       /** Init the package, skipping the interactive prompt */
       execSync('npm init --yes', { cwd: projectPath })
 
       /** Install dependencies */
       execSync('npm install sandstone', { cwd: projectPath })
-      execSync('npm install --save-dev typescript @types/node sandstone-cli', { cwd: projectPath })
+      execSync('npm install --save-dev typescript @types/node sandstone-cli tslib', { cwd: projectPath })
     }
 
     // Merge with the package.json template

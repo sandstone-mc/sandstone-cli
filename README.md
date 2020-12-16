@@ -31,6 +31,7 @@ USAGE
 * [`sand build`](#sand-build)
 * [`sand create PROJECT-NAME`](#sand-create-project-name)
 * [`sand help [COMMAND]`](#sand-help-command)
+* [`sand update`](#sand-update)
 * [`sand watch`](#sand-watch)
 
 ## `sand build`
@@ -111,6 +112,29 @@ OPTIONS
 ```
 
 _See code: [@oclif/plugin-help](https://github.com/oclif/plugin-help/blob/v3.2.0/src/commands/help.ts)_
+
+## `sand update`
+
+```
+USAGE
+  $ sand update
+
+OPTIONS
+  -h, --help   show CLI help
+  --cli        Update the Sandstone CLI without asking.
+  --npm        Use npm to install the updates.
+  --sandstone  Update the current Sandstone version without asking.
+  --skip       Skip all interactive prompts and refuse them.
+  --yarn       Use yarn to install the updates.
+
+EXAMPLES
+  $ sand update
+  $ sand update --cli
+  $ sand update --sandstone
+  $ sand update --cli --sandstone --skip
+```
+
+_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.1.5/src/commands/update.ts)_
 
 ## `sand watch`
 

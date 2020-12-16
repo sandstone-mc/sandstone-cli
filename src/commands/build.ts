@@ -19,7 +19,9 @@ export default class Build extends Command {
     const { args, flags } = this.parse(Build)
 
     // Ensure ts-node is ON
-    require('ts-node/register')
+    require('ts-node').register({
+      transpileOnly: true,
+    })
 
     buildProject(flags)
   }

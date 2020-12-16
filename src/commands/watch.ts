@@ -2,6 +2,7 @@ import { Command, flags } from '@oclif/command'
 import chokidar from 'chokidar'
 import debounce from 'lodash.debounce'
 import { buildProject } from '../buildProject'
+import path from 'path'
 
 export default class Watch extends Command {
   static description = 'Build the datapack, and rebuild it on file change. ⛏'
@@ -32,7 +33,9 @@ export default class Watch extends Command {
     const { args, flags } = this.parse(Watch)
     
     // Register ts-node
-    require('ts-node/register')
+    require('ts-node').register({
+      transpileOnly: true,
+    })
 
     let alreadyBuilding: boolean = false
     let needRebuild: boolean = false

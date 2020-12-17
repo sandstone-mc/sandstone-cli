@@ -175,7 +175,7 @@ export default class Create extends Command {
 
 export default {
   name: ${toJson(datapackName)},
-  description: ${toJson(['A', {text: 'Sandstone', color: 'gold'}, ' data pack.'])},
+  description: ${toJson(['A ', {text: 'Sandstone', color: 'gold'}, ' data pack.'])},
   formatVersion: ${6},
   namespace: ${toJson(namespace)},
   saveOptions: ${toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)))}

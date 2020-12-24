@@ -1,10 +1,11 @@
 import { Command, flags } from '@oclif/command'
 import inquirer from 'inquirer'
-import ncu from 'npm-check-updates'
 import chalk from 'chalk'
 import { execSync } from 'child_process'
-import { hasYarn } from '../utils'
+import { getFileFolder, getProjectFolders, hasYarn } from '../utils'
 import fs from 'fs-extra'
+import path from 'path'
+import semver from 'semver'
 
 export default class Watch extends Command {
   static description = 'Update Sandstone & Sandstone-CLI.'
@@ -33,26 +34,39 @@ export default class Watch extends Command {
     // First, check if there are any update
     console.log('Checking for updates...')
 
-    const updates = await ncu.run({
-      filter: ['sandstone', 'sandstone-cli']
-    })
-    const sandstoneNewVersion = updates.sandstone
-    const cliNewVersion = updates['sandstone-cli']
+    const rootFolder = getFileFolder('package.json', '.')
+    if (!rootFolder) {
+      console.error(chalk`{red Failed to find {bold package.json} in ${path.resolve()}, or in any parent folder.}`)
+      return
+    }
 
-    if (sandstoneNewVersion) {
-      console.log(chalk`{rgb(229,193,0) Sandstone} has a new version available: {greenBright ${sandstoneNewVersion}}`)
+    const { dependencies } = JSON.parse(execSync('npm list --depth=0 --json', {
+      cwd: rootFolder
+    }).toString())
+
+    const sandstoneOldVersion = dependencies?.sandstone?.version
+    const cliOldVersion = dependencies?.['sandstone-cli']?.version
+
+    const sandstoneNewVersion = execSync('npm view sandstone version').toString().trim()
+    const cliNewVersion = execSync('npm view sandstone-cli version').toString().trim()
+
+    const sandstoneNeedsUpdate = sandstoneOldVersion && semver.lt(sandstoneOldVersion, sandstoneNewVersion)
+    const cliNeedsUpdate = cliOldVersion && semver.lt(cliOldVersion, cliNewVersion)
+
+    if (sandstoneNeedsUpdate) {
+      console.log(chalk`{rgb(229,193,0) Sandstone} has a new version available: {greenBright ${sandstoneNewVersion}} {gray (current: ${sandstoneOldVersion})}`)
     } else {
       console.log(chalk`{rgb(229,193,0) Sandstone} is already up to date!`)
     }
-    if (cliNewVersion) {
-      console.log(chalk`{rgb(229,193,0) Sandstone-CLI} has a new version available: {greenBright ${cliNewVersion}}`)
+    if (cliNeedsUpdate) {
+      console.log(chalk`{rgb(229,193,0) Sandstone-CLI} has a new version available: {greenBright ${cliNewVersion}} {gray (current: ${cliOldVersion})}`)
     } else {
       console.log(chalk`{rgb(229,193,0) Sandstone-CLI} is already up to date!`)
     }
 
 
-    let updateSandstone = flags.sandstone && sandstoneNewVersion
-    if (sandstoneNewVersion && !updateSandstone && !flags.skip) {
+    let updateSandstone = flags.sandstone && sandstoneNeedsUpdate
+    if (sandstoneNeedsUpdate && !updateSandstone && !flags.skip) {
       updateSandstone = (await inquirer.prompt({
         name: 'updateSandstone',
         message: chalk`Update Sandstone to {greenBright ${sandstoneNewVersion}}? >`,
@@ -60,8 +74,8 @@ export default class Watch extends Command {
       })).updateSandstone
     }
 
-    let updateCli = flags.cli && cliNewVersion
-    if (cliNewVersion && !updateCli && !flags.skip) {
+    let updateCli = flags.cli && cliNeedsUpdate
+    if (cliNeedsUpdate && !updateCli && !flags.skip) {
       updateCli = (await inquirer.prompt({
         name: 'updateCli',
         message: chalk`Update CLI to {greenBright ${cliNewVersion}}? >`,
@@ -93,15 +107,6 @@ export default class Watch extends Command {
     
     this.log(chalk`Installing ${installationMessage} using {cyan ${useYarn ? 'yarn' : 'npm'}}.`)
 
-    if (updateSandstone) {
-      if (useYarn) {
-        execSync('yarn add sandstone@latest')
-      }
-      else {
-        execSync('npm install sandstone@latest')
-      }
-    }
-
     if (updateCli) {
       if (useYarn) {
         execSync('yarn add --dev sandstone-cli@latest')
@@ -109,6 +114,22 @@ export default class Watch extends Command {
       else {
         execSync('npm install --save-dev sandstone-cli@latest')
       }
+
+      const { onSandstoneUpdate } = require('../onUpdate')
+      onSandstoneUpdate(sandstoneOldVersion, sandstoneNewVersion)
     }
+
+    if (updateSandstone) {
+      if (useYarn) {
+        execSync('yarn add sandstone@latest')
+      }
+      else {
+        execSync('npm install sandstone@latest')
+      }
+
+      const { onCliUpdate } = require('../onUpdate')
+      onCliUpdate(cliOldVersion, cliNewVersion)
+    }
+
   }
 }

@@ -19,7 +19,7 @@ $ npm install -g sandstone-cli
 $ sand COMMAND
 running command...
 $ sand (-v|--version|version)
-sandstone-cli/0.1.5 win32-x64 node-v14.15.0
+sandstone-cli/0.2.0 win32-x64 node-v14.15.0
 $ sand --help [COMMAND]
 USAGE
   $ sand COMMAND
@@ -28,17 +28,23 @@ USAGE
 <!-- usagestop -->
 # Commands
 <!-- commands -->
-* [`sand build`](#sand-build)
+* [`sand build PATH CONFIG-PATH`](#sand-build-path-config-path)
 * [`sand create PROJECT-NAME`](#sand-create-project-name)
 * [`sand help [COMMAND]`](#sand-help-command)
 * [`sand update`](#sand-update)
-* [`sand watch`](#sand-watch)
+* [`sand watch PATH CONFIG-PATH`](#sand-watch-path-config-path)
 
-## `sand build`
+## `sand build PATH CONFIG-PATH`
+
+Build the datapack. ⛏
 
 ```
 USAGE
-  $ sand build
+  $ sand build PATH CONFIG-PATH
+
+ARGUMENTS
+  PATH         [default: ./src] Path of the folder containing source files.
+  CONFIG-PATH  [default: .] Path of the sandstone.config.ts folder.
 
 OPTIONS
   -d, --dry                      Do not save the datapack. Mostly useful with `verbose`.
@@ -46,6 +52,7 @@ OPTIONS
   -v, --verbose                  Log all resulting resources: functions, advancements...
   --description=description      Description of the data pack. Override the value specified in the configuration file.
   --formatVersion=formatVersion  Pack format version. Override the value specified in the configuration file.
+  --fullTrace                    Show the full stack trace on errors.
   --minecraftPath=minecraftPath  Path of the .minecraft folder. Override the value specified in the configuration file.
   --name=name                    Name of the data pack. Override the value specified in the configuration file.
   --namespace=namespace          The default namespace. Override the value specified in the configuration file.
@@ -65,9 +72,11 @@ EXAMPLES
   $ sand build --verbose --dry
 ```
 
-_See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.1.5/src/commands/build.ts)_
+_See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.0/src/commands/build.ts)_
 
 ## `sand create PROJECT-NAME`
+
+Create a new Sandstone project.
 
 ```
 USAGE
@@ -96,9 +105,11 @@ EXAMPLE
   $ sand create my-datapack
 ```
 
-_See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.1.5/src/commands/create.ts)_
+_See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.0/src/commands/create.ts)_
 
 ## `sand help [COMMAND]`
+
+display help for sand
 
 ```
 USAGE
@@ -111,9 +122,11 @@ OPTIONS
   --all  see all commands in CLI
 ```
 
-_See code: [@oclif/plugin-help](https://github.com/oclif/plugin-help/blob/v3.2.0/src/commands/help.ts)_
+_See code: [@oclif/plugin-help](https://github.com/oclif/plugin-help/blob/v3.2.1/src/commands/help.ts)_
 
 ## `sand update`
+
+Update Sandstone & Sandstone-CLI.
 
 ```
 USAGE
@@ -134,13 +147,19 @@ EXAMPLES
   $ sand update --cli --sandstone --skip
 ```
 
-_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.1.5/src/commands/update.ts)_
+_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.0/src/commands/update.ts)_
 
-## `sand watch`
+## `sand watch PATH CONFIG-PATH`
+
+Build the datapack, and rebuild it on file change. ⛏
 
 ```
 USAGE
-  $ sand watch
+  $ sand watch PATH CONFIG-PATH
+
+ARGUMENTS
+  PATH         [default: ./src] Path of the folder containing source files.
+  CONFIG-PATH  [default: .] Path of the sandstone.config.ts folder.
 
 OPTIONS
   -d, --dry                      Do not save the datapack. Mostly useful with `verbose`.
@@ -148,6 +167,7 @@ OPTIONS
   -v, --verbose                  Log all resulting resources: functions, advancements...
   --description=description      Description of the data pack. Override the value specified in the configuration file.
   --formatVersion=formatVersion  Pack format version. Override the value specified in the configuration file.
+  --fullTrace                    Show the full stack trace on errors.
   --minecraftPath=minecraftPath  Path of the .minecraft folder. Override the value specified in the configuration file.
   --name=name                    Name of the data pack. Override the value specified in the configuration file.
   --namespace=namespace          The default namespace. Override the value specified in the configuration file.
@@ -167,5 +187,5 @@ EXAMPLES
   $ sand watch --verbose --dry
 ```
 
-_See code: [src/commands/watch.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.1.5/src/commands/watch.ts)_
+_See code: [src/commands/watch.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.0/src/commands/watch.ts)_
 <!-- commandsstop -->

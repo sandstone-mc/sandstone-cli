@@ -3,9 +3,12 @@ import crypto from 'crypto'
 import { promisify } from 'util'
 import { exit } from 'process'
 import fs from 'fs-extra'
+import chalk from 'chalk'
+import { ProjectFolders } from './utils'
+import PrettyError from 'pretty-error'
 
-const sandstoneLocation = path.resolve('./node_modules/sandstone')
-
+const pe = new PrettyError()
+  
 export type BuildOptions = { 
   world?: string
   root?: boolean
@@ -20,6 +23,8 @@ export type BuildOptions = {
 
   dry?: boolean
   verbose?: boolean
+
+  fullTrace?: boolean
 }
 
 type SaveFileObject = {
@@ -36,11 +41,13 @@ type SaveFileObject = {
  * key being the file path & value being the hash.
  * 
  * The folder array is just here to delete folders that get empty after a new compilation.
+ * 
+ * There is 1 cache for each "project folder".
  */
-type SandstoneCache = {
-  rootFolder?: string
+type SandstoneCache = Record<string, {
+  resultFolder?: string
   files: Record<string, string>
-}
+}>
 
 /** Recursively walk a directory. */
 async function* walk(dir: string): AsyncGenerator<string> {
@@ -103,21 +110,25 @@ async function removeEmptyDirectories(directory: string) {
     }
 }
 
-const sandstoneCacheFolder = '.sandstone'
-const sandstoneCachePath = path.join(sandstoneCacheFolder, 'cache.json')
+const sandstoneMiscFolderName = '.sandstone'
+const sandstoneCacheFileName = 'cache.json'
 
- export async function buildProject(options: BuildOptions) {
-  if (options.namespace) {
-    process.env.NAMESPACE = options.namespace
-  }
+/**
+ * Build the project.
+ * 
+ * @param options The options to build the project with.
+ * 
+ * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
+ */
+export async function buildProject(options: BuildOptions, {absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders) {
+  const sandstoneLocation = path.join(rootFolder, 'node_modules/sandstone/')
 
   // First, read sandstone.config.ts to get all properties
-  const sandstoneConfig = require(path.join(sandstoneLocation, '_internals/config')).getConfigFile()
+  const sandstoneConfig = require(path.join(sandstoneConfigFolder, 'sandstone.config.ts')).default
 
   const { saveOptions } = sandstoneConfig
 
-  const { savePack } = require(path.join(sandstoneLocation, 'core'))
-
+  /// OPTIONS ///
   // Check if the player overidded the save options
   const overrideSaveOptions = options.world || options.root || options.path
   const world = overrideSaveOptions ? options.world : saveOptions.world
@@ -130,9 +141,28 @@ const sandstoneCachePath = path.join(sandstoneCacheFolder, 'cache.json')
     throw new Error(`Expected only 'world', 'root' or 'path'. Got at least two of them: world=${world}, root=${root}, path=${customPath}`)
   }
 
+  // Important /!\: The below if statements, which set environment variables, must run before importing any Sandstone file.
+
+  // Set the pack ID environment variable
+  if (sandstoneConfig.packUid) {
+    process.env.PACK_UID = sandstoneConfig.packUid
+  }
+  
+  // Set the namespace
+  if (sandstoneConfig.namespace || options.namespace) {
+    process.env.NAMESPACE = sandstoneConfig.namespace || options.namespace
+  }
+
+  // Configure error display
+  if (!options.fullTrace) {
+    pe.skipPackage('sandstone', 'sandstone-cli')
+    pe.skipNodeFiles()
+  }
+
+  /// IMPORTING USER CODE ///
   // The configuration is ready. Let's import all .ts & .js files under ./src.
   let error = false
-  for await (const filePath of walk('./src')) {
+  for await (const filePath of walk(absProjectFolder)) {
     // Skip files not ending with .ts/.js
     if (!filePath.match(/\.(ts|js)$/)) { continue }
 
@@ -141,36 +171,48 @@ const sandstoneCachePath = path.join(sandstoneCacheFolder, 'cache.json')
       require(path.resolve(filePath))
     }
     catch(e) {
-      console.error(e)
+      logError(e)
       error = true
     }
   }
-
+  
   if (error) {
     exit(-1)
   }
 
+  /// SAVING RESULTS ///
   /* Let's load the previous cache */
 
   // Create .sandstone if it doesn't exists
-  mkDir(sandstoneCacheFolder)
+  const sandstoneMiscFolder = path.join(rootFolder, sandstoneMiscFolderName)
+  const sandstoneCacheFile = path.join(sandstoneMiscFolder, sandstoneCacheFileName)
+  mkDir(sandstoneMiscFolder)
 
   // Try loading the cache
-  let cache: SandstoneCache
-  const newCache: SandstoneCache = { files: {} }
+  let cache: SandstoneCache = {}
+  const newCache: SandstoneCache[''] = {
+    files: {}
+  }
 
   try {
     // Load the cache
-    cache = JSON.parse((await fs.readFile(sandstoneCachePath)).toString())
+    cache = JSON.parse((await fs.readFile(sandstoneCacheFile)).toString())
   }
   catch(e) {
     // Either the file does not exists, or the cache isn't a proper JSON.
     // In that case, reset it.
-    cache = { files: {} }
-    await fs.writeFile(sandstoneCachePath, JSON.stringify(cache))
+    await fs.writeFile(sandstoneCacheFile, JSON.stringify(cache))
+  }
+
+  if (cache[absProjectFolder] === undefined) {
+    cache[absProjectFolder] = {
+      files: {},
+    }
   }
 
   // Save the pack
+  const { savePack } = require(path.join(sandstoneLocation, 'core'))
+
   await savePack(dataPackName, {
     // Save location
     world: world,
@@ -186,15 +228,18 @@ const sandstoneCachePath = path.join(sandstoneCacheFolder, 'cache.json')
     dryRun: options.dry,
     verbose: options.verbose,
 
-    customFileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content, rootPath }: SaveFileObject) => {
-      const realPath = path.join(rootPath, relativePath)
-      const hashValue = hash(content)
+    customFileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content, rootPath: resultPath }: SaveFileObject) => {
+      const realPath = path.join(resultPath, relativePath)
 
-      // Add to new cache
-      newCache.files[realPath] = hashValue
-      newCache.rootFolder = rootPath
+      // We hash the real path alongside the content. 
+      // Therefore, if the real path change (for example, the user changed the resulting directory), the file will be recreated.
+      const hashValue = hash(content + realPath)
 
-      if (cache.files?.[realPath] === hashValue) {
+      // Add to new cache. We use the relative path as key to make the cache lighter.
+      newCache.files[relativePath] = hashValue
+      newCache.resultFolder = resultPath
+
+      if (cache[absProjectFolder].files?.[realPath] === hashValue) {
         // Already in cache - skip
         return
       }
@@ -206,7 +251,7 @@ const sandstoneCachePath = path.join(sandstoneCacheFolder, 'cache.json')
   })
 
   // Delete old files that aren't cached anymore
-  const oldFilesNames = new Set<string>(Object.keys(cache.files))
+  const oldFilesNames = new Set<string>(Object.keys(cache[absProjectFolder].files))
   Object.keys(newCache.files).forEach(name => oldFilesNames.delete(name))
 
   await Promise.allSettled(
@@ -214,9 +259,10 @@ const sandstoneCachePath = path.join(sandstoneCacheFolder, 'cache.json')
   )
 
   // Delete all empty folders of previous directory
-  if (cache.rootFolder !== undefined) {
+  const previousResultFolder = cache?.[absProjectFolder]?.resultFolder
+  if (previousResultFolder !== undefined) {
     try {
-      await removeEmptyDirectories(cache.rootFolder)
+      await removeEmptyDirectories(previousResultFolder)
     }
     catch (e) {
       // Previous directory was deleted by the user himself
@@ -224,5 +270,15 @@ const sandstoneCachePath = path.join(sandstoneCacheFolder, 'cache.json')
   }
 
   // Override old cache
-  await fs.writeFile(sandstoneCachePath, JSON.stringify(newCache, null, 2))
+  cache[absProjectFolder] = newCache
+  await fs.writeFile(sandstoneCacheFile, JSON.stringify(cache, null, 2))
 }
+
+function logError(err?: Error) {
+  if (err) {
+    console.error(pe.render(err))
+  }
+}
+
+process.on('unhandledRejection', logError)
+process.on('uncaughtException', logError)

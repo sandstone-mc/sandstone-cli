@@ -1,9 +1,10 @@
 import { Command } from '@oclif/command'
 import { buildProject } from '../buildProject'
+import { getProjectFolders } from '../utils'
 import Watch from './watch'
 
 export default class Build extends Command {
-  static description = 'Build the datapack, and rebuild it on file change. ⛏'
+  static description = 'Build the datapack. ⛏'
 
   static examples = [
     '$ sand build',
@@ -23,6 +24,6 @@ export default class Build extends Command {
       transpileOnly: true,
     })
 
-    buildProject(flags)
+    buildProject(flags, getProjectFolders(args.path))
   }
 }

@@ -3,6 +3,8 @@ import chokidar from 'chokidar'
 import debounce from 'lodash.debounce'
 import { buildProject } from '../buildProject'
 import path from 'path'
+import { getProjectFolders } from '../utils'
+import PrettyError from 'pretty-error'
 
 export default class Watch extends Command {
   static description = 'Build the datapack, and rebuild it on file change. ⛏'
@@ -25,9 +27,20 @@ export default class Watch extends Command {
     name: flags.string({description: 'Name of the data pack. Override the value specified in the configuration file.'}),
     description: flags.string({description: 'Description of the data pack. Override the value specified in the configuration file.'}),
     formatVersion: flags.integer({name: 'format', description: 'Pack format version. Override the value specified in the configuration file.'}),
+    fullTrace: flags.boolean({name: 'full-trace', description: 'Show the full stack trace on errors.'}),
   }
 
-  static args = []
+  static args = [{
+    name: 'path',
+    description: 'Path of the folder containing source files.',
+    required: true,
+    default: './src',
+  }, {
+    name: 'config-path',
+    description: 'Path of the sandstone.config.ts folder.',
+    required: true,
+    default: '.',
+  }]
 
   async run() {
     const { args, flags } = this.parse(Watch)
@@ -40,6 +53,8 @@ export default class Watch extends Command {
     let alreadyBuilding: boolean = false
     let needRebuild: boolean = false
 
+    const folders = getProjectFolders(args.path)
+
     async function onFileChange() {
       if (alreadyBuilding) {
         // If the pack is already being built & another change was made,
@@ -49,11 +64,12 @@ export default class Watch extends Command {
       }
 
       alreadyBuilding = true
-      await buildProject(flags)
-      alreadyBuilding = false
-
+      
       // Delete the entire cache to prevent artifacts from previous builds
       Object.keys(require.cache).forEach(key => delete require.cache[key])
+
+      await buildProject(flags, folders)
+      alreadyBuilding = false
       
       if (needRebuild) {
         needRebuild = false
@@ -62,10 +78,10 @@ export default class Watch extends Command {
     }
 
     chokidar.watch([
-      'src/**/*',
-      'sandstone.config.ts',
-      'package.json',
-      'tsconfig.json',
+      path.join(folders.absProjectFolder, '/**/*'),
+      path.join(folders.sandstoneConfigFolder, 'sandstone.config.ts'),
+      path.join(folders.rootFolder, 'package.json'),
+      path.join(folders.rootFolder, 'tsconfig.json'),
     ]).on('all', debounce(onFileChange, 200))
   }
 }

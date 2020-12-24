@@ -136,14 +136,14 @@ export default class Create extends Command {
 
       /** Install dependencies */
       execSync('yarn add sandstone', { cwd: projectPath })
-      execSync('yarn add --dev typescript @types/node sandstone-cli tslib', { cwd: projectPath })
+      execSync('yarn add --dev typescript @types/node sandstone-cli', { cwd: projectPath })
     } else {
       /** Init the package, skipping the interactive prompt */
       execSync('npm init --yes', { cwd: projectPath })
 
       /** Install dependencies */
       execSync('npm install sandstone', { cwd: projectPath })
-      execSync('npm install --save-dev typescript @types/node sandstone-cli tslib', { cwd: projectPath })
+      execSync('npm install --save-dev typescript @types/node sandstone-cli', { cwd: projectPath })
     }
 
     // Merge with the package.json template

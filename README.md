@@ -19,7 +19,7 @@ $ npm install -g sandstone-cli
 $ sand COMMAND
 running command...
 $ sand (-v|--version|version)
-sandstone-cli/0.2.0 win32-x64 node-v14.15.0
+sandstone-cli/0.2.0 win32-x64 node-v14.15.1
 $ sand --help [COMMAND]
 USAGE
   $ sand COMMAND
@@ -35,8 +35,6 @@ USAGE
 * [`sand watch PATH CONFIG-PATH`](#sand-watch-path-config-path)
 
 ## `sand build PATH CONFIG-PATH`
-
-Build the datapack. ⛏
 
 ```
 USAGE
@@ -76,8 +74,6 @@ _See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob
 
 ## `sand create PROJECT-NAME`
 
-Create a new Sandstone project.
-
 ```
 USAGE
   $ sand create PROJECT-NAME
@@ -109,8 +105,6 @@ _See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blo
 
 ## `sand help [COMMAND]`
 
-display help for sand
-
 ```
 USAGE
   $ sand help [COMMAND]
@@ -122,11 +116,9 @@ OPTIONS
   --all  see all commands in CLI
 ```
 
-_See code: [@oclif/plugin-help](https://github.com/oclif/plugin-help/blob/v3.2.1/src/commands/help.ts)_
+_See code: [@oclif/plugin-help](https://github.com/oclif/plugin-help/blob/v3.2.0/src/commands/help.ts)_
 
 ## `sand update`
-
-Update Sandstone & Sandstone-CLI.
 
 ```
 USAGE
@@ -150,8 +142,6 @@ EXAMPLES
 _See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.0/src/commands/update.ts)_
 
 ## `sand watch PATH CONFIG-PATH`
-
-Build the datapack, and rebuild it on file change. ⛏
 
 ```
 USAGE

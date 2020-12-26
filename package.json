@@ -1,7 +1,7 @@
 {
   "name": "sandstone-cli",
   "description": "The CLI for Sandstone - the data pack creation library.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": "Florian ERNST @TheMrZZ",
   "bin": {
     "sand": "./bin/run"
@@ -46,7 +46,13 @@
   ],
   "homepage": "https://github.com/TheMrZZ/sandstone-cli",
   "keywords": [
-    "oclif"
+    "sandstone",
+    "cli",
+    "command",
+    "line",
+    "interface",
+    "datapack",
+    "minecraft"
   ],
   "license": "MIT",
   "main": "lib/index.js",

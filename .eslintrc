@@ -32,7 +32,7 @@
       "error",
       {
         "multiline": true,
-        "consistent": true,
+        "consistent": true
       }
     ],
     "object-property-newline": [

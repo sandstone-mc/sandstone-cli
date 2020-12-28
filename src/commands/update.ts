@@ -40,12 +40,20 @@ export default class Watch extends Command {
       return
     }
 
-    const { dependencies } = JSON.parse(execSync('npm list --depth=0 --json', {
-      cwd: rootFolder
-    }).toString())
+    let npmListReturn
+    try {
+      npmListReturn = execSync('npm list --depth 0 --json --silent', {
+        cwd: rootFolder,
+      }).toString()
+    }
+    catch ({ stdout }) {
+      npmListReturn = stdout.toString()
+    }
 
-    const sandstoneOldVersion = dependencies?.sandstone?.version
-    const cliOldVersion = dependencies?.['sandstone-cli']?.version
+    const { dependencies } = JSON.parse(npmListReturn)
+
+    const sandstoneOldVersion = dependencies?.sandstone?.version ?? dependencies?.sandstone?.required?.version
+    const cliOldVersion = dependencies?.['sandstone-cli']?.version ?? dependencies?.['sandstone-cli']?.required?.version
 
     const sandstoneNewVersion = execSync('npm view sandstone version').toString().trim()
     const cliNewVersion = execSync('npm view sandstone-cli version').toString().trim()

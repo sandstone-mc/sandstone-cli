@@ -126,7 +126,7 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
   // First, read sandstone.config.ts to get all properties
   const sandstoneConfig = require(path.join(sandstoneConfigFolder, 'sandstone.config.ts')).default
 
-  const { saveOptions } = sandstoneConfig
+  const { saveOptions, scripts } = sandstoneConfig
 
   /// OPTIONS ///
   // Check if the player overidded the save options
@@ -161,6 +161,10 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
 
   /// IMPORTING USER CODE ///
   // The configuration is ready. Let's import all .ts & .js files under ./src.
+
+  // First, let's run the beforeAll script
+  await scripts?.beforeAll?.()
+
   let error = false
   for await (const filePath of walk(absProjectFolder)) {
     // Skip files not ending with .ts/.js
@@ -177,7 +181,7 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
   }
   
   if (error) {
-    exit(-1)
+    return
   }
 
   /// SAVING RESULTS ///
@@ -212,6 +216,9 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
 
   // Save the pack
   const { savePack } = require(path.join(sandstoneLocation, 'core'))
+
+  // Run the beforeSave script
+  await scripts?.beforeSave?.()
 
   await savePack(dataPackName, {
     // Save location
@@ -272,6 +279,10 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
   // Override old cache
   cache[absProjectFolder] = newCache
   await fs.writeFile(sandstoneCacheFile, JSON.stringify(cache, null, 2))
+
+  
+  // Run the afterAll script
+  await scripts?.afterAll?.()
 }
 
 function logError(err?: Error) {

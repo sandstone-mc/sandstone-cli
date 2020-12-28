@@ -6,9 +6,9 @@
     // We target a minimum Node version of 14: https://stackoverflow.com/a/59787575
     "target": "es2020",
     "strict": false,
-    "esModuleInterop": true,
+    "esModuleInterop": false,
     "resolveJsonModule": true,
-    "allowSyntheticDefaultImports": true,
+    "allowSyntheticDefaultImports": false,
     "noEmit": true,
     "skipLibCheck": true,
     "outDir": "build"

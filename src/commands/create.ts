@@ -162,7 +162,7 @@ export default class Create extends Command {
 
     // Write the sandstone.json file
     fs.writeFileSync(path.join(projectPath, 'sandstone.config.ts'), 
-    `import { SandstoneConfig } from 'sandstone/core'
+    `import type { SandstoneConfig } from 'sandstone/core'
 
 export default {
   name: ${toJson(datapackName)},

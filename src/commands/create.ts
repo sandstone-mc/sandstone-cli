@@ -8,6 +8,7 @@ import path from 'path'
 import util from 'util'
 import templatePackage from '../package.template.json'
 import { getFlagOrPrompt, getWorldsList, hasYarn } from '../utils'
+import { nanoid } from 'nanoid'
 
 function toJson(obj: any, pretty: boolean = false): string {
   return util.inspect(obj, {
@@ -169,6 +170,7 @@ export default {
   description: ${toJson(['A', {text: 'Sandstone', color: 'gold'}, ' data pack.'])},
   formatVersion: ${6},
   namespace: ${toJson(namespace)},
+  packUid: ${toJson(nanoid(8))},
   saveOptions: ${toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)))}
 } as SandstoneConfig
 `)

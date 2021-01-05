@@ -19,7 +19,7 @@ $ npm install -g sandstone-cli
 $ sand COMMAND
 running command...
 $ sand (-v|--version|version)
-sandstone-cli/0.2.0 win32-x64 node-v14.15.0
+sandstone-cli/0.2.4 win32-x64 node-v14.15.1
 $ sand --help [COMMAND]
 USAGE
   $ sand COMMAND
@@ -35,8 +35,6 @@ USAGE
 * [`sand watch PATH CONFIG-PATH`](#sand-watch-path-config-path)
 
 ## `sand build PATH CONFIG-PATH`
-
-Build the datapack. ⛏
 
 ```
 USAGE
@@ -72,11 +70,9 @@ EXAMPLES
   $ sand build --verbose --dry
 ```
 
-_See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.0/src/commands/build.ts)_
+_See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.4/src/commands/build.ts)_
 
 ## `sand create PROJECT-NAME`
-
-Create a new Sandstone project.
 
 ```
 USAGE
@@ -105,11 +101,9 @@ EXAMPLE
   $ sand create my-datapack
 ```
 
-_See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.0/src/commands/create.ts)_
+_See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.4/src/commands/create.ts)_
 
 ## `sand help [COMMAND]`
-
-display help for sand
 
 ```
 USAGE
@@ -122,11 +116,9 @@ OPTIONS
   --all  see all commands in CLI
 ```
 
-_See code: [@oclif/plugin-help](https://github.com/oclif/plugin-help/blob/v3.2.1/src/commands/help.ts)_
+_See code: [@oclif/plugin-help](https://github.com/oclif/plugin-help/blob/v3.2.0/src/commands/help.ts)_
 
 ## `sand update`
-
-Update Sandstone & Sandstone-CLI.
 
 ```
 USAGE
@@ -147,11 +139,9 @@ EXAMPLES
   $ sand update --cli --sandstone --skip
 ```
 
-_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.0/src/commands/update.ts)_
+_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.4/src/commands/update.ts)_
 
 ## `sand watch PATH CONFIG-PATH`
-
-Build the datapack, and rebuild it on file change. ⛏
 
 ```
 USAGE
@@ -187,5 +177,5 @@ EXAMPLES
   $ sand watch --verbose --dry
 ```
 
-_See code: [src/commands/watch.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.0/src/commands/watch.ts)_
+_See code: [src/commands/watch.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.2.4/src/commands/watch.ts)_
 <!-- commandsstop -->

@@ -1,6 +1,7 @@
 import { Command } from '@oclif/command'
 import { buildProject } from '../buildProject'
 import { getProjectFolders } from '../utils'
+import path from 'path'
 import Watch from './watch'
 
 export default class Build extends Command {
@@ -19,11 +20,13 @@ export default class Build extends Command {
   async run() {
     const { args, flags } = this.parse(Build)
 
-    // Ensure ts-node is ON
+    const folders = getProjectFolders(args.path)
+
+     // Register ts-node
     require('ts-node').register({
       transpileOnly: true,
+      project: path.join(folders.rootFolder, 'tsconfig.json'),
     })
-
-    buildProject(flags, getProjectFolders(args.path))
+    buildProject(flags, folders)
   }
 }

@@ -4,7 +4,6 @@ import debounce from 'lodash.debounce'
 import { buildProject } from '../buildProject'
 import path from 'path'
 import { getProjectFolders } from '../utils'
-import PrettyError from 'pretty-error'
 
 export default class Watch extends Command {
   static description = 'Build the datapack, and rebuild it on file change. ⛏'
@@ -45,11 +44,6 @@ export default class Watch extends Command {
   async run() {
     const { args, flags } = this.parse(Watch)
     
-    // Register ts-node
-    require('ts-node').register({
-      transpileOnly: true,
-    })
-
     let alreadyBuilding: boolean = false
     let needRebuild: boolean = false
 
@@ -76,6 +70,13 @@ export default class Watch extends Command {
         await onFileChange()
       }
     }
+
+    // Register ts-node
+    require('ts-node').register({
+      transpileOnly: true,
+      project: path.join(folders.rootFolder, 'tsconfig.json'),
+    })
+    
 
     chokidar.watch([
       path.join(folders.absProjectFolder, '/**/*'),

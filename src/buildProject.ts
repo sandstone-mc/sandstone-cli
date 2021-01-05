@@ -252,14 +252,16 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
 
   // Delete old files that aren't cached anymore
   const oldFilesNames = new Set<string>(Object.keys(cache[absProjectFolder].files))
+  
   Object.keys(newCache.files).forEach(name => oldFilesNames.delete(name))
 
+  const previousResultFolder = cache?.[absProjectFolder]?.resultFolder
+  
   await Promise.allSettled(
-    [...oldFilesNames.values()].map(name => promisify(fs.rm)(name))
+    [...oldFilesNames.values()].map(name => promisify(fs.rm)(path.join(previousResultFolder ?? '', name)))
   )
 
   // Delete all empty folders of previous directory
-  const previousResultFolder = cache?.[absProjectFolder]?.resultFolder
   if (previousResultFolder !== undefined) {
     try {
       await removeEmptyDirectories(previousResultFolder)

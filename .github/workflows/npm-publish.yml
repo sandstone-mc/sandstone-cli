@@ -24,8 +24,6 @@ jobs:
           key: ${{ runner.os }}-npm-modules
       - name: Install dependencies
         run: yarn
-      - name: Build release
-        run: yarn build
     
   publish-npm:
     needs: build

@@ -7,16 +7,8 @@ import inquirer from 'inquirer'
 import path from 'path'
 import util from 'util'
 import templatePackage from '../package.template.json'
-import { getFlagOrPrompt, getWorldsList } from '../utils'
-
-function hasYarn(): boolean {
-  try {
-    execSync('yarn --version')
-    return true
-  } catch (error) {
-    return false
-  }
-}
+import { getFlagOrPrompt, getWorldsList, hasYarn } from '../utils'
+import { nanoid } from 'nanoid'
 
 function toJson(obj: any, pretty: boolean = false): string {
   return util.inspect(obj, {
@@ -171,13 +163,14 @@ export default class Create extends Command {
 
     // Write the sandstone.json file
     fs.writeFileSync(path.join(projectPath, 'sandstone.config.ts'), 
-    `import { SandstoneConfig } from 'sandstone/core'
+    `import type { SandstoneConfig } from 'sandstone/core'
 
 export default {
   name: ${toJson(datapackName)},
-  description: ${toJson(['A', {text: 'Sandstone', color: 'gold'}, ' data pack.'])},
+  description: ${toJson(['A ', {text: 'Sandstone', color: 'gold'}, ' data pack.'])},
   formatVersion: ${6},
   namespace: ${toJson(namespace)},
+  packUid: ${toJson(nanoid(8))},
   saveOptions: ${toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)))}
 } as SandstoneConfig
 `)

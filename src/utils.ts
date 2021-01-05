@@ -2,6 +2,8 @@ import inquirer, { InputQuestion, Answers } from 'inquirer'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
+import { execSync } from 'child_process'
+import chalk from 'chalk'
 
 export async function getFlagOrPrompt<T extends Answers = Answers >(flags: Record<string, string | undefined | void | boolean>, name: string, inquirerProps: Omit<InputQuestion<T>, 'name'>): Promise<string> {
   const flagValue = flags[name]
@@ -10,6 +12,15 @@ export async function getFlagOrPrompt<T extends Answers = Answers >(flags: Recor
   }
 
   return (await inquirer.prompt({ name, ...inquirerProps }) as Record<string, string>)[name]
+}
+
+export function hasYarn(): boolean {
+  try {
+    execSync('yarn --version')
+    return true
+  } catch (error) {
+    return false
+  }
 }
 
 /**
@@ -71,4 +82,54 @@ export function getWorldPath(worldName: string, minecraftPath: string | undefine
   }
 
   return worldPath
+}
+
+/**
+ * Recursively search for a file.
+ * Starts in the current folder, and go to the parent, recursively.
+ * 
+ * @param filename the name of the file to resolve
+ * @param from the path to start at
+ * 
+ * @return The path on success, `null` if no the file is found in any parent.
+ */
+export function getFileFolder(filename: string, from = '.'): string | null {
+  let fileFolder = path.resolve(from)
+
+  while (!fs.existsSync(path.join(fileFolder, filename))) {
+    // Go up 1 folder
+    const newFileFolder = path.dirname(fileFolder)
+
+    if (newFileFolder == fileFolder) {
+      // If we arrived to the root folder, give up.
+      return null
+    }
+
+    fileFolder = newFileFolder
+  }
+
+  return fileFolder
+}
+
+export type ProjectFolders = { absProjectFolder: string, rootFolder: string, sandstoneConfigFolder: string }
+
+export function getProjectFolders(projectFolder: string): ProjectFolders {
+  const absProjectFolder = path.resolve(projectFolder)
+
+  /// GETTING ALL MANDATORY FILES ///
+  // Resolve the location of package.json, in order to get the node_modules folder.
+  const rootFolder = getFileFolder('package.json', projectFolder)
+  if (!rootFolder) {
+    throw new Error(chalk`{red Failed to find {bold package.json} in the "${absProjectFolder}" folder, or in any parent folder.}`)
+  }
+
+  // Resolve the location of sandstone.config.ts
+  const sandstoneConfigFolder = getFileFolder('sandstone.config.ts', projectFolder)
+  if (!sandstoneConfigFolder) {
+    throw new Error(chalk`{red Failed to find {bold sandstone.config.ts} in the "${absProjectFolder}" folder, or in any parent folder.}`)
+  }
+
+  return {
+    absProjectFolder, rootFolder, sandstoneConfigFolder
+  }
 }

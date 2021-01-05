@@ -1,9 +1,11 @@
 import { Command } from '@oclif/command'
 import { buildProject } from '../buildProject'
+import { getProjectFolders } from '../utils'
+import path from 'path'
 import Watch from './watch'
 
 export default class Build extends Command {
-  static description = 'Build the datapack, and rebuild it on file change. ⛏'
+  static description = 'Build the datapack. ⛏'
 
   static examples = [
     '$ sand build',
@@ -18,9 +20,13 @@ export default class Build extends Command {
   async run() {
     const { args, flags } = this.parse(Build)
 
-    // Ensure ts-node is ON
-    require('ts-node/register')
+    const folders = getProjectFolders(args.path)
 
-    buildProject(flags)
+     // Register ts-node
+    require('ts-node').register({
+      transpileOnly: true,
+      project: path.join(folders.rootFolder, 'tsconfig.json'),
+    })
+    buildProject(flags, folders)
   }
 }

@@ -228,6 +228,7 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
       asRootDatapack: root,
       customPath: customPath,
       minecraftPath: options.minecraftPath ?? sandstoneConfig.minecraftPath,
+      indentation: saveOptions.indentation,
 
       // Data pack mcmeta
       description: options.description ?? sandstoneConfig.description,

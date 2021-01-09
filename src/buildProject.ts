@@ -6,6 +6,7 @@ import fs from 'fs-extra'
 import chalk from 'chalk'
 import { ProjectFolders } from './utils'
 import PrettyError from 'pretty-error'
+import { resolveTripleslashReference } from 'typescript'
 
 const pe = new PrettyError()
   
@@ -220,42 +221,49 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
   // Run the beforeSave script
   await scripts?.beforeSave?.()
 
-  await savePack(dataPackName, {
-    // Save location
-    world: world,
-    asRootDatapack: root,
-    customPath: customPath,
-    minecraftPath: options.minecraftPath ?? sandstoneConfig.minecraftPath,
+  try {
+    await savePack(dataPackName, {
+      // Save location
+      world: world,
+      asRootDatapack: root,
+      customPath: customPath,
+      minecraftPath: options.minecraftPath ?? sandstoneConfig.minecraftPath,
+      indentation: saveOptions.indentation,
 
-    // Data pack mcmeta
-    description: options.description ?? sandstoneConfig.description,
-    formatVersion: options.formatVersion ?? saveOptions.formatVersion,
+      // Data pack mcmeta
+      description: options.description ?? sandstoneConfig.description,
+      formatVersion: options.formatVersion ?? saveOptions.formatVersion,
 
-    // Additional parameters
-    dryRun: options.dry,
-    verbose: options.verbose,
+      // Additional parameters
+      dryRun: options.dry,
+      verbose: options.verbose,
 
-    customFileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content, rootPath: resultPath }: SaveFileObject) => {
-      const realPath = path.join(resultPath, relativePath)
+      customFileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content, rootPath: resultPath }: SaveFileObject) => {
+        const realPath = path.join(resultPath, relativePath)
 
-      // We hash the real path alongside the content. 
-      // Therefore, if the real path change (for example, the user changed the resulting directory), the file will be recreated.
-      const hashValue = hash(content + realPath)
+        // We hash the real path alongside the content. 
+        // Therefore, if the real path change (for example, the user changed the resulting directory), the file will be recreated.
+        const hashValue = hash(content + realPath)
 
-      // Add to new cache. We use the relative path as key to make the cache lighter.
-      newCache.files[relativePath] = hashValue
-      newCache.resultFolder = resultPath
+        // Add to new cache. We use the relative path as key to make the cache lighter.
+        newCache.files[relativePath] = hashValue
+        newCache.resultFolder = resultPath
 
-      if (cache[absProjectFolder].files?.[realPath] === hashValue) {
-        // Already in cache - skip
-        return
-      }
+        if (cache[absProjectFolder].files?.[realPath] === hashValue) {
+          // Already in cache - skip
+          return
+        }
 
-      // Not in cache: write to disk
-      await mkDir(path.dirname(realPath))
-      return await fs.writeFile(realPath, content)
+        // Not in cache: write to disk
+        await mkDir(path.dirname(realPath))
+        return await fs.writeFile(realPath, content)
+      })
     })
-  })
+  }
+  catch (err) {
+    logError(err)
+    return
+  }
 
   // Delete old files that aren't cached anymore
   const oldFilesNames = new Set<string>(Object.keys(cache[absProjectFolder].files))

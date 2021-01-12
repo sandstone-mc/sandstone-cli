@@ -156,7 +156,6 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
 
   // Configure error display
   if (!options.fullTrace) {
-    pe.skipPackage('sandstone', 'sandstone-cli')
     pe.skipNodeFiles()
   }
 

@@ -66,7 +66,7 @@
     ],
     "warn-if-update-available": {
       "timeoutInDays": 7,
-      "message": "<%= chalk.rgb(229,193,0)(config.name) %> has a new update available: <%= chalk.greenBright(latest) %> (current version: <%= chalk.greenBright(config.version) %>).\nUpdate with <%= chalk.grayBright('npm run update') %> or <%= chalk.grayBright('yarn update') %>."
+      "message": "<%= chalk.rgb(229,193,0)(config.name) %> has a new update available: <%= chalk.greenBright(latest) %> (current version: <%= chalk.greenBright(config.version) %>).\nUpdate with <%= chalk.gray('npm run update') %> or <%= chalk.gray('yarn update') %>."
     }
   },
   "repository": "TheMrZZ/sandstone-cli",

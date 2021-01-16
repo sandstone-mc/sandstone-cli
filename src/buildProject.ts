@@ -135,7 +135,8 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
   const world = overrideSaveOptions ? options.world : saveOptions.world
   const root = overrideSaveOptions ? options.root : saveOptions.root
   const customPath = overrideSaveOptions ? options.path : saveOptions.path
-
+  
+  const minecraftPath = options.minecraftPath ?? sandstoneConfig.minecraftPath
   const dataPackName = options.name ?? sandstoneConfig.name
 
   if ([world, root, customPath].filter(x => x !== undefined).length > 1) {
@@ -150,8 +151,9 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
   }
   
   // Set the namespace
-  if (sandstoneConfig.namespace || options.namespace) {
-    process.env.NAMESPACE = sandstoneConfig.namespace || options.namespace
+  const namespace = sandstoneConfig.namespace || options.namespace
+  if (namespace) {
+    process.env.NAMESPACE = namespace
   }
 
   // Configure error display
@@ -160,11 +162,18 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
   }
 
   /// IMPORTING USER CODE ///
-  // The configuration is ready. Let's import all .ts & .js files under ./src.
+  // The configuration is ready.
+  
+  // Now, let's run the beforeAll script
+  const { getDestinationPath } = require(path.join(sandstoneLocation, '_internals', 'datapack', 'saveDatapack'))
+  const destinationPath = getDestinationPath(dataPackName, { world, asRootDatapack: root, customPath, minecraftPath })
 
-  // First, let's run the beforeAll script
-  await scripts?.beforeAll?.()
+  await scripts?.beforeAll?.({
+    dataPackName,
+    destination: destinationPath,
+  })
 
+  // Finally, let's import all .ts & .js files under ./src.
   let error = false
   for await (const filePath of walk(absProjectFolder)) {
     // Skip files not ending with .ts/.js
@@ -218,7 +227,10 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
   const { savePack } = require(path.join(sandstoneLocation, 'core'))
 
   // Run the beforeSave script
-  await scripts?.beforeSave?.()
+  await scripts?.beforeSave?.({
+    dataPackName,
+    destination: destinationPath,
+  })
 
   try {
     await savePack(dataPackName, {
@@ -226,7 +238,7 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
       world: world,
       asRootDatapack: root,
       customPath: customPath,
-      minecraftPath: options.minecraftPath ?? sandstoneConfig.minecraftPath,
+      minecraftPath: minecraftPath,
       indentation: saveOptions.indentation,
 
       // Data pack mcmeta
@@ -237,8 +249,8 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
       dryRun: options.dry,
       verbose: options.verbose,
 
-      customFileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content, rootPath: resultPath }: SaveFileObject) => {
-        const realPath = path.join(resultPath, relativePath)
+      customFileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content }: SaveFileObject) => {
+        const realPath = path.join(destinationPath, relativePath)
 
         // We hash the real path alongside the content. 
         // Therefore, if the real path change (for example, the user changed the resulting directory), the file will be recreated.
@@ -246,7 +258,7 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
 
         // Add to new cache. We use the relative path as key to make the cache lighter.
         newCache.files[relativePath] = hashValue
-        newCache.resultFolder = resultPath
+        newCache.resultFolder = destinationPath
 
         if (cache[absProjectFolder].files?.[realPath] === hashValue) {
           // Already in cache - skip
@@ -291,7 +303,10 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
 
   
   // Run the afterAll script
-  await scripts?.afterAll?.()
+  await scripts?.afterAll?.({
+    dataPackName,
+    destination: destinationPath,
+  })
 }
 
 function logError(err?: Error) {

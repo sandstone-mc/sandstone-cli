@@ -3,8 +3,11 @@
     "declaration": true,
     "module": "commonjs",
     "moduleResolution": "node",
-    // We target a minimum Node version of 14: https://stackoverflow.com/a/59787575
-    "target": "es2020",
+    // We target a minimum Node version of 12.9.0: https://stackoverflow.com/a/59787575
+    "target": "es2019",
+    "lib": [
+      "es2020"
+    ],
     "strict": false,
     "esModuleInterop": false,
     "resolveJsonModule": true,

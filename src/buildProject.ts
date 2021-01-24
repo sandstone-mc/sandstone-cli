@@ -115,13 +115,13 @@ const sandstoneMiscFolderName = '.sandstone'
 const sandstoneCacheFileName = 'cache.json'
 
 /**
- * Build the project.
+ * Build the project, but might throw errors.
  * 
  * @param options The options to build the project with.
  * 
  * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
  */
-export async function buildProject(options: BuildOptions, {absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders) {
+async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders) {
   const sandstoneLocation = path.join(rootFolder, 'node_modules/sandstone/')
 
   // First, read sandstone.config.ts to get all properties
@@ -232,49 +232,43 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
     destination: destinationPath,
   })
 
-  try {
-    await savePack(dataPackName, {
-      // Save location
-      world: world,
-      asRootDatapack: root,
-      customPath: customPath,
-      minecraftPath: minecraftPath,
-      indentation: saveOptions.indentation,
+  await savePack(dataPackName, {
+    // Save location
+    world: world,
+    asRootDatapack: root,
+    customPath: customPath,
+    minecraftPath: minecraftPath,
+    indentation: saveOptions.indentation,
 
-      // Data pack mcmeta
-      description: options.description ?? sandstoneConfig.description,
-      formatVersion: options.formatVersion ?? saveOptions.formatVersion,
+    // Data pack mcmeta
+    description: options.description ?? sandstoneConfig.description,
+    formatVersion: options.formatVersion ?? saveOptions.formatVersion,
 
-      // Additional parameters
-      dryRun: options.dry,
-      verbose: options.verbose,
+    // Additional parameters
+    dryRun: options.dry,
+    verbose: options.verbose,
 
-      customFileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content }: SaveFileObject) => {
-        const realPath = path.join(destinationPath, relativePath)
+    customFileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content }: SaveFileObject) => {
+      const realPath = path.join(destinationPath, relativePath)
 
-        // We hash the real path alongside the content. 
-        // Therefore, if the real path change (for example, the user changed the resulting directory), the file will be recreated.
-        const hashValue = hash(content + realPath)
+      // We hash the real path alongside the content. 
+      // Therefore, if the real path change (for example, the user changed the resulting directory), the file will be recreated.
+      const hashValue = hash(content + realPath)
 
-        // Add to new cache. We use the relative path as key to make the cache lighter.
-        newCache.files[relativePath] = hashValue
-        newCache.resultFolder = destinationPath
+      // Add to new cache. We use the relative path as key to make the cache lighter.
+      newCache.files[relativePath] = hashValue
+      newCache.resultFolder = destinationPath
 
-        if (cache[absProjectFolder].files?.[realPath] === hashValue) {
-          // Already in cache - skip
-          return
-        }
+      if (cache[absProjectFolder].files?.[realPath] === hashValue) {
+        // Already in cache - skip
+        return
+      }
 
-        // Not in cache: write to disk
-        await mkDir(path.dirname(realPath))
-        return await fs.writeFile(realPath, content)
-      })
+      // Not in cache: write to disk
+      await mkDir(path.dirname(realPath))
+      return await fs.writeFile(realPath, content)
     })
-  }
-  catch (err) {
-    logError(err)
-    return
-  }
+  })
 
   // Delete old files that aren't cached anymore
   const oldFilesNames = new Set<string>(Object.keys(cache[absProjectFolder].files))
@@ -307,6 +301,22 @@ export async function buildProject(options: BuildOptions, {absProjectFolder, roo
     dataPackName,
     destination: destinationPath,
   })
+}
+
+/**
+ * Build the project. Will log errors and never throw any.
+ * 
+ * @param options The options to build the project with.
+ * 
+ * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
+ */
+export async function buildProject(options: BuildOptions, folders: ProjectFolders) {
+  try {
+    await _buildProject(options, folders)
+  }
+  catch (err) {
+    logError(err)
+  }
 }
 
 function logError(err?: Error) {

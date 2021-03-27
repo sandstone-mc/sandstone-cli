@@ -165,7 +165,7 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
   // The configuration is ready.
   
   // Now, let's run the beforeAll script
-  const { getDestinationPath } = require(path.join(sandstoneLocation, '_internals', 'datapack', 'saveDatapack'))
+  const { getDestinationPath } = require(path.join(sandstoneLocation, 'datapack', 'saveDatapack'))
   const destinationPath = getDestinationPath(dataPackName, { world, asRootDatapack: root, customPath, minecraftPath })
 
   await scripts?.beforeAll?.({
@@ -224,7 +224,7 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
   }
 
   // Save the pack
-  const { savePack } = require(path.join(sandstoneLocation, 'core'))
+  const { savePack } = require(sandstoneLocation)
 
   // Run the beforeSave script
   await scripts?.beforeSave?.({

@@ -3,8 +3,7 @@
  * You can delete it!
  */
 
-import { tellraw } from 'sandstone/commands'
-import { MCFunction } from 'sandstone/core'
+import { MCFunction, tellraw } from 'sandstone'
 
 MCFunction('display_message', () => {
   tellraw('@a', [

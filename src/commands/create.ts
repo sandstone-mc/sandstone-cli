@@ -171,7 +171,10 @@ export default {
   formatVersion: ${6},
   namespace: ${toJson(namespace)},
   packUid: ${toJson(nanoid(8))},
-  saveOptions: ${toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)))}
+  saveOptions: ${toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)))},
+  onConflict: {
+    default: 'warn',
+  },
 } as SandstoneConfig
 `)
 

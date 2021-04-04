@@ -63,6 +63,8 @@ OPTIONS
   --root                         Save the data pack in the `.minecraft/datapacks` folder. Override the value specified
                                  in the configuration file.
 
+  --strictErrors                 Stop data pack compilation on type errors.
+
   --world=world                  The world to save the data pack in. Override the value specified in the configuration
                                  file.
 
@@ -177,6 +179,8 @@ OPTIONS
 
   --root                         Save the data pack in the `.minecraft/datapacks` folder. Override the value specified
                                  in the configuration file.
+
+  --strictErrors                 Stop data pack compilation on type errors.
 
   --world=world                  The world to save the data pack in. Override the value specified in the configuration
                                  file.

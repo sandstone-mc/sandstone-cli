@@ -76,7 +76,7 @@ export default class Watch extends Command {
     const tsConfigPath = path.join(folders.rootFolder, 'tsconfig.json')
 
     require('ts-node').register({
-      transpileOnly: flags.strictErrors,
+      transpileOnly: !flags.strictErrors,
       project: tsConfigPath,
     })
     

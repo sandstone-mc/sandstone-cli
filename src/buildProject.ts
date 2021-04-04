@@ -156,6 +156,22 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
     process.env.NAMESPACE = namespace
   }
 
+  // Set conflict strategies
+  function setStrategy(strategyName: string, value: string | undefined) {
+    if (value) {
+      process.env[`${strategyName.toUpperCase()}_CONFLICT_STRATEGY`] = value
+    }
+  }
+
+  const { onConflict } = sandstoneConfig
+  setStrategy('general', onConflict?.default)
+  setStrategy('advancement', onConflict?.advancement)
+  setStrategy('loot_table', onConflict?.lootTable)
+  setStrategy('mcfunction', onConflict?.mcFunction)
+  setStrategy('predicate', onConflict?.predicate)
+  setStrategy('recipe', onConflict?.recipe)
+  setStrategy('tag', onConflict?.tag)
+
   // Configure error display
   if (!options.fullTrace) {
     pe.skipNodeFiles()

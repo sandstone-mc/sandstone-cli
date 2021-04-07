@@ -49,6 +49,7 @@ ARGUMENTS
 OPTIONS
   -d, --dry                      Do not save the datapack. Mostly useful with `verbose`.
   -h, --help                     show CLI help
+  -p, --production               Runs in production mode. This sets process.env.SANDSTONE_ENV to "production".
   -v, --verbose                  Log all resulting resources: functions, advancements...
   --description=description      Description of the data pack. Override the value specified in the configuration file.
   --formatVersion=formatVersion  Pack format version. Override the value specified in the configuration file.
@@ -166,6 +167,7 @@ ARGUMENTS
 OPTIONS
   -d, --dry                      Do not save the datapack. Mostly useful with `verbose`.
   -h, --help                     show CLI help
+  -p, --production               Runs in production mode. This sets process.env.SANDSTONE_ENV to "production".
   -v, --verbose                  Log all resulting resources: functions, advancements...
   --description=description      Description of the data pack. Override the value specified in the configuration file.
   --formatVersion=formatVersion  Pack format version. Override the value specified in the configuration file.

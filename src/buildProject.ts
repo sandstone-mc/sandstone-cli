@@ -26,6 +26,7 @@ export type BuildOptions = {
   verbose?: boolean
 
   fullTrace?: boolean
+  production?: boolean
 }
 
 type SaveFileObject = {
@@ -146,6 +147,14 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
   // Important /!\: The below if statements, which set environment variables, must run before importing any Sandstone file.
 
   // Set the pack ID environment variable
+  
+  // Set production/development mode
+  if (options.production) {
+    process.env.SANDSTONE_ENV = 'production'
+  } else {
+    process.env.SANDSTONE_ENV = 'development'
+  }
+
   if (sandstoneConfig.packUid) {
     process.env.PACK_UID = sandstoneConfig.packUid
   }

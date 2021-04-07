@@ -27,7 +27,8 @@ export default class Watch extends Command {
     description: flags.string({description: 'Description of the data pack. Override the value specified in the configuration file.'}),
     formatVersion: flags.integer({name: 'format', description: 'Pack format version. Override the value specified in the configuration file.'}),
     fullTrace: flags.boolean({name: 'full-trace', description: 'Show the full stack trace on errors.'}),
-    strictErrors: flags.boolean({ description: 'Stop data pack compilation on type errors.', default: false  })
+    strictErrors: flags.boolean({ description: 'Stop data pack compilation on type errors.', default: false  }),
+    production: flags.boolean({ char: 'p', description: 'Runs in production mode. This sets process.env.SANDSTONE_ENV to "production".', default: false }),
   }
 
   static args = [{

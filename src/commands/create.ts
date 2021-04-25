@@ -126,7 +126,17 @@ export default class Create extends Command {
       })).useYarn === 'yarn'
     }
     
-    fs.mkdirSync(projectPath)
+    if (fs.existsSync(projectPath) && fs.statSync(projectPath).isDirectory()) {
+      const { overwrite }: { overwrite: string } = await inquirer.prompt({
+        name: 'overwrite',
+        message: 'The project directory you specified already exists, so some files might be changed/overwritten. Do you want to continue?',
+        type: 'list',
+        choices: ['Yes', 'No']
+      });
+      if (overwrite !== 'Yes') return;
+    } else { 
+      fs.mkdirSync(projectPath)
+    }
 
     // Create project & install dependencies
     this.log(chalk`Installing {rgb(229,193,0) sandstone}, {rgb(229,193,0) sandstone-cli} and {cyan typescript} using {cyan ${useYarn ? 'yarn' : 'npm'}}.`)

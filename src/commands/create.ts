@@ -127,13 +127,12 @@ export default class Create extends Command {
     }
     
     if (fs.existsSync(projectPath) && fs.statSync(projectPath).isDirectory()) {
-      const { overwrite }: { overwrite: string } = await inquirer.prompt({
+      const { overwrite }: { overwrite: boolean } = await inquirer.prompt({
         name: 'overwrite',
         message: 'The project directory you specified already exists, so some files might be changed/overwritten. Do you want to continue?',
-        type: 'list',
-        choices: ['Yes', 'No']
+        type: 'confirm'
       });
-      if (overwrite !== 'Yes') return;
+      if (!overwrite) return;
     } else { 
       fs.mkdirSync(projectPath)
     }

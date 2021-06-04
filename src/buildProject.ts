@@ -1,12 +1,10 @@
 import path from 'path'
 import crypto from 'crypto'
 import { promisify } from 'util'
-import { exit } from 'process'
 import fs from 'fs-extra'
-import chalk from 'chalk'
 import { ProjectFolders } from './utils'
 import PrettyError from 'pretty-error'
-import { resolveTripleslashReference } from 'typescript'
+import walk from 'klaw'
 
 const pe = new PrettyError()
   
@@ -50,15 +48,6 @@ type SandstoneCache = Record<string, {
   resultFolder?: string
   files: Record<string, string>
 }>
-
-/** Recursively walk a directory. */
-async function* walk(dir: string): AsyncGenerator<string> {
-    for await (const d of await fs.opendir(dir)) {
-        const entry = path.join(dir, d.name);
-        if (d.isDirectory()) yield* walk(entry);
-        else if (d.isFile()) yield entry;
-    }
-}
 
 // Return the hash of a string
 function hash(stringToHash: string): string {
@@ -200,13 +189,13 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
 
   // Finally, let's import all .ts & .js files under ./src.
   let error = false
-  for await (const filePath of walk(absProjectFolder)) {
+  for await (const file of walk(absProjectFolder)) {
     // Skip files not ending with .ts/.js
-    if (!filePath.match(/\.(ts|js)$/)) { continue }
+    if (!file.path.match(/\.(ts|js)$/)) { continue }
 
     // We have a module, let's require it!
     try { 
-      require(path.resolve(filePath))
+      require(path.resolve(file.path))
     }
     catch(e) {
       logError(e)

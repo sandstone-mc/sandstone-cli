@@ -4,6 +4,8 @@ import debounce from 'lodash.debounce'
 import { buildProject } from '../buildProject'
 import path from 'path'
 import { getProjectFolders } from '../utils'
+import type { Client } from 'minecraft-protocol'
+import chalk from 'chalk'
 
 export default class Watch extends Command {
   static description = 'Build the datapack, and rebuild it on file change. ⛏'
@@ -28,7 +30,8 @@ export default class Watch extends Command {
     formatVersion: flags.integer({name: 'format', description: 'Pack format version. Override the value specified in the configuration file.'}),
     fullTrace: flags.boolean({name: 'full-trace', description: 'Show the full stack trace on errors.'}),
     strictErrors: flags.boolean({ description: 'Stop data pack compilation on type errors.', default: false  }),
-    production: flags.boolean({ char: 'p', description: 'Runs in production mode. This sets process.env.SANDSTONE_ENV to "production".', default: false }),
+    production: flags.boolean({ char: 'p', description: 'Runs Sandstone in production mode. This sets process.env.SANDSTONE_ENV to "production".', default: false }),
+    autoReload: flags.integer({ description: 'Automatically reload your data pack in-game. Requires to open the world to LAN with cheats enabled, and to specify the port.', helpValue: 'port' }),
   }
 
   static args = [{
@@ -49,6 +52,20 @@ export default class Watch extends Command {
     let alreadyBuilding: boolean = false
     let needRebuild: boolean = false
 
+    let client: Client | null = null
+
+    if (flags.autoReload !== undefined) {
+      try {
+        client = (await require('minecraft-protocol')).createClient({
+          username: 'SandstoneBot',
+          host: 'localhost',
+          port: flags.autoReload,
+        })
+      } catch (e) {
+        console.log(chalk.rgb(255,204,0)`Failed to connect to localhost:${flags.autoReload}. The data pack won't be auto reloaded.`)
+      }
+    }
+    
     const folders = getProjectFolders(args.path)
 
     async function onFileChange() {
@@ -65,6 +82,7 @@ export default class Watch extends Command {
       Object.keys(require.cache).forEach(key => delete require.cache[key])
 
       await buildProject(flags, folders)
+      client?.write('chat', { message: '/reload' })
       alreadyBuilding = false
       
       if (needRebuild) {

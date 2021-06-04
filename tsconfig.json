@@ -5,8 +5,10 @@
     "outDir": "lib",
     "rootDir": "src",
     "strict": true,
-    "target": "es2019",
-    "lib": ["es2020"],
+    "target": "es2020",
+    "lib": [
+      "es2020"
+    ],
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true

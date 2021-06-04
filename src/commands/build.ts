@@ -22,10 +22,12 @@ export default class Build extends Command {
 
     const folders = getProjectFolders(args.path)
 
-     // Register ts-node
+    // Register ts-node
+    const tsConfigPath = path.join(folders.rootFolder, 'tsconfig.json')
+
     require('ts-node').register({
-      transpileOnly: true,
-      project: path.join(folders.rootFolder, 'tsconfig.json'),
+      transpileOnly: !flags.strictErrors,
+      project: tsConfigPath,
     })
     buildProject(flags, folders)
   }

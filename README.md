@@ -19,7 +19,7 @@ $ npm install -g sandstone-cli
 $ sand COMMAND
 running command...
 $ sand (-v|--version|version)
-sandstone-cli/0.5.1 win32-x64 node-v16.1.0
+sandstone-cli/0.5.2 win32-x64 node-v16.1.0
 $ sand --help [COMMAND]
 USAGE
   $ sand COMMAND
@@ -84,7 +84,7 @@ EXAMPLES
   $ sand build --verbose --dry
 ```
 
-_See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.1/src/commands/build.ts)_
+_See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.2/src/commands/build.ts)_
 
 ## `sand create PROJECT-NAME`
 
@@ -117,7 +117,7 @@ EXAMPLE
   $ sand create my-datapack
 ```
 
-_See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.1/src/commands/create.ts)_
+_See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.2/src/commands/create.ts)_
 
 ## `sand help [COMMAND]`
 
@@ -159,7 +159,7 @@ EXAMPLES
   $ sand update --cli --sandstone --skip
 ```
 
-_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.1/src/commands/update.ts)_
+_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.2/src/commands/update.ts)_
 
 ## `sand watch PATH CONFIG-PATH`
 
@@ -211,5 +211,5 @@ EXAMPLES
   $ sand watch --verbose --dry
 ```
 
-_See code: [src/commands/watch.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.1/src/commands/watch.ts)_
+_See code: [src/commands/watch.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.2/src/commands/watch.ts)_
 <!-- commandsstop -->

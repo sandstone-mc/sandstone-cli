@@ -197,7 +197,7 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
     try { 
       require(path.resolve(file.path))
     }
-    catch(e) {
+    catch(e: any) {
       logError(e)
       error = true
     }
@@ -256,7 +256,7 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
 
     // Data pack mcmeta
     description: options.description ?? sandstoneConfig.description,
-    formatVersion: options.formatVersion ?? saveOptions.formatVersion,
+    formatVersion: options.formatVersion ?? sandstoneConfig.formatVersion,
 
     // Additional parameters
     dryRun: options.dry,
@@ -328,7 +328,7 @@ export async function buildProject(options: BuildOptions, folders: ProjectFolder
   try {
     await _buildProject(options, folders)
   }
-  catch (err) {
+  catch (err: any) {
     logError(err)
   }
 }

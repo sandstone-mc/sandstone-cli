@@ -47,7 +47,7 @@ export default class Watch extends Command {
       }).toString()
     }
     catch ({ stdout }) {
-      npmListReturn = stdout.toString()
+      npmListReturn = (stdout as any).toString()
     }
 
     const { dependencies } = JSON.parse(npmListReturn)

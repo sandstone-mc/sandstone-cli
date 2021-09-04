@@ -68,7 +68,7 @@ export default class Watch extends Command {
     
     const folders = getProjectFolders(args.path)
 
-    async function onFileChange() {
+    async function onFilesChange(paths?: string[]) {      
       if (alreadyBuilding) {
         // If the pack is already being built & another change was made,
         // notify that a rebuild is needed & stop there
@@ -81,13 +81,13 @@ export default class Watch extends Command {
       // Delete the entire cache to prevent artifacts from previous builds
       Object.keys(require.cache).forEach(key => delete require.cache[key])
 
-      await buildProject(flags, folders)
+      await buildProject(flags, folders, paths)
       client?.write('chat', { message: '/reload' })
       alreadyBuilding = false
       
       if (needRebuild) {
         needRebuild = false
-        await onFileChange()
+        await onFilesChange(paths)
       }
     }
 
@@ -99,12 +99,26 @@ export default class Watch extends Command {
       project: tsConfigPath,
     })
     
+    let timeout: NodeJS.Timeout | null = null
+    let files: string[] = []
 
     chokidar.watch([
       path.join(folders.absProjectFolder, '/**/*'),
       path.join(folders.sandstoneConfigFolder, 'sandstone.config.ts'),
       path.join(folders.rootFolder, 'package.json'),
       path.join(folders.rootFolder, 'tsconfig.json'),
-    ]).on('all', debounce(onFileChange, 200))
+    ]).on('all', (event, path) => {
+      if (event === 'addDir') {
+        return
+      }
+
+      files.push(path)
+
+      if (timeout) clearTimeout(timeout as any)
+      timeout = setTimeout(() => {
+        onFilesChange(files.length === 0 ? undefined : files)
+        files = []
+      }, 200)
+    })
   }
 }

@@ -241,6 +241,7 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   // Finally, let's import all .ts & .js files under ./src.
   let error = false
 
+  // Get the list of all files
   const rawFiles: { path: string }[] = []
   for await (const file of walk(absProjectFolder)) {
     rawFiles.push(file)
@@ -270,28 +271,29 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
     },
   })
 
+  // This dependencies graph is only partial.
   const dependenciesGraph = new DependencyGraph(graph.obj())
 
-  // Update the global dependency graph
+  // Update the global dependency graph by merging it with the new one.
   dependenciesCache.merge(dependenciesGraph)
 
-  // Transformed resolved dependents into a flat list of files, and sort them by their number of dependencies  
+  // Transform resolved dependents into a flat list of files, and sort them by their number of dependencies
   const newModules = getNewModules(dependenciesCache, changedFilesPaths ?? rawFiles, absProjectFolder)
 
-  // If files changed, we need to clean the cache & delete the related resources (or add them back if this file deleted it)
   const { savePack } = require(sandstoneLocation)
   const { dataPack } = require(sandstoneLocation + '/init')
 
+  // If files changed, we need to clean the cache & delete the related resources
   if (changedFiles) {
-    // For eached changed module, we need to reset the require cache & do the same for all its dependents
     for (const node of newModules) {
+      // For eached changed file, we need to reset the require cache
       delete require.cache[path.join(absProjectFolder, node.name)]
 
+      // Then we need to delete all resources the file created
       const oldResources = fileResources.get(node.name)
       if (oldResources) {
         const { resources, customResources, objectives, rootFunctions } = oldResources
 
-        // Delete all resources
         for (const resource of resources) {
           dataPack.resources.deleteResource(resource.path, resource.resourceType)
         }
@@ -311,6 +313,7 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
     }
   }
 
+  // Now, let's build the file & its dependents. First files to be built are the ones with less dependencies.
   for (const node of newModules) {
     const modulePath = path.join(absProjectFolder, node.name)
 
@@ -329,6 +332,7 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
         require(filePath)
       }
 
+      // Generate the mcfunctions
       for (const mcfunction of dataPack.rootFunctions) {
         await mcfunction.generate()
       }
@@ -338,6 +342,8 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
       error = true
     }
 
+    // Now, find the resources that were added by this file & store them.
+    // This will be used if those files are changed later.
     const newResources: FileResource = {
       resources: diffResources(dataPack.resources, currentResources.resources),
       customResources: diffSet(dataPack.customResources, currentResources.customResources),
@@ -353,7 +359,8 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   }
 
   /// SAVING RESULTS ///
-  // Setup the cache if it doesn't exist
+  // Setup the cache if it doesn't exist.
+  // This cache is here to avoid writing files on disk when they did not change.
   const newCache: SandstoneCache[string] = {
     files: {}
   }

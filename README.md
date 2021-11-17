@@ -19,7 +19,7 @@ $ npm install -g sandstone-cli
 $ sand COMMAND
 running command...
 $ sand (-v|--version|version)
-sandstone-cli/0.5.4 win32-x64 node-v15.11.0
+sandstone-cli/0.5.4 win32-x64 node-v16.1.0
 $ sand --help [COMMAND]
 USAGE
   $ sand COMMAND

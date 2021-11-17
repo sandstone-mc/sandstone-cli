@@ -1,21 +1,23 @@
 import path from 'path'
 import crypto from 'crypto'
 import { promisify } from 'util'
-import fs, { copySync } from 'fs-extra'
-import { ProjectFolders } from './utils'
+import fs from 'fs-extra'
+import { ProjectFolders } from '../utils'
 import PrettyError from 'pretty-error'
 import walk from 'klaw'
 
 import madge from 'madge'
+import { DependencyGraph } from './graph'
+import chalk from 'chalk'
 
 const pe = new PrettyError()
-  
-export type BuildOptions = { 
+
+export type BuildOptions = {
   world?: string
   root?: boolean
   path?: string
   minecraftPath?: string
-  
+
   namespace?: string
 
   name?: string
@@ -66,13 +68,23 @@ async function mkDir(dirPath: string) {
       })
     })
   }
-  catch(error) {
+  catch (error) {
     // Directory already exists
   }
 }
 
 const cache: SandstoneCache = {}
-let dependenciesCache: Record<string, Set<string>> = {}
+
+const dependenciesCache: DependencyGraph = new DependencyGraph({})
+
+type FileResource = {
+  resources: Set<{ path: string[], resourceType: string }> // Set<File<Record<never, never>>>
+  objectives: Map<string, any> // Map<string, ObjectiveInstance<string>>
+  rootFunctions: Set<any> // Set<MCFunctionClass>
+  customResources: Set<any> // Set<CustomResourceInstance<any, any>>
+}
+
+const fileResources: Map<string, FileResource> = new Map()
 
 /**
  * Recursively removes empty directories from the given directory.
@@ -87,27 +99,61 @@ async function removeEmptyDirectories(directory: string) {
   // lstat does not follow symlinks (in contrast to stat)
   const fileStats = await fs.lstat(directory);
   if (!fileStats.isDirectory()) {
-      return;
+    return;
   }
   let fileNames = await fs.readdir(directory);
   if (fileNames.length > 0) {
-      const recursiveRemovalPromises = fileNames.map(
-          (fileName: string) => removeEmptyDirectories(path.join(directory, fileName)),
-      );
-      await Promise.all(recursiveRemovalPromises);
+    const recursiveRemovalPromises = fileNames.map(
+      (fileName: string) => removeEmptyDirectories(path.join(directory, fileName)),
+    );
+    await Promise.all(recursiveRemovalPromises);
 
-      // re-evaluate fileNames; after deleting subdirectory
-      // we may have parent directory empty now
-      fileNames = await fs.readdir(directory);
+    // re-evaluate fileNames; after deleting subdirectory
+    // we may have parent directory empty now
+    fileNames = await fs.readdir(directory);
   }
 
   if (fileNames.length === 0) {
-      await fs.rmdir(directory);
+    await fs.rmdir(directory);
   }
 }
 
-const sandstoneMiscFolderName = '.sandstone'
-const sandstoneCacheFileName = 'cache.json'
+function getNewModules(dependenciesGraph: DependencyGraph, rawFiles: { path: string }[], projectFolder: string) {
+  const rawFilesPath = rawFiles.map(({ path }) => path)
+
+  // Get only the new modules
+  const newModules = [...dependenciesGraph.nodes.values()].filter(
+    (node) => rawFilesPath.includes(path.join(projectFolder, node.name))
+  )
+
+  // Get their dependants, as a set to avoid duplicates
+  const newModulesDependencies = new Set(
+    newModules.flatMap((node) => [...node.getDependsOn({ recursive: true, includeSelf: true })])
+  )
+
+  // Sort them by number of dependencies, and return them
+  return [...newModulesDependencies].sort(
+    (a, b) => a.getDependencies({ recursive: true }).size - b.getDependencies({ recursive: true }).size
+  )
+}
+
+/**
+ * Returns a set of all values present in set1 and not present in set2.
+ */
+function diffSet<T extends unknown>(set1: Set<T>, set2: Set<T>): T {
+  return [...set1].filter((element) => !set2.has(element)) as any
+}
+
+/**
+ * Returns a map of all key/value present in map1 and not present in map2.
+ */
+function diffMap<T extends unknown>(map1: Map<string, T>, map2: Map<string, T>): Map<string, T> {
+  return new Map([...map1.entries()].filter(([key, value]) => !map2.has(key)))
+}
+
+function diffResources(tree1: any, tree2: any): Set<{ path: string[], resourceType: string }> {
+  return tree1.diff(tree2)
+}
 
 /**
  * Build the project, but might throw errors.
@@ -116,7 +162,7 @@ const sandstoneCacheFileName = 'cache.json'
  * 
  * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
  */
-async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders, changedFiles?: string[]) {
+async function _buildProject(options: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders, changedFiles?: string[]) {
   const sandstoneLocation = path.join(rootFolder, 'node_modules/sandstone/')
 
   // First, read sandstone.config.ts to get all properties
@@ -130,7 +176,7 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
   const world = overrideSaveOptions ? options.world : saveOptions.world
   const root = overrideSaveOptions ? options.root : saveOptions.root
   const customPath = overrideSaveOptions ? options.path : saveOptions.path
-  
+
   const minecraftPath = options.minecraftPath ?? sandstoneConfig.minecraftPath
   const dataPackName = options.name ?? sandstoneConfig.name
 
@@ -141,7 +187,7 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
   // Important /!\: The below if statements, which set environment variables, must run before importing any Sandstone file.
 
   // Set the pack ID environment variable
-  
+
   // Set production/development mode
   if (options.production) {
     process.env.SANDSTONE_ENV = 'production'
@@ -152,7 +198,7 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
   if (sandstoneConfig.packUid) {
     process.env.PACK_UID = sandstoneConfig.packUid
   }
-  
+
   // Set the namespace
   const namespace = sandstoneConfig.namespace || options.namespace
   if (namespace) {
@@ -182,7 +228,7 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
 
   /// IMPORTING USER CODE ///
   // The configuration is ready.
-  
+
   // Now, let's run the beforeAll script
   const { getDestinationPath } = require(path.join(sandstoneLocation, 'datapack', 'saveDatapack'))
   const destinationPath = getDestinationPath(dataPackName, { world, asRootDatapack: root, customPath, minecraftPath })
@@ -195,127 +241,119 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
   // Finally, let's import all .ts & .js files under ./src.
   let error = false
 
-  let rawFiles: { path: string }[]
-  if (changedFiles) {
-    rawFiles = changedFiles.map(file => ({ path: file }))
-  }
-  else {
-    rawFiles = []
-    for await (const file of walk(absProjectFolder)) {
-      rawFiles.push(file)
-    }
+  const rawFiles: { path: string }[] = []
+  for await (const file of walk(absProjectFolder)) {
+    rawFiles.push(file)
   }
 
-  console.time('Dependency graph')
-  const dependenciesGraph = (await madge(rawFiles.map(f => f.path), {
-    fileExtensions: ['.ts'],
+  const changedFilesPaths = changedFiles?.map(file => ({ path: file }))
+
+  /**
+   * 1. Update dependency graphs
+   * 2. Delete all cache & resources for files dependent from the changed files
+   * 3. Import all changed files, & their dependents
+   * 4. Save only newly created resources
+   */
+  const graph = await madge(rawFiles.map(f => f.path).filter(f => !f.endsWith('.json')), {
+    fileExtensions: ['.ts', '.cts', '.mts', '.tsx', '.js', '.jsx', '.cjs', '.mjs', '.json'],
     includeNpm: false,
+    baseDir: absProjectFolder,
+
+
     detectiveOptions: {
       es6: {
         skipTypeImports: true,
       },
       ts: {
         skipTypeImports: true,
-      }, 
+      },
     },
-  })).obj()
-  console.timeEnd('Dependency graph')
-  console.log(dependenciesGraph);
-  
-  const resolvedDeps: Record<string, Set<string>> = {}
+  })
 
-  const base = path.dirname(rawFiles[0].path)
+  const dependenciesGraph = new DependencyGraph(graph.obj())
 
-  const resolveDependencies = (name: string): string[] => {
-    const fullpath = path.join(base, name)
-    if (resolvedDeps[fullpath]) {
-      return [...resolvedDeps[fullpath]]
-    }
+  // Update the global dependency graph
+  dependenciesCache.merge(dependenciesGraph)
 
-    const deps = dependenciesGraph[name]
-    if (!deps) { return [] }
+  // Transformed resolved dependents into a flat list of files, and sort them by their number of dependencies  
+  const newModules = getNewModules(dependenciesCache, changedFilesPaths ?? rawFiles, absProjectFolder)
 
-    // Remove from the graph (to avoid infinite recursion)
-    delete dependenciesGraph[name]
-
-    // Resolve dependencies
-    resolvedDeps[fullpath] = new Set([fullpath, ...deps.map(file => path.join(base, file))])
-    
-    for (const dep of deps) {
-      for (const res of resolveDependencies(dep)) {
-        resolvedDeps[fullpath].add(res)
-      }
-    }
-
-    // Add to the resolved dependencies
-    return [...resolvedDeps[fullpath]]
-  }
-
-  Object.keys(dependenciesGraph).forEach(resolveDependencies)
-
-  dependenciesCache = { ...dependenciesCache, ...resolvedDeps }
-
-  // Transformed resolved dependencies into a flat list of files, and sort them by their number of dependencies  
-  const files = Object.entries(dependenciesCache)
-    .map(([file, dependencies]) => ({ 
-      file, 
-      dependencies,
-    })
-  )
-
-  files.sort((a, b) => a.dependencies.size - b.dependencies.size)
-  
-  console.log(base)
-  console.log(files)
-
-  // If files changed, we need to clean the cache
-  if (changedFiles) {
-    for (const {file, dependencies} of files) {
-      const fileDir = path.dirname(file)
-      
-      for (const dep of dependencies) {
-        const depPath = path.join(fileDir, dep)
-        delete require.cache[depPath]
-      }
-    }
-  }
-  
-  // Hook on resource creation
+  // If files changed, we need to clean the cache & delete the related resources (or add them back if this file deleted it)
   const { savePack } = require(sandstoneLocation)
   const { dataPack } = require(sandstoneLocation + '/init')
 
-  for (const { file } of files) {
-    // Skip files not ending with .ts/.js
-    if (!file.match(/\.(ts|js)$/)) { continue }
+  if (changedFiles) {
+    // For eached changed module, we need to reset the require cache & do the same for all its dependents
+    for (const node of newModules) {
+      delete require.cache[path.join(absProjectFolder, node.name)]
 
-    console.log(dataPack)
-    console.log(dataPack.addResourceCallback)
-    dataPack.addResourceCallback((props: any) => console.log('On file', file, ':', props.event, props.resource))
+      const oldResources = fileResources.get(node.name)
+      if (oldResources) {
+        const { resources, customResources, objectives, rootFunctions } = oldResources
+
+        // Delete all resources
+        for (const resource of resources) {
+          dataPack.resources.deleteResource(resource.path, resource.resourceType)
+        }
+
+        for (const resource of customResources) {
+          dataPack.customResources.delete(resource)
+        }
+
+        for (const objective of objectives.keys()) {
+          dataPack.objectives.delete(objective)
+        }
+
+        for (const rootFunction of rootFunctions) {
+          dataPack.rootFunctions.delete(rootFunction)
+        }
+      }
+    }
+  }
+
+  for (const node of newModules) {
+    const modulePath = path.join(absProjectFolder, node.name)
+
+    const currentResources: FileResource = {
+      resources: dataPack.resources.clone(),
+      objectives: new Map([...dataPack.objectives.entries()]),
+      rootFunctions: new Set([...dataPack.rootFunctions]),
+      customResources: new Set([...dataPack.customResources]),
+    }
 
     // We have a module, let's require it!
+    const filePath = path.resolve(modulePath)
     try {
-      require(path.resolve(file))
+      // Sometimes, a file might not exist because it has been deleted.
+      if (await fs.pathExists(filePath)) {
+        require(filePath)
+      }
+
+      for (const mcfunction of dataPack.rootFunctions) {
+        await mcfunction.generate()
+      }
     }
-    catch(e: any) {
-      logError(e)
+    catch (e: any) {
+      logError(e, node.name)
       error = true
     }
 
-    dataPack.clearResourceCallbacks()
+    const newResources: FileResource = {
+      resources: diffResources(dataPack.resources, currentResources.resources),
+      customResources: diffSet(dataPack.customResources, currentResources.customResources),
+      rootFunctions: diffSet(dataPack.rootFunctions, currentResources.rootFunctions),
+      objectives: diffMap(dataPack.objectives, currentResources.objectives),
+    }
+
+    fileResources.set(node.name, newResources)
   }
-  
+
   if (error) {
     return
   }
 
   /// SAVING RESULTS ///
-  /* Let's load the previous cache */
-
-  // Create .sandstone if it doesn't exists
-  const sandstoneMiscFolder = path.join(rootFolder, sandstoneMiscFolderName)
-  mkDir(sandstoneMiscFolder)
-
-  // Try loading the cache
+  // Setup the cache if it doesn't exist
   const newCache: SandstoneCache[string] = {
     files: {}
   }
@@ -374,11 +412,11 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
 
   // Delete old files that aren't cached anymore
   const oldFilesNames = new Set<string>(Object.keys(cache[absProjectFolder].files))
-  
+
   Object.keys(newCache.files).forEach(name => oldFilesNames.delete(name))
 
   const previousResultFolder = cache?.[absProjectFolder]?.resultFolder
-  
+
   await Promise.allSettled(
     [...oldFilesNames.values()].map(name => promisify(fs.rm)(path.join(previousResultFolder ?? '', name)))
   )
@@ -395,7 +433,7 @@ async function _buildProject(options: BuildOptions, {absProjectFolder, rootFolde
 
   // Override old cache
   cache[absProjectFolder] = newCache
-  
+
   // Run the afterAll script
   await scripts?.afterAll?.({
     dataPackName,
@@ -421,8 +459,14 @@ export async function buildProject(options: BuildOptions, folders: ProjectFolder
   }
 }
 
-function logError(err?: Error) {
+function logError(err?: Error, file?: string) {
   if (err) {
+    if (file) {
+      console.error(
+        '  ' + chalk.bgRed.white('BuildError') + chalk.gray(':'),
+        `While loading "${file}", the following error happened:\n`
+      )
+    }
     console.error(pe.render(err))
   }
 }

@@ -5,13 +5,13 @@ import path from 'path'
 import { execSync } from 'child_process'
 import chalk from 'chalk'
 
-export async function getFlagOrPrompt<T extends Answers = Answers >(flags: Record<string, string | undefined | void | boolean>, name: string, inquirerProps: Omit<InputQuestion<T>, 'name'>): Promise<string> {
+export async function getFlagOrPrompt<D extends inquirer.Question = InputQuestion >(flags: Record<string, string | undefined | void | boolean>, name: string, inquirerProps: Omit<D, 'name'>): Promise<string> {
   const flagValue = flags[name]
   if (typeof flagValue === 'string') {
     return flagValue
   }
 
-  return (await inquirer.prompt({ name, ...inquirerProps }) as Record<string, string>)[name]
+  return (await inquirer.prompt({ name, ...inquirerProps } as Answers) as Record<string, string>)[name]
 }
 
 export function hasYarn(): boolean {
@@ -133,3 +133,13 @@ export function getProjectFolders(projectFolder: string): ProjectFolders {
     absProjectFolder, rootFolder, sandstoneConfigFolder
   }
 }
+
+export const packFormats = {
+  '1.13-1.14.4': 4,
+  '1.15-1.16.1': 5,
+  '1.16.2-1.16.5': 6,
+  '1.17-1.17.1': 7,
+  '1.18-1.18.1': 8,
+  '1.18.2': 9,
+  '1.19-1.19.2': 10,
+} 

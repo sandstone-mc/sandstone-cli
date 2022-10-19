@@ -19,7 +19,7 @@ $ npm install -g sandstone-cli
 $ sand COMMAND
 running command...
 $ sand (-v|--version|version)
-sandstone-cli/0.5.4 win32-x64 node-v15.11.0
+sandstone-cli/0.5.5 linux-x64 node-v16.18.0
 $ sand --help [COMMAND]
 USAGE
   $ sand COMMAND
@@ -84,7 +84,7 @@ EXAMPLES
   $ sand build --verbose --dry
 ```
 
-_See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.4/src/commands/build.ts)_
+_See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.5/src/commands/build.ts)_
 
 ## `sand create PROJECT-NAME`
 
@@ -98,26 +98,38 @@ ARGUMENTS
   PROJECT-NAME  Name of the project folder. This is not the name of the data pack.
 
 OPTIONS
-  -d, --datapack-name=datapack-name  The name of the data pack.
-  -h, --help                         show CLI help
-  -n, --namespace=namespace          The default namespace that will be used.
-  -p, --custom-path=custom-path      The path to save the data pack at. Not compatible with --save-root and --world.
+  -d, --datapack-name=datapack-name
+      The name of the data pack.
 
-  -r, --save-root                    Save the data pack in the .minecraft/datapacks folder. Not compatible with --world
-                                     and --custom-path.
+  -h, --help
+      show CLI help
 
-  -w, --world=world                  The world to save the data pack in. Not compatible with --save-root and
-                                     --custom-path.
+  -n, --namespace=namespace
+      The default namespace that will be used.
 
-  --npm                              Use npm.
+  -p, --custom-path=custom-path
+      The path to save the data pack at. Not compatible with --save-root and --world.
 
-  --yarn                             Use yarn instead of npm.
+  -r, --save-root
+      Save the data pack in the .minecraft/datapacks folder. Not compatible with --world and --custom-path.
+
+  -v, --datapack-version=(1.13-1.14.4|1.15-1.16.1|1.16.2-1.16.5|1.17-1.17.1|1.18-1.18.1|1.18.2|1.19-1.19.2)
+      The minecraft version the data pack is made for.
+
+  -w, --world=world
+      The world to save the data pack in. Not compatible with --save-root and --custom-path.
+
+  --npm
+      Use npm.
+
+  --yarn
+      Use yarn instead of npm.
 
 EXAMPLE
   $ sand create my-datapack
 ```
 
-_See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.4/src/commands/create.ts)_
+_See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.5/src/commands/create.ts)_
 
 ## `sand help [COMMAND]`
 
@@ -159,7 +171,7 @@ EXAMPLES
   $ sand update --cli --sandstone --skip
 ```
 
-_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.4/src/commands/update.ts)_
+_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.5/src/commands/update.ts)_
 
 ## `sand watch PATH CONFIG-PATH`
 
@@ -211,5 +223,5 @@ EXAMPLES
   $ sand watch --verbose --dry
 ```
 
-_See code: [src/commands/watch.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.4/src/commands/watch.ts)_
+_See code: [src/commands/watch.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.5/src/commands/watch.ts)_
 <!-- commandsstop -->

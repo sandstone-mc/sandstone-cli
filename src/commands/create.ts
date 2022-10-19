@@ -3,11 +3,11 @@ import chalk from 'chalk'
 import { execSync } from 'child_process'
 import fs from 'fs'
 import fsExtra from 'fs-extra'
-import inquirer from 'inquirer'
+import inquirer, { ListQuestion } from 'inquirer'
 import path from 'path'
 import util from 'util'
 import templatePackage from '../package.template.json'
-import { getFlagOrPrompt, getWorldsList, hasYarn } from '../utils'
+import { getFlagOrPrompt, getWorldsList, hasYarn, packFormats } from '../utils'
 import { nanoid } from 'nanoid'
 
 function toJson(obj: any, pretty: boolean = false): string {
@@ -33,6 +33,7 @@ export default class Create extends Command {
     npm: flags.boolean({ description: 'Use npm.', env: 'USE_NPM', exclusive: ['yarn'] }),
     'datapack-name': flags.string({ char: 'd', env: 'DATAPACK_NAME', description: 'The name of the data pack.' }),
     namespace: flags.string({ char: 'n', env: 'NAMESPACE', description: 'The default namespace that will be used.' }),
+    'datapack-version': flags.enum({ char: 'v', env: 'DATAPACK_VERSION', description: 'The minecraft version the data pack is made for.', multiple: false, options: Object.keys(packFormats) }),
     'save-root': flags.boolean({ char: 'r', env: 'SAVE_ROOT', description: 'Save the data pack in the .minecraft/datapacks folder. Not compatible with --world and --custom-path.', exclusive: ['world', 'custom-path'] }),
     world: flags.string({ char: 'w', env: 'WORLD', description: 'The world to save the data pack in. Not compatible with --save-root and --custom-path.', exclusive: ['save-root', 'custom-path'] }),
     'custom-path': flags.string({ char: 'p', env: 'CUSTOM_PATH', description: 'The path to save the data pack at. Not compatible with --save-root and --world.', exclusive: ['save-root', 'world'] }),
@@ -54,6 +55,13 @@ export default class Create extends Command {
       message: 'Name of your data pack (can be changed later) >',
       type: 'input',
       default: projectName,
+    })
+
+    const datapackVersion = await getFlagOrPrompt<ListQuestion>(flags, 'datapack-version', {
+      message: 'Version of your data pack (can be changed later) >',
+      type: 'list',
+      choices: Object.keys(packFormats),
+      default: Object.keys(packFormats).pop(),
     })
 
     // Find the save directory
@@ -168,7 +176,7 @@ export default class Create extends Command {
 export default {
   name: ${toJson(datapackName)},
   description: ${toJson(['A ', {text: 'Sandstone', color: 'gold'}, ' data pack.'])},
-  formatVersion: ${7},
+  formatVersion: ${Object.entries(packFormats).find(([version]) => version === datapackVersion)?.[1]},
   namespace: ${toJson(namespace)},
   packUid: ${toJson(nanoid(8))},
   saveOptions: ${toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)))},

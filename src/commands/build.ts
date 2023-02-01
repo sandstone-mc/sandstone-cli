@@ -1,5 +1,5 @@
 import { Command } from '@oclif/command'
-import { buildProject } from '../buildProject'
+import { buildProject } from '../build/buildProject'
 import { getProjectFolders } from '../utils'
 import path from 'path'
 import Watch from './watch'

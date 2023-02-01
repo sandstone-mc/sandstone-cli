@@ -2,7 +2,17 @@
   "name": "sandstone-cli",
   "description": "The CLI for Sandstone - the data pack creation library.",
   "version": "0.6.0",
-  "author": "TheMrZZ - Florian ERNST",
+  "contributors": [
+    {
+      "name": "TheMrZZ - Florian ERNST",
+      "url": "https://github.com/TheMrZZ"
+    },
+    {
+      "email": "mulverin3@gmail.com",
+      "name": "MulverineX",
+      "url": "https://github.com/MulverineX"
+    }
+  ],
   "bin": {
     "sand": "./bin/run"
   },

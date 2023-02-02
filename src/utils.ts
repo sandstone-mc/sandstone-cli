@@ -87,10 +87,10 @@ export function getWorldPath(worldName: string, minecraftPath: string | undefine
 /**
  * Recursively search for a file.
  * Starts in the current folder, and go to the parent, recursively.
- * 
+ *
  * @param filename the name of the file to resolve
  * @param from the path to start at
- * 
+ *
  * @return The path on success, `null` if no the file is found in any parent.
  */
 export function getFileFolder(filename: string, from = '.'): string | null {
@@ -133,3 +133,5 @@ export function getProjectFolders(projectFolder: string): ProjectFolders {
     absProjectFolder, rootFolder, sandstoneConfigFolder
   }
 }
+
+export const datapackResources = ['mcfunction', 'advancement', 'item_modifier', 'loot_table', 'predicate', 'recipe', 'tag', 'trim_material', 'trim_pattern']

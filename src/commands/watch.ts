@@ -3,7 +3,7 @@ import chokidar from 'chokidar'
 import debounce from 'lodash.debounce'
 import { buildProject } from '../build/buildProject'
 import path from 'path'
-import { getProjectFolders } from '../utils'
+import { datapackResources, getProjectFolders } from '../utils'
 import type { Client } from 'minecraft-protocol'
 import chalk from 'chalk'
 
@@ -78,7 +78,7 @@ export default class Watch extends Command {
 
       alreadyBuilding = true
 
-      await buildProject(flags, folders, paths)
+      await buildProject(flags, folders, datapackResources, paths)
       client?.write('chat', { message: '/reload' })
       alreadyBuilding = false
 

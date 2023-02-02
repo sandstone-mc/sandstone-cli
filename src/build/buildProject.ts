@@ -40,12 +40,12 @@ type SaveFileObject = {
   resource: any
 }
 
-/* 
- * Sandstone files cache is just a key-value pair, 
+/*
+ * Sandstone files cache is just a key-value pair,
  * key being the file path & value being the hash.
- * 
+ *
  * The folder array is just here to delete folders that get empty after a new compilation.
- * 
+ *
  * There is 1 cache for each "project folder".
  */
 type SandstoneCache = Record<string, {
@@ -79,9 +79,7 @@ const dependenciesCache: DependencyGraph = new DependencyGraph({})
 
 type FileResource = {
   resources: Set<{ path: string[], resourceType: string }> // Set<File<Record<never, never>>>
-  objectives: Map<string, any> // Map<string, ObjectiveInstance<string>>
-  rootFunctions: Set<any> // Set<MCFunctionClass>
-  customResources: Set<any> // Set<CustomResourceInstance<any, any>>
+  objectives: Set<any> // Set<ObjectiveClass>
 }
 
 const fileResources: Map<string, FileResource> = new Map()
@@ -157,12 +155,12 @@ function diffResources(tree1: any, tree2: any): Set<{ path: string[], resourceTy
 
 /**
  * Build the project, but might throw errors.
- * 
+ *
  * @param options The options to build the project with.
- * 
+ *
  * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
  */
-async function _buildProject(options: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders, changedFiles?: string[]) {
+async function _buildProject(options: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders, resourceTypes: string[], changedFiles?: string[]) {
   const sandstoneLocation = path.join(rootFolder, 'node_modules/sandstone/')
 
   // First, read sandstone.config.ts to get all properties
@@ -178,7 +176,7 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   const customPath = overrideSaveOptions ? options.path : saveOptions.path
 
   const minecraftPath = options.minecraftPath ?? sandstoneConfig.minecraftPath
-  const dataPackName = options.name ?? sandstoneConfig.name
+  const packName = options.name ?? sandstoneConfig.name
 
   if ([world, root, customPath].filter(x => x !== undefined).length > 1) {
     throw new Error(`Expected only 'world', 'root' or 'path'. Got at least two of them: world=${world}, root=${root}, path=${customPath}`)
@@ -205,21 +203,17 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
     process.env.NAMESPACE = namespace
   }
 
-  // Set conflict strategies
-  function setStrategy(strategyName: string, value: string | undefined) {
-    if (value) {
-      process.env[`${strategyName.toUpperCase()}_CONFLICT_STRATEGY`] = value
+  const { onConflict } = sandstoneConfig
+  if (onConflict) {
+    if (onConflict.default) {
+      process.env[`GENERAL_CONFLICT_STRATEGY`] = onConflict.default
+    }
+    for (const resource of resourceTypes) {
+      if (onConflict[resource]) {
+        process.env[`${resource.toUpperCase()}_CONFLICT_STRATEGY`] = onConflict[resource]
+      }
     }
   }
-
-  const { onConflict } = sandstoneConfig
-  setStrategy('general', onConflict?.default)
-  setStrategy('advancement', onConflict?.advancement)
-  setStrategy('loot_table', onConflict?.lootTable)
-  setStrategy('mcfunction', onConflict?.mcFunction)
-  setStrategy('predicate', onConflict?.predicate)
-  setStrategy('recipe', onConflict?.recipe)
-  setStrategy('tag', onConflict?.tag)
 
   // Configure error display
   if (!options.fullTrace) {
@@ -230,11 +224,11 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   // The configuration is ready.
 
   // Now, let's run the beforeAll script
-  const { getDestinationPath } = require(path.join(sandstoneLocation, 'datapack', 'saveDatapack'))
-  const destinationPath = getDestinationPath(dataPackName, { world, asRootDatapack: root, customPath, minecraftPath })
+  const { getDestinationPath } = require(path.join(sandstoneLocation, 'pack', 'pack'))
+  const destinationPath = getDestinationPath(packName, { world, asRootDatapack: root, customPath, minecraftPath })
 
   await scripts?.beforeAll?.({
-    dataPackName,
+    packName,
     destination: destinationPath,
   })
 
@@ -280,48 +274,41 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   // Transform resolved dependents into a flat list of files, and sort them by their number of dependencies
   const newModules = getNewModules(dependenciesCache, changedFilesPaths ?? rawFiles, absProjectFolder)
 
-  const { savePack } = require(sandstoneLocation)
-  const { dataPack } = require(sandstoneLocation + '/init')
+  const { SandstonePack } = require(sandstoneLocation)
 
   // If files changed, we need to clean the cache & delete the related resources
-  if (changedFiles) {
-    for (const node of newModules) {
-      // For eached changed file, we need to reset the require cache
-      delete require.cache[path.join(absProjectFolder, node.name)]
+  //if (changedFiles) {
+  //  for (const node of newModules) {
+  //    // For eached changed file, we need to reset the require cache
+  //    delete require.cache[path.join(absProjectFolder, node.name)]
 
-      // Then we need to delete all resources the file created
-      const oldResources = fileResources.get(node.name)
-      if (oldResources) {
-        const { resources, customResources, objectives, rootFunctions } = oldResources
+  //    // Then we need to delete all resources the file created
+  //    const oldResources = fileResources.get(node.name)
+  //    if (oldResources) {
+  //      const { resources, customResources, objectives, rootFunctions } = oldResources
 
-        for (const resource of resources) {
-          dataPack.resources.deleteResource(resource.path, resource.resourceType)
-        }
+  //      for (const resource of resources) {
+  //        SandstonePack.core.deleteResource(resource.path, resource.resourceType)
+  //      }
 
-        for (const resource of customResources) {
-          dataPack.customResources.delete(resource)
-        }
+  //      for (const resource of customResources) {
+  //        SandstonePack.core.customResources.delete(resource)
+  //      }
 
-        for (const objective of objectives.keys()) {
-          dataPack.objectives.delete(objective)
-        }
-
-        for (const rootFunction of rootFunctions) {
-          dataPack.rootFunctions.delete(rootFunction)
-        }
-      }
-    }
-  }
+  //      for (const rootFunction of rootFunctions) {
+  //        dataPack.rootFunctions.delete(rootFunction)
+  //      }
+  //    }
+  //  }
+  //}
 
   // Now, let's build the file & its dependents. First files to be built are the ones with less dependencies.
   for (const node of newModules) {
     const modulePath = path.join(absProjectFolder, node.name)
 
     const currentResources: FileResource = {
-      resources: dataPack.resources.clone(),
-      objectives: new Map([...dataPack.objectives.entries()]),
-      rootFunctions: new Set([...dataPack.rootFunctions]),
-      customResources: new Set([...dataPack.customResources]),
+      resources: new Set([...SandstonePack.core.resourceNodes]),
+      objectives: new Set([...SandstonePack.objectives.entries()])
     }
 
     // We have a module, let's require it!
@@ -330,11 +317,6 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
       // Sometimes, a file might not exist because it has been deleted.
       if (await fs.pathExists(filePath)) {
         require(filePath)
-      }
-
-      // Generate the mcfunctions
-      for (const mcfunction of dataPack.rootFunctions) {
-        await mcfunction.generate()
       }
     }
     catch (e: any) {
@@ -345,10 +327,8 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
     // Now, find the resources that were added by this file & store them.
     // This will be used if those files are changed later.
     const newResources: FileResource = {
-      resources: diffResources(dataPack.resources, currentResources.resources),
-      customResources: diffSet(dataPack.customResources, currentResources.customResources),
-      rootFunctions: diffSet(dataPack.rootFunctions, currentResources.rootFunctions),
-      objectives: diffMap(dataPack.objectives, currentResources.objectives),
+      resources: diffResources(SandstonePack.core.resourceNodes, currentResources.resources),
+      objectives: diffSet(SandstonePack.objectives, currentResources.objectives),
     }
 
     fileResources.set(node.name, newResources)
@@ -375,11 +355,11 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
 
   // Run the beforeSave script
   await scripts?.beforeSave?.({
-    dataPackName,
+    packName,
     destination: destinationPath,
   })
 
-  await savePack(dataPackName, {
+  await SandstonePack.save(/*packName, {
     // Save location
     world: world,
     asRootDatapack: root,
@@ -398,7 +378,7 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
     customFileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content }: SaveFileObject) => {
       const realPath = path.join(destinationPath, relativePath)
 
-      // We hash the real path alongside the content. 
+      // We hash the real path alongside the content.
       // Therefore, if the real path change (for example, the user changed the resulting directory), the file will be recreated.
       const hashValue = hash(content + realPath)
 
@@ -415,7 +395,7 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
       await mkDir(path.dirname(realPath))
       return await fs.writeFile(realPath, content)
     })
-  })
+  }*/)
 
   // Delete old files that aren't cached anymore
   const oldFilesNames = new Set<string>(Object.keys(cache[absProjectFolder].files))
@@ -443,23 +423,23 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
 
   // Run the afterAll script
   await scripts?.afterAll?.({
-    dataPackName,
+    packName,
     destination: destinationPath,
   })
 }
 
 /**
  * Build the project. Will log errors and never throw any.
- * 
+ *
  * @param options The options to build the project with.
- * 
+ *
  * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
- * 
+ *
  * @param changedFiles The files that changed since the last build.
  */
-export async function buildProject(options: BuildOptions, folders: ProjectFolders, changedFiles?: string[]) {
+export async function buildProject(options: BuildOptions, folders: ProjectFolders, resourceTypes: string[], changedFiles?: string[]) {
   try {
-    await _buildProject(options, folders, changedFiles)
+    await _buildProject(options, folders, resourceTypes, changedFiles)
   }
   catch (err: any) {
     logError(err)

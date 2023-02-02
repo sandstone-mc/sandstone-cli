@@ -1,6 +1,6 @@
 import { Command } from '@oclif/command'
 import { buildProject } from '../build/buildProject'
-import { getProjectFolders } from '../utils'
+import { datapackResources, getProjectFolders } from '../utils'
 import path from 'path'
 import Watch from './watch'
 
@@ -29,6 +29,6 @@ export default class Build extends Command {
       transpileOnly: !flags.strictErrors,
       project: tsConfigPath,
     })
-    buildProject(flags, folders)
+    buildProject(flags, folders, datapackResources)
   }
 }

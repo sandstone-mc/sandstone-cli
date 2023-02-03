@@ -22,9 +22,11 @@ export default class Watch extends Command {
     verbose: flags.boolean({ char: 'v', description: 'Log all resulting resources: functions, advancements...' }),
     namespace: flags.string({ description: 'The default namespace. Override the value specified in the configuration file.' }),
     world: flags.string({ description: 'The world to save the data pack in. Override the value specified in the configuration file.' }),
-    root: flags.boolean({ description: 'Save the data pack in the `.minecraft/datapacks` folder. Override the value specified in the configuration file.' }),
+    root: flags.boolean({ description: 'Save the data pack in the `<clientPath>/datapacks` folder. Override the value specified in the configuration file.' }),
     path: flags.string({ description: 'The path to save the data pack at. Override the value specified in the configuration file.' }),
-    minecraftPath: flags.string({ name: 'minecraft-path', description: 'Path of the .minecraft folder. Override the value specified in the configuration file.' }),
+    clientPath: flags.string({ name: 'client-path', description: 'Path of the client folder. Override the value specified in the configuration file.' }),
+    serverPath: flags.string({ name: 'server-path', description: 'Path of the server folder. Override the value specified in the configuration file.' }),
+    // TODO: ssh
     name: flags.string({ description: 'Name of the data pack. Override the value specified in the configuration file.' }),
     description: flags.string({ description: 'Description of the data pack. Override the value specified in the configuration file.' }),
     formatVersion: flags.integer({ name: 'format', description: 'Pack format version. Override the value specified in the configuration file.' }),

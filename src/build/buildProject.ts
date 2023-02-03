@@ -1,4 +1,5 @@
 import path from 'path'
+import * as os from 'os'
 import crypto from 'crypto'
 import { promisify } from 'util'
 import fs from 'fs-extra'
@@ -9,14 +10,16 @@ import walk from 'klaw'
 import madge from 'madge'
 import { DependencyGraph } from './graph'
 import chalk from 'chalk'
+import AdmZip from 'adm-zip'
 
 const pe = new PrettyError()
 
 export type BuildOptions = {
   world?: string
   root?: boolean
-  path?: string
-  minecraftPath?: string
+  clientPath?: string
+  serverPath?: string
+  ssh?: string
 
   namespace?: string
 
@@ -154,13 +157,65 @@ function diffResources(tree1: any, tree2: any): Set<{ path: string[], resourceTy
 }
 
 /**
+ *
+ * @param worldName The name of the world
+ * @param minecraftPath The optional location of the .minecraft folder.
+ * If left unspecified, the .minecraft will be found automatically.
+ */
+async function getClientWorldPath(worldName: string, minecraftPath: string | undefined = undefined) {
+  let mcPath: string
+
+  if (minecraftPath) {
+    mcPath = minecraftPath
+  } else {
+    mcPath = await getClientPath()
+  }
+
+  const savesPath = path.join(mcPath, 'saves')
+  const worldPath = path.join(savesPath, worldName)
+
+  if (!fs.existsSync(worldPath)) {
+    const existingWorlds = (await fs.readdir(savesPath, { withFileTypes: true })).filter((f: any) => f.isDirectory).map((f: {name: string}) => f.name) as string[]
+
+    throw new Error(`Unable to locate the "${worldPath}" folder. Word ${worldName} does not exists. List of existing worlds: ${JSON.stringify(existingWorlds, null, 2)}`)
+  }
+
+  return worldPath
+}
+
+/**
+ * Get the .minecraft path
+ */
+async function getClientPath() {
+  function getMCPath(): string {
+    switch (os.platform()) {
+      case 'win32':
+        return path.join(os.homedir(), 'AppData/Roaming/.minecraft')
+      case 'darwin':
+        return path.join(os.homedir(), 'Library/Application Support/minecraft')
+      case 'linux':
+      default:
+        return path.join(os.homedir(), '.minecraft')
+    }
+  }
+
+  const mcPath = getMCPath()
+
+  if (!await fs.stat(mcPath)) {
+    throw new Error('Unable to locate the .minecraft folder. Please specify it manually.')
+  }
+
+  return mcPath
+}
+
+/**
  * Build the project, but might throw errors.
  *
- * @param options The options to build the project with.
+ * @param cliOptions The options to build the project with.
  *
  * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
  */
-async function _buildProject(options: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders, resourceTypes: string[], changedFiles?: string[]) {
+async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders, resourceTypes: string[], changedFiles?: string[]) {
   const sandstoneLocation = path.join(rootFolder, 'node_modules/sandstone/')
 
   // First, read sandstone.config.ts to get all properties
@@ -169,17 +224,38 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   const { saveOptions, scripts } = sandstoneConfig
 
   /// OPTIONS ///
-  // Check if the player overidded the save options
-  const overrideSaveOptions = options.world || options.root || options.path
-  const world = overrideSaveOptions ? options.world : saveOptions.world
-  const root = overrideSaveOptions ? options.root : saveOptions.root
-  const customPath = overrideSaveOptions ? options.path : saveOptions.path
+  const clientPath = cliOptions.production ? undefined : (cliOptions.clientPath || saveOptions.clientPath || await getClientPath())
+  const server = cliOptions.production ? undefined : await (async () => {
+    if (cliOptions.ssh || saveOptions.ssh) {
+      const sshOptions = JSON.stringify(await fs.readFile(cliOptions.ssh || saveOptions.ssh, 'utf8'))
 
-  const minecraftPath = options.minecraftPath ?? sandstoneConfig.minecraftPath
-  const packName = options.name ?? sandstoneConfig.name
+      // TODO: implement SFTP
+      return {
+        readFile: async (relativePath: string, encoding: string = 'utf8') => {},
+        writeFile: async (relativePath: string, contents: any) => {},
+        remove: async (relativePath: string) => {},
+      }
+    }
+    return {
+      readFile: async (relativePath: string, encoding: string = 'utf8') => await fs.readFile(path.join(cliOptions.serverPath || saveOptions.serverPath, relativePath), encoding),
+      writeFile: async (relativePath: string, contents: any) => {
+        if (contents === undefined) {
+          await fs.unlink(path.join(cliOptions.serverPath || saveOptions.serverPath, relativePath))
+        } else {
+          await fs.writeFile(path.join(cliOptions.serverPath || saveOptions.serverPath, relativePath), contents)
+        }
+      },
+      remove: async (relativePath: string) => await fs.remove(path.join(cliOptions.serverPath || saveOptions.serverPath, relativePath))
+    }
+  })()
+  const worldName = cliOptions.production ? undefined : cliOptions.world || saveOptions.world
+  const worldPath = worldName ? await getClientWorldPath(worldName, clientPath) : undefined
+  const root = cliOptions.production ? undefined : cliOptions.root || saveOptions.root
 
-  if ([world, root, customPath].filter(x => x !== undefined).length > 1) {
-    throw new Error(`Expected only 'world', 'root' or 'path'. Got at least two of them: world=${world}, root=${root}, path=${customPath}`)
+  const packName: string = cliOptions.name ?? sandstoneConfig.name
+
+  if (worldName && root) {
+    throw new Error(`Expected only 'world' or 'root'. Got both.`)
   }
 
   // Important /!\: The below if statements, which set environment variables, must run before importing any Sandstone file.
@@ -187,7 +263,7 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   // Set the pack ID environment variable
 
   // Set production/development mode
-  if (options.production) {
+  if (cliOptions.production) {
     process.env.SANDSTONE_ENV = 'production'
   } else {
     process.env.SANDSTONE_ENV = 'development'
@@ -198,7 +274,7 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   }
 
   // Set the namespace
-  const namespace = sandstoneConfig.namespace || options.namespace
+  const namespace = cliOptions.namespace || sandstoneConfig.namespace
   if (namespace) {
     process.env.NAMESPACE = namespace
   }
@@ -216,7 +292,7 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   }
 
   // Configure error display
-  if (!options.fullTrace) {
+  if (!cliOptions.fullTrace) {
     pe.skipNodeFiles()
   }
 
@@ -224,12 +300,9 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   // The configuration is ready.
 
   // Now, let's run the beforeAll script
-  const { getDestinationPath } = require(path.join(sandstoneLocation, 'pack', 'pack'))
-  const destinationPath = getDestinationPath(packName, { world, asRootDatapack: root, customPath, minecraftPath })
-
   await scripts?.beforeAll?.({
     packName,
-    destination: destinationPath,
+    destination: path.join(rootFolder, '.sandstone', 'output'),
   })
 
   // Finally, let's import all .ts & .js files under ./src.
@@ -277,30 +350,20 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   const { SandstonePack } = require(sandstoneLocation)
 
   // If files changed, we need to clean the cache & delete the related resources
-  //if (changedFiles) {
-  //  for (const node of newModules) {
-  //    // For eached changed file, we need to reset the require cache
-  //    delete require.cache[path.join(absProjectFolder, node.name)]
+  if (changedFiles) {
+    for (const node of newModules) {
+      // For each changed file, we need to reset the require cache
+      delete require.cache[path.join(absProjectFolder, node.name)]
 
-  //    // Then we need to delete all resources the file created
-  //    const oldResources = fileResources.get(node.name)
-  //    if (oldResources) {
-  //      const { resources, customResources, objectives, rootFunctions } = oldResources
-
-  //      for (const resource of resources) {
-  //        SandstonePack.core.deleteResource(resource.path, resource.resourceType)
-  //      }
-
-  //      for (const resource of customResources) {
-  //        SandstonePack.core.customResources.delete(resource)
-  //      }
-
-  //      for (const rootFunction of rootFunctions) {
-  //        dataPack.rootFunctions.delete(rootFunction)
-  //      }
-  //    }
-  //  }
-  //}
+      // Then we need to delete all resources the file created
+      const oldResources = fileResources.get(node.name)
+      if (oldResources) {
+        for (const resource of oldResources.resources) {
+          SandstonePack.core.deleteResource(resource.path, resource.resourceType)
+        }
+      }
+    }
+  }
 
   // Now, let's build the file & its dependents. First files to be built are the ones with less dependencies.
   for (const node of newModules) {
@@ -356,10 +419,10 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   // Run the beforeSave script
   await scripts?.beforeSave?.({
     packName,
-    destination: destinationPath,
+    destination: path.join(rootFolder, '.sandstone', 'output'),
   })
 
-  await SandstonePack.save(/*packName, {
+  const packTypes = await SandstonePack.save(/*packName, {
     // Save location
     world: world,
     asRootDatapack: root,
@@ -397,6 +460,96 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
     })
   }*/)
 
+  async function archiveOutput(packType: any) {
+    const outputPath = path.join(rootFolder, '.sandstone/output/', packType.type)
+
+    const archive = new AdmZip();
+
+    await archive.addLocalFolderPromise(outputPath, {})
+
+    await archive.writeZipPromise(`${outputPath}.zip`, { overwrite: true })
+  }
+
+  if (!cliOptions.production) {
+    for (const packType of packTypes) {
+      const outputPath = path.join(rootFolder, '.sandstone/output/', packType.type)
+      let archived = false
+
+      if (packType.handleOutput) {
+        await packType.handleOutput(
+          'output',
+          async (relativePath: string, encoding: string = 'utf8') => await fs.readFile(path.join(outputPath, relativePath), encoding),
+          async (relativePath: string, contents: any) => {
+            if (contents === undefined) {
+              await fs.unlink(path.join(outputPath, relativePath))
+            } else {
+              await fs.writeFile(path.join(outputPath, relativePath), contents)
+            }
+          }
+        )
+      }
+
+      if (packType.archiveOutput) {
+        archiveOutput(packType)
+      }
+
+      // Handle client
+      if (!(server && packType.networkSides === 'server')) {
+        let fullClientPath = path.join(clientPath, packType.clientPath)
+
+        try { fullClientPath = fullClientPath.replace('$packName$', packName) } catch {}
+        try { fullClientPath = fullClientPath.replace('$worldName$', worldName) } catch {}
+
+        if (packType.archiveOutput) {
+          await fs.copyFile(`${outputPath}.zip`, `${fullClientPath}.zip`)
+        } else {
+          await fs.remove(fullClientPath)
+          await fs.copy(outputPath, fullClientPath)
+        }
+
+        if (packType.handleOutput) {
+          await packType.handleOutput(
+            'client',
+            async (relativePath: string, encoding: string = 'utf8') => await fs.readFile(path.join(clientPath, relativePath), encoding),
+            async (relativePath: string, contents: any) => {
+              if (contents === undefined) {
+                fs.unlink(path.join(clientPath, relativePath))
+              } else {
+                await fs.writeFile(path.join(clientPath, relativePath), contents)
+              }
+            }
+          )
+        }
+      }
+
+      // Handle server
+      if (server && (packType.networkSides === 'server' || packType.networkSides === 'both')) {
+        let serverPath: string = packType.serverPath
+
+        try { serverPath = serverPath.replace('$packName$', packName) } catch {}
+
+        if (packType.archiveOutput) {
+          await server.writeFile(await fs.readFile(`${outputPath}.zip`, 'utf8'), `${serverPath}.zip`)
+        } else {
+          server.remove(serverPath)
+          for await (const file of walk(outputPath)) {
+            await server.writeFile(path.join(serverPath, file.path.split(outputPath)[1]), await fs.readFile(file.path))
+          }
+        }
+
+        if (packType.handleOutput) {
+          await packType.handleOutput('server', server.readFile, server.writeFile)
+        }
+      }
+    }
+  } else {
+    for (const packType of packTypes) {
+      if (packType.archiveOutput) {
+        archiveOutput(packType)
+      }
+    }
+  }
+
   // Delete old files that aren't cached anymore
   const oldFilesNames = new Set<string>(Object.keys(cache[absProjectFolder].files))
 
@@ -424,7 +577,7 @@ async function _buildProject(options: BuildOptions, { absProjectFolder, rootFold
   // Run the afterAll script
   await scripts?.afterAll?.({
     packName,
-    destination: destinationPath,
+    destination: path.join(rootFolder, '.sandstone', 'output'),
   })
 }
 

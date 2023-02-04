@@ -1,6 +1,5 @@
 import { Command, flags } from '@oclif/command'
 import chokidar from 'chokidar'
-import debounce from 'lodash.debounce'
 import { buildProject } from '../build/buildProject'
 import path from 'path'
 import { datapackResources, getProjectFolders } from '../utils'
@@ -8,7 +7,7 @@ import type { Client } from 'minecraft-protocol'
 import chalk from 'chalk'
 
 export default class Watch extends Command {
-  static description = 'Build the datapack, and rebuild it on file change. ⛏'
+  static description = 'Build the packs, and rebuild them on file change. ⛏'
 
   static examples = [
     '$ sand watch',
@@ -18,12 +17,11 @@ export default class Watch extends Command {
 
   static flags = {
     help: flags.help({ char: 'h' }),
-    dry: flags.boolean({ char: 'd', description: 'Do not save the datapack. Mostly useful with `verbose`.' }),
+    dry: flags.boolean({ char: 'd', description: 'Do not save the pack. Mostly useful with `verbose`.' }),
     verbose: flags.boolean({ char: 'v', description: 'Log all resulting resources: functions, advancements...' }),
     namespace: flags.string({ description: 'The default namespace. Override the value specified in the configuration file.' }),
     world: flags.string({ description: 'The world to save the data pack in. Override the value specified in the configuration file.' }),
-    root: flags.boolean({ description: 'Save the data pack in the `<clientPath>/datapacks` folder. Override the value specified in the configuration file.' }),
-    path: flags.string({ description: 'The path to save the data pack at. Override the value specified in the configuration file.' }),
+    root: flags.boolean({ description: 'Save the data pack & resource pack in the .minecraft/datapacks & .minecraft/resource_packs folders. Override the value specified in the configuration file.' }),
     clientPath: flags.string({ name: 'client-path', description: 'Path of the client folder. Override the value specified in the configuration file.' }),
     serverPath: flags.string({ name: 'server-path', description: 'Path of the server folder. Override the value specified in the configuration file.' }),
     // TODO: ssh
@@ -56,6 +54,7 @@ export default class Watch extends Command {
 
     let client: Client | null = null
 
+    // TODO: add support for clients & resources that require restarts & world resets, sandstone-server should override the involved environment variables if mods are present that fix it
     if (flags.autoReload !== undefined) {
       try {
         client = (await require('minecraft-protocol')).createClient({

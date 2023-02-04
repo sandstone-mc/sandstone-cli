@@ -36,7 +36,7 @@ USAGE
 
 ## `sand build PATH CONFIG-PATH`
 
-Build the datapack. ⛏
+Build the packs. ⛏
 
 ```
 USAGE
@@ -47,7 +47,7 @@ ARGUMENTS
   CONFIG-PATH  [default: .] Path of the sandstone.config.ts folder.
 
 OPTIONS
-  -d, --dry                      Do not save the datapack. Mostly useful with `verbose`.
+  -d, --dry                      Do not save the packs. Mostly useful with `verbose`.
   -h, --help                     show CLI help
   -p, --production               Runs Sandstone in production mode. This sets process.env.SANDSTONE_ENV to "production".
   -v, --verbose                  Log all resulting resources: functions, advancements...

@@ -35,26 +35,16 @@ export type BuildOptions = {
 }
 
 type SaveFileObject = {
-  packType: 'datapack'
-  type: string
-  rootPath: string
   relativePath: string
-  content: string
-  resource: any
+  content: any
+  contentSummary: string
 }
 
 /*
  * Sandstone files cache is just a key-value pair,
  * key being the file path & value being the hash.
- *
- * The folder array is just here to delete folders that get empty after a new compilation.
- *
- * There is 1 cache for each "project folder".
  */
-type SandstoneCache = Record<string, {
-  resultFolder?: string
-  files: Record<string, string>
-}>
+type SandstoneCache = Record<string, string>
 
 // Return the hash of a string
 function hash(stringToHash: string): string {
@@ -76,7 +66,7 @@ async function mkDir(dirPath: string) {
   }
 }
 
-const cache: SandstoneCache = {}
+let cache: SandstoneCache = {}
 
 const dependenciesCache: DependencyGraph = new DependencyGraph({})
 
@@ -86,38 +76,6 @@ type FileResource = {
 }
 
 const fileResources: Map<string, FileResource> = new Map()
-
-/**
- * Recursively removes empty directories from the given directory.
- *
- * If the directory itself is empty, it is also removed.
- *
- * Code taken from: https://gist.github.com/jakub-g/5903dc7e4028133704a4
- *
- * @param {string} directory Path to the directory to clean up
- */
-async function removeEmptyDirectories(directory: string) {
-  // lstat does not follow symlinks (in contrast to stat)
-  const fileStats = await fs.lstat(directory);
-  if (!fileStats.isDirectory()) {
-    return;
-  }
-  let fileNames = await fs.readdir(directory);
-  if (fileNames.length > 0) {
-    const recursiveRemovalPromises = fileNames.map(
-      (fileName: string) => removeEmptyDirectories(path.join(directory, fileName)),
-    );
-    await Promise.all(recursiveRemovalPromises);
-
-    // re-evaluate fileNames; after deleting subdirectory
-    // we may have parent directory empty now
-    fileNames = await fs.readdir(directory);
-  }
-
-  if (fileNames.length === 0) {
-    await fs.rmdir(directory);
-  }
-}
 
 function getNewModules(dependenciesGraph: DependencyGraph, rawFiles: { path: string }[], projectFolder: string) {
   const rawFilesPath = rawFiles.map(({ path }) => path)
@@ -223,9 +181,11 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
 
   const { saveOptions, scripts } = sandstoneConfig
 
+  const outputFolder = path.join(rootFolder, '.sandstone', 'output')
+
   /// OPTIONS ///
-  const clientPath = cliOptions.production ? undefined : (cliOptions.clientPath || saveOptions.clientPath || await getClientPath())
-  const server = cliOptions.production ? undefined : await (async () => {
+  const clientPath = !cliOptions.production ? (cliOptions.clientPath || saveOptions.clientPath || await getClientPath()) : undefined
+  const server = !cliOptions.production && (cliOptions.serverPath || saveOptions.serverPath || cliOptions.ssh || saveOptions.ssh) ? await (async () => {
     if (cliOptions.ssh || saveOptions.ssh) {
       const sshOptions = JSON.stringify(await fs.readFile(cliOptions.ssh || saveOptions.ssh, 'utf8'))
 
@@ -236,21 +196,25 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
         remove: async (relativePath: string) => {},
       }
     }
+    const serverPath = cliOptions.serverPath || saveOptions.serverPath
     return {
-      readFile: async (relativePath: string, encoding: string = 'utf8') => await fs.readFile(path.join(cliOptions.serverPath || saveOptions.serverPath, relativePath), encoding),
+      readFile: async (relativePath: string, encoding: string = 'utf8') => await fs.readFile(path.join(serverPath, relativePath), encoding),
       writeFile: async (relativePath: string, contents: any) => {
         if (contents === undefined) {
-          await fs.unlink(path.join(cliOptions.serverPath || saveOptions.serverPath, relativePath))
+          await fs.unlink(path.join(serverPath, relativePath))
         } else {
-          await fs.writeFile(path.join(cliOptions.serverPath || saveOptions.serverPath, relativePath), contents)
+          await fs.writeFile(path.join(serverPath, relativePath), contents)
         }
       },
-      remove: async (relativePath: string) => await fs.remove(path.join(cliOptions.serverPath || saveOptions.serverPath, relativePath))
+      remove: async (relativePath: string) => await fs.remove(path.join(serverPath, relativePath))
     }
-  })()
-  const worldName = cliOptions.production ? undefined : cliOptions.world || saveOptions.world
-  const worldPath = worldName ? await getClientWorldPath(worldName, clientPath) : undefined
-  const root = cliOptions.production ? undefined : cliOptions.root || saveOptions.root
+  })() : undefined
+  let worldName: undefined | string = cliOptions.world || saveOptions.world
+  // Make sure the world exists
+  if (worldName && !cliOptions.production) {
+    await getClientWorldPath(worldName, clientPath)
+  }
+  const root = cliOptions.root !== undefined ? cliOptions.root : saveOptions.root
 
   const packName: string = cliOptions.name ?? sandstoneConfig.name
 
@@ -291,6 +255,12 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
     }
   }
 
+  // JSON indentation
+  process.env.INDENTATION = saveOptions.indentation
+
+  // Pack mcmeta
+  process.env.PACK_OPTIONS = JSON.stringify(sandstoneConfig.packs)
+
   // Configure error display
   if (!cliOptions.fullTrace) {
     pe.skipNodeFiles()
@@ -300,10 +270,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   // The configuration is ready.
 
   // Now, let's run the beforeAll script
-  await scripts?.beforeAll?.({
-    packName,
-    destination: path.join(rootFolder, '.sandstone', 'output'),
-  })
+  await scripts?.beforeAll?.()
 
   // Finally, let's import all .ts & .js files under ./src.
   let error = false
@@ -347,7 +314,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   // Transform resolved dependents into a flat list of files, and sort them by their number of dependencies
   const newModules = getNewModules(dependenciesCache, changedFilesPaths ?? rawFiles, absProjectFolder)
 
-  const { SandstonePack } = require(sandstoneLocation)
+  const { sandstonePack } = require(sandstoneLocation)
 
   // If files changed, we need to clean the cache & delete the related resources
   if (changedFiles) {
@@ -359,7 +326,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
       const oldResources = fileResources.get(node.name)
       if (oldResources) {
         for (const resource of oldResources.resources) {
-          SandstonePack.core.deleteResource(resource.path, resource.resourceType)
+          sandstonePack.core.deleteResource(resource.path, resource.resourceType)
         }
       }
     }
@@ -370,8 +337,8 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
     const modulePath = path.join(absProjectFolder, node.name)
 
     const currentResources: FileResource = {
-      resources: new Set([...SandstonePack.core.resourceNodes]),
-      objectives: new Set([...SandstonePack.objectives.entries()])
+      resources: new Set([...sandstonePack.core.resourceNodes]),
+      objectives: new Set([...sandstonePack.objectives.entries()])
     }
 
     // We have a module, let's require it!
@@ -390,8 +357,8 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
     // Now, find the resources that were added by this file & store them.
     // This will be used if those files are changed later.
     const newResources: FileResource = {
-      resources: diffResources(SandstonePack.core.resourceNodes, currentResources.resources),
-      objectives: diffSet(SandstonePack.objectives, currentResources.objectives),
+      resources: diffResources(sandstonePack.core.resourceNodes, currentResources.resources),
+      objectives: diffSet(sandstonePack.objectives, currentResources.objectives),
     }
 
     fileResources.set(node.name, newResources)
@@ -404,65 +371,43 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   /// SAVING RESULTS ///
   // Setup the cache if it doesn't exist.
   // This cache is here to avoid writing files on disk when they did not change.
-  const newCache: SandstoneCache[string] = {
-    files: {}
-  }
+  const newCache: SandstoneCache = {}
 
-  if (cache[absProjectFolder] === undefined) {
-    cache[absProjectFolder] = {
-      files: {},
-    }
+  if (cache === undefined) {
+    cache = {}
   }
 
   // Save the pack
 
-  // Run the beforeSave script
-  await scripts?.beforeSave?.({
-    packName,
-    destination: path.join(rootFolder, '.sandstone', 'output'),
-  })
+  // Run the beforeSave script (TODO: This is where sandstone-server will remove restart env vars)
+  await scripts?.beforeSave?.()
 
-  const packTypes = await SandstonePack.save(/*packName, {
-    // Save location
-    world: world,
-    asRootDatapack: root,
-    customPath: customPath,
-    minecraftPath: minecraftPath,
-    indentation: saveOptions.indentation,
-
-    // Data pack mcmeta
-    description: options.description ?? sandstoneConfig.description,
-    formatVersion: options.formatVersion ?? sandstoneConfig.formatVersion,
-
+  const packTypes = await sandstonePack.save({
     // Additional parameters
-    dryRun: options.dry,
-    verbose: options.verbose,
+    dryRun: cliOptions.dry,
+    verbose: cliOptions.verbose,
 
-    customFileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content }: SaveFileObject) => {
-      const realPath = path.join(destinationPath, relativePath)
+    fileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content, contentSummary}: SaveFileObject) => {
+      // We hash the relative path alongside the content to ensure unique hash.
+      const hashValue = hash(contentSummary + relativePath)
 
-      // We hash the real path alongside the content.
-      // Therefore, if the real path change (for example, the user changed the resulting directory), the file will be recreated.
-      const hashValue = hash(content + realPath)
+      // Add to new cache.
+      newCache[relativePath] = hashValue
 
-      // Add to new cache. We use the relative path as key to make the cache lighter.
-      newCache.files[relativePath] = hashValue
-      newCache.resultFolder = destinationPath
-
-      if (cache[absProjectFolder].files?.[realPath] === hashValue) {
+      if (cache[relativePath] === hashValue) {
         // Already in cache - skip
         return
       }
 
       // Not in cache: write to disk
+      const realPath = path.join(rootFolder, relativePath)
+
       await mkDir(path.dirname(realPath))
       return await fs.writeFile(realPath, content)
     })
-  }*/)
+  })
 
-  async function archiveOutput(packType: any) {
-    const outputPath = path.join(rootFolder, '.sandstone/output/', packType.type)
-
+  async function archiveOutput(packType: any, outputPath: string) {
     const archive = new AdmZip();
 
     await archive.addLocalFolderPromise(outputPath, {})
@@ -470,10 +415,10 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
     await archive.writeZipPromise(`${outputPath}.zip`, { overwrite: true })
   }
 
+  // TODO: implement linking to make the cache more useful when not archiving.
   if (!cliOptions.production) {
     for (const packType of packTypes) {
-      const outputPath = path.join(rootFolder, '.sandstone/output/', packType.type)
-      let archived = false
+      const outputPath = path.join(rootFolder, '.sandstone/output/archives', `${packName}_${packType.type}`)
 
       if (packType.handleOutput) {
         await packType.handleOutput(
@@ -490,15 +435,23 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
       }
 
       if (packType.archiveOutput) {
-        archiveOutput(packType)
+        archiveOutput(packType, outputPath)
       }
 
       // Handle client
       if (!(server && packType.networkSides === 'server')) {
-        let fullClientPath = path.join(clientPath, packType.clientPath)
+        let fullClientPath: string
 
-        try { fullClientPath = fullClientPath.replace('$packName$', packName) } catch {}
-        try { fullClientPath = fullClientPath.replace('$worldName$', worldName) } catch {}
+        if (worldName) {
+          fullClientPath = path.join(clientPath, packType.clientPath)
+
+          try { fullClientPath = fullClientPath.replace('$packName$', packName) } catch {}
+          try { fullClientPath = fullClientPath.replace('$worldName$', worldName) } catch {}
+        } else {
+          fullClientPath = path.join(clientPath, packType.rootPath)
+
+          try { fullClientPath = fullClientPath.replace('$packName$', packName) } catch {}
+        }
 
         if (packType.archiveOutput) {
           await fs.copyFile(`${outputPath}.zip`, `${fullClientPath}.zip`)
@@ -544,41 +497,42 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
     }
   } else {
     for (const packType of packTypes) {
+      const outputPath = path.join(rootFolder, '.sandstone/output/archives', `${packName}_${packType.type}`)
+
+      if (packType.handleOutput) {
+        await packType.handleOutput(
+          'output',
+          async (relativePath: string, encoding: string = 'utf8') => await fs.readFile(path.join(outputPath, relativePath), encoding),
+          async (relativePath: string, contents: any) => {
+            if (contents === undefined) {
+              await fs.unlink(path.join(outputPath, relativePath))
+            } else {
+              await fs.writeFile(path.join(outputPath, relativePath), contents)
+            }
+          }
+        )
+      }
+
       if (packType.archiveOutput) {
-        archiveOutput(packType)
+        archiveOutput(packType, outputPath)
       }
     }
   }
 
   // Delete old files that aren't cached anymore
-  const oldFilesNames = new Set<string>(Object.keys(cache[absProjectFolder].files))
+  const oldFilesNames = new Set<string>(Object.keys(cache))
 
-  Object.keys(newCache.files).forEach(name => oldFilesNames.delete(name))
-
-  const previousResultFolder = cache?.[absProjectFolder]?.resultFolder
+  Object.keys(newCache).forEach(name => oldFilesNames.delete(name))
 
   await Promise.allSettled(
-    [...oldFilesNames.values()].map(name => promisify(fs.rm)(path.join(previousResultFolder ?? '', name)))
+    [...oldFilesNames.values()].map(name => promisify(fs.rm)(path.join(outputFolder, name)))
   )
 
-  // Delete all empty folders of previous directory
-  if (previousResultFolder !== undefined) {
-    try {
-      await removeEmptyDirectories(previousResultFolder)
-    }
-    catch (e) {
-      // Previous directory was deleted by the user himself
-    }
-  }
-
   // Override old cache
-  cache[absProjectFolder] = newCache
+  cache = newCache
 
   // Run the afterAll script
-  await scripts?.afterAll?.({
-    packName,
-    destination: path.join(rootFolder, '.sandstone', 'output'),
-  })
+  await scripts?.afterAll?.()
 }
 
 /**

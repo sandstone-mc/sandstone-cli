@@ -1,6 +1,6 @@
 # Sandstone project
 
-To build the datapack, run:
+To build the packs, run:
 ```ts
 npm run build
 // or
@@ -9,7 +9,7 @@ yarn build
 sand build
 ```
 
-To automatically rebuild the datapack on each change, run:
+To automatically rebuild the packs on each change, run:
 ```ts
 npm run watch
 // or

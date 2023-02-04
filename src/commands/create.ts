@@ -24,18 +24,19 @@ export default class Create extends Command {
   static description = 'Create a new Sandstone project.'
 
   static examples = [
-    '$ sand create my-datapack',
+    '$ sand create my-pack',
   ]
 
   static flags = {
     help: flags.help({ char: 'h' }),
     yarn: flags.boolean({ description: 'Use yarn instead of npm.', env: 'USE_YARN', exclusive: ['npm'] }),
     npm: flags.boolean({ description: 'Use npm.', env: 'USE_NPM', exclusive: ['yarn'] }),
-    'datapack-name': flags.string({ char: 'd', env: 'DATAPACK_NAME', description: 'The name of the data pack.' }),
+    'pack-name': flags.string({ char: 'd', env: 'PACK_NAME', description: 'The name of the data pack.' }),
     namespace: flags.string({ char: 'n', env: 'NAMESPACE', description: 'The default namespace that will be used.' }),
-    'save-root': flags.boolean({ char: 'r', env: 'SAVE_ROOT', description: 'Save the data pack in the .minecraft/datapacks folder. Not compatible with --world and --custom-path.', exclusive: ['world', 'custom-path'] }),
-    world: flags.string({ char: 'w', env: 'WORLD', description: 'The world to save the data pack in. Not compatible with --save-root and --custom-path.', exclusive: ['save-root', 'custom-path'] }),
-    'custom-path': flags.string({ char: 'p', env: 'CUSTOM_PATH', description: 'The path to save the data pack at. Not compatible with --save-root and --world.', exclusive: ['save-root', 'world'] }),
+    'save-root': flags.boolean({ char: 'r', env: 'SAVE_ROOT', description: 'Save the data pack & resource pack in the .minecraft/datapacks & .minecraft/resource_packs folders. Not compatible with --world.', exclusive: ['world'] }),
+    world: flags.string({ char: 'w', env: 'WORLD', description: 'The world to save the packs in. Not compatible with --save-root or --server', exclusive: ['save-root', 'server'] }),
+    'server-path': flags.string({ char: 's', env: 'SERVER_PATH', description: 'The server path to write the server-side packs at. Not compatible with --world.', exclusive: ['world'] }),
+    'client-path': flags.string({ char: 'c', env: 'CLIENT_PATH', description: 'The client path to write packs at.' }),
   }
 
   static args = [{
@@ -50,7 +51,7 @@ export default class Create extends Command {
     const projectPath = path.resolve(args['project-name'])
     const projectName = path.basename(projectPath)
 
-    const datapackName = await getFlagOrPrompt(flags, 'datapack-name', {
+    const packName = await getFlagOrPrompt(flags, 'pack-name', {
       message: 'Name of your data pack (can be changed later) >',
       type: 'input',
       default: projectName,
@@ -60,33 +61,34 @@ export default class Create extends Command {
     const saveOptions: {
       root?: boolean | undefined
       world?: string | undefined
-      path?: string | undefined
+      serverPath?: string | undefined
+      clientPath?: string | undefined
     } = {}
 
     if (flags['save-root']) {
       saveOptions.root = true
     } else if (flags.world) {
       saveOptions.world = flags.world
-    } else if (flags['custom-path']) {
-      saveOptions.path = flags['custom-path']
-    } else {
-      // User didn't specify a way to save the file. Ask him.
-      const { saveChoice }: { saveChoice: 'root' | 'world' | 'custom' } = await inquirer.prompt({
+    } else if (flags['server-path']) {
+      saveOptions.serverPath = flags['server-path']
+    } else { // TODO: Add support for ssh
+      // User didn't specify a way to save the file. Ask them.
+      const { saveChoice }: { saveChoice: 'root' | 'world' | 'server-path' } = await inquirer.prompt({
         name: 'saveChoice',
         type: 'list',
-        message: 'Where do you want your datapack to be saved (can be changed later)?',
+        message: 'Where do you want your packs to be saved (can be changed later)?',
         choices: [{
-          name: 'In the root .minecraft/datapacks folder',
+          name: 'In the root client (.minecraft) folder',
           value: 'root',
-          short: '.minecraft/datapacks folder',
+          short: 'Client folder',
         }, {
-          name: 'In the datapacks folder of a world',
+          name: 'In a world',
           value: 'world',
-          short: 'World datapacks folder',
+          short: 'World',
         }, {
-          name: 'At a custom path',
-          value: 'path',
-          short: 'Custom path',
+          name: 'In a server',
+          value: 'server-path',
+          short: 'Server path',
         }],
       })
 
@@ -94,21 +96,25 @@ export default class Create extends Command {
         saveOptions.root = true
       } else if (saveChoice === 'world') {
         const { world }: { world: string } = await inquirer.prompt({
-          name: 'world',
-          message: 'What world do you want to save the Datapack in? >',
+          name: 'World',
+          message: 'What world do you want to save the packs in? >',
           type: 'list',
           choices: getWorldsList,
         })
         saveOptions.world = world
-      } else {
-        const { path }: { path: string } = await inquirer.prompt({
-          name: 'path',
-          message: 'Where do you want to save the data pack? Relative paths are accepted. >',
+      } else { // TODO: Add native folder selector
+        const { serverPath }: { serverPath: string } = await inquirer.prompt({
+          name: 'Server path',
+          message: 'Where is the server to save the packs in? Relative paths are accepted. >',
           type: 'input',
         })
 
-        saveOptions.path = path
+        saveOptions.serverPath = serverPath
       }
+    }
+
+    if (flags['client-path']) {
+      saveOptions.clientPath = flags['client-path']
     }
 
     const namespace = await getFlagOrPrompt(flags, 'namespace', {
@@ -125,7 +131,7 @@ export default class Create extends Command {
         choices: ['npm', 'yarn'],
       })).useYarn === 'yarn'
     }
-    
+
     fs.mkdirSync(projectPath)
 
     // Create project & install dependencies
@@ -147,6 +153,8 @@ export default class Create extends Command {
       execSync('npm install --save-dev typescript @types/node sandstone-cli', { cwd: projectPath })
     }
 
+    // TODO: Make profiles for either packs or libraries
+
     // Merge with the package.json template
     const generatedPackage = JSON.parse(fs.readFileSync(path.join(projectPath, 'package.json')).toString())
 
@@ -158,17 +166,21 @@ export default class Create extends Command {
 
     // Add files from template
     const templateFolder = path.join(__dirname, '../template/')
-    
+
     await fsExtra.copy(templateFolder, projectPath)
 
     // Write the sandstone.json file
-    fs.writeFileSync(path.join(projectPath, 'sandstone.config.ts'), 
+    fs.writeFileSync(path.join(projectPath, 'sandstone.config.ts'),
     `import type { SandstoneConfig } from 'sandstone'
 
 export default {
-  name: ${toJson(datapackName)},
-  description: ${toJson(['A ', {text: 'Sandstone', color: 'gold'}, ' data pack.'])},
-  formatVersion: ${7},
+  name: ${toJson(packName)},
+  packs: {
+    datapack: {
+      description: ${toJson(['A ', {text: 'Sandstone', color: 'gold'}, ' data pack.'])},
+      packFormat: ${11},
+    }
+  },
   namespace: ${toJson(namespace)},
   packUid: ${toJson(nanoid(8))},
   saveOptions: ${toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)))},

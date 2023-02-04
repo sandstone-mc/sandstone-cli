@@ -5,7 +5,7 @@ import path from 'path'
 import Watch from './watch'
 
 export default class Build extends Command {
-  static description = 'Build the datapack. ⛏'
+  static description = 'Build the packs. ⛏'
 
   static examples = [
     '$ sand build',

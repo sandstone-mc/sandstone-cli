@@ -16,7 +16,6 @@ jobs:
           node-version: 16
       - run: npm install -f
       - run: npm install @types/node
-      - run: npm run build
       - run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ./.npmrc
         env:
           NPM_TOKEN: ${{secrets.npm_token}}

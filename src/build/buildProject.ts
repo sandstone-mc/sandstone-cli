@@ -66,7 +66,7 @@ async function mkDir(dirPath: string) {
   }
 }
 
-let cache: SandstoneCache = {}
+let cache: SandstoneCache
 
 const dependenciesCache: DependencyGraph = new DependencyGraph({})
 
@@ -111,7 +111,7 @@ function diffMap<T extends unknown>(map1: Map<string, T>, map2: Map<string, T>):
 }
 
 function diffResources(tree1: any, tree2: any): Set<{ path: string[], resourceType: string }> {
-  return tree1.diff(tree2)
+  return diffSet(tree1, tree2)
 }
 
 /**
@@ -373,8 +373,21 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   // This cache is here to avoid writing files on disk when they did not change.
   const newCache: SandstoneCache = {}
 
+  const cacheFile = path.join(rootFolder, '.sandstone', 'cache.json')
+
   if (cache === undefined) {
-    cache = {}
+    let oldCache: SandstoneCache | undefined
+    try {
+      const fileRead = await fs.readFile(cacheFile, 'utf8')
+      if (fileRead) {
+        oldCache = JSON.parse(fileRead)
+      }
+    } catch {}
+    if (oldCache) {
+      cache = oldCache
+    } else {
+      cache = {}
+    }
   }
 
   // Save the pack
@@ -387,9 +400,9 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
     dryRun: cliOptions.dry,
     verbose: cliOptions.verbose,
 
-    fileHandler: saveOptions.customFileHandler ?? (async ({ relativePath, content, contentSummary}: SaveFileObject) => {
+    fileHandler: saveOptions.customFileHandler ?? (async (relativePath: string, content: any) => {
       // We hash the relative path alongside the content to ensure unique hash.
-      const hashValue = hash(contentSummary + relativePath)
+      const hashValue = hash(content + relativePath)
 
       // Add to new cache.
       newCache[relativePath] = hashValue
@@ -400,14 +413,16 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
       }
 
       // Not in cache: write to disk
-      const realPath = path.join(rootFolder, relativePath)
+      const realPath = path.join(outputFolder, relativePath)
 
       await mkDir(path.dirname(realPath))
       return await fs.writeFile(realPath, content)
     })
   })
 
-  async function archiveOutput(packType: any, outputPath: string) {
+  async function archiveOutput(packType: any) {
+    const outputPath = path.join(rootFolder, '.sandstone/output/archives', `${packName}_${packType.type}`)
+
     const archive = new AdmZip();
 
     await archive.addLocalFolderPromise(outputPath, {})
@@ -417,8 +432,9 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
 
   // TODO: implement linking to make the cache more useful when not archiving.
   if (!cliOptions.production) {
-    for (const packType of packTypes) {
-      const outputPath = path.join(rootFolder, '.sandstone/output/archives', `${packName}_${packType.type}`)
+    for (const _packType of packTypes) {
+      const packType = _packType[1]
+      const outputPath = path.join(rootFolder, '.sandstone/output', packType.type)
 
       if (packType.handleOutput) {
         await packType.handleOutput(
@@ -435,7 +451,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
       }
 
       if (packType.archiveOutput) {
-        archiveOutput(packType, outputPath)
+        archiveOutput(packType)
       }
 
       // Handle client
@@ -514,7 +530,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
       }
 
       if (packType.archiveOutput) {
-        archiveOutput(packType, outputPath)
+        archiveOutput(packType)
       }
     }
   }
@@ -525,11 +541,17 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   Object.keys(newCache).forEach(name => oldFilesNames.delete(name))
 
   await Promise.allSettled(
-    [...oldFilesNames.values()].map(name => promisify(fs.rm)(path.join(outputFolder, name)))
+    [...oldFilesNames.values()].map(name => {
+      return promisify(fs.rm)(path.join(outputFolder, name))
+    })
   )
+
 
   // Override old cache
   cache = newCache
+
+  // Write the cache to disk
+  await fs.writeFile(cacheFile, JSON.stringify(cache))
 
   // Run the afterAll script
   await scripts?.afterAll?.()
@@ -549,7 +571,7 @@ export async function buildProject(options: BuildOptions, folders: ProjectFolder
     await _buildProject(options, folders, resourceTypes, changedFiles)
   }
   catch (err: any) {
-    logError(err)
+    console.log(err)
   }
 }
 
@@ -561,6 +583,7 @@ function logError(err?: Error, file?: string) {
         `While loading "${file}", the following error happened:\n`
       )
     }
+    debugger;
     console.error(pe.render(err))
   }
 }

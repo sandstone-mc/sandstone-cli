@@ -171,7 +171,7 @@ export default class Create extends Command {
 
     // Write the sandstone.json file
     fs.writeFileSync(path.join(projectPath, 'sandstone.config.ts'),
-    `import type { SandstoneConfig } from 'sandstone'
+    `import type { DatapackConfig, SandstoneConfig } from 'sandstone'
 
 export default {
   name: ${toJson(packName)},
@@ -179,7 +179,7 @@ export default {
     datapack: {
       description: ${toJson(['A ', {text: 'Sandstone', color: 'gold'}, ' data pack.'])},
       packFormat: ${11},
-    }
+    } as DatapackConfig
   },
   namespace: ${toJson(namespace)},
   packUid: ${toJson(nanoid(8))},

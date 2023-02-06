@@ -19,7 +19,7 @@ $ npm install -g sandstone-cli
 $ sand COMMAND
 running command...
 $ sand (-v|--version|version)
-sandstone-cli/0.5.4 win32-x64 node-v16.1.0
+sandstone-cli/0.6.1 win32-x64 node-v16.15.0
 $ sand --help [COMMAND]
 USAGE
   $ sand COMMAND
@@ -47,7 +47,7 @@ ARGUMENTS
   CONFIG-PATH  [default: .] Path of the sandstone.config.ts folder.
 
 OPTIONS
-  -d, --dry                      Do not save the packs. Mostly useful with `verbose`.
+  -d, --dry                      Do not save the pack. Mostly useful with `verbose`.
   -h, --help                     show CLI help
   -p, --production               Runs Sandstone in production mode. This sets process.env.SANDSTONE_ENV to "production".
   -v, --verbose                  Log all resulting resources: functions, advancements...
@@ -55,23 +55,23 @@ OPTIONS
   --autoReload=port              Automatically reload your data pack in-game. Requires to open the world to LAN with
                                  cheats enabled, and to specify the port.
 
+  --clientPath=clientPath        Path of the client folder. Override the value specified in the configuration file.
+
   --description=description      Description of the data pack. Override the value specified in the configuration file.
 
   --formatVersion=formatVersion  Pack format version. Override the value specified in the configuration file.
 
   --fullTrace                    Show the full stack trace on errors.
 
-  --minecraftPath=minecraftPath  Path of the .minecraft folder. Override the value specified in the configuration file.
-
   --name=name                    Name of the data pack. Override the value specified in the configuration file.
 
   --namespace=namespace          The default namespace. Override the value specified in the configuration file.
 
-  --path=path                    The path to save the data pack at. Override the value specified in the configuration
+  --root                         Save the data pack & resource pack in the .minecraft/datapacks &
+                                 .minecraft/resource_packs folders. Override the value specified in the configuration
                                  file.
 
-  --root                         Save the data pack in the `.minecraft/datapacks` folder. Override the value specified
-                                 in the configuration file.
+  --serverPath=serverPath        Path of the server folder. Override the value specified in the configuration file.
 
   --strictErrors                 Stop data pack compilation on type errors.
 
@@ -84,7 +84,7 @@ EXAMPLES
   $ sand build --verbose --dry
 ```
 
-_See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.4/src/commands/build.ts)_
+_See code: [src/commands/build.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.6.1/src/commands/build.ts)_
 
 ## `sand create PROJECT-NAME`
 
@@ -98,26 +98,27 @@ ARGUMENTS
   PROJECT-NAME  Name of the project folder. This is not the name of the data pack.
 
 OPTIONS
-  -d, --datapack-name=datapack-name  The name of the data pack.
-  -h, --help                         show CLI help
-  -n, --namespace=namespace          The default namespace that will be used.
-  -p, --custom-path=custom-path      The path to save the data pack at. Not compatible with --save-root and --world.
+  -c, --client-path=client-path  The client path to write packs at.
+  -d, --pack-name=pack-name      The name of the data pack.
+  -h, --help                     show CLI help
+  -n, --namespace=namespace      The default namespace that will be used.
 
-  -r, --save-root                    Save the data pack in the .minecraft/datapacks folder. Not compatible with --world
-                                     and --custom-path.
+  -r, --save-root                Save the data pack & resource pack in the .minecraft/datapacks &
+                                 .minecraft/resource_packs folders. Not compatible with --world.
 
-  -w, --world=world                  The world to save the data pack in. Not compatible with --save-root and
-                                     --custom-path.
+  -s, --server-path=server-path  The server path to write the server-side packs at. Not compatible with --world.
 
-  --npm                              Use npm.
+  -w, --world=world              The world to save the packs in. Not compatible with --save-root or --server
 
-  --yarn                             Use yarn instead of npm.
+  --npm                          Use npm.
+
+  --yarn                         Use yarn instead of npm.
 
 EXAMPLE
-  $ sand create my-datapack
+  $ sand create my-pack
 ```
 
-_See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.4/src/commands/create.ts)_
+_See code: [src/commands/create.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.6.1/src/commands/create.ts)_
 
 ## `sand help [COMMAND]`
 
@@ -159,11 +160,11 @@ EXAMPLES
   $ sand update --cli --sandstone --skip
 ```
 
-_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.4/src/commands/update.ts)_
+_See code: [src/commands/update.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.6.1/src/commands/update.ts)_
 
 ## `sand watch PATH CONFIG-PATH`
 
-Build the datapack, and rebuild it on file change. ⛏
+Build the packs, and rebuild them on file change. ⛏
 
 ```
 USAGE
@@ -174,7 +175,7 @@ ARGUMENTS
   CONFIG-PATH  [default: .] Path of the sandstone.config.ts folder.
 
 OPTIONS
-  -d, --dry                      Do not save the datapack. Mostly useful with `verbose`.
+  -d, --dry                      Do not save the pack. Mostly useful with `verbose`.
   -h, --help                     show CLI help
   -p, --production               Runs Sandstone in production mode. This sets process.env.SANDSTONE_ENV to "production".
   -v, --verbose                  Log all resulting resources: functions, advancements...
@@ -182,23 +183,23 @@ OPTIONS
   --autoReload=port              Automatically reload your data pack in-game. Requires to open the world to LAN with
                                  cheats enabled, and to specify the port.
 
+  --clientPath=clientPath        Path of the client folder. Override the value specified in the configuration file.
+
   --description=description      Description of the data pack. Override the value specified in the configuration file.
 
   --formatVersion=formatVersion  Pack format version. Override the value specified in the configuration file.
 
   --fullTrace                    Show the full stack trace on errors.
 
-  --minecraftPath=minecraftPath  Path of the .minecraft folder. Override the value specified in the configuration file.
-
   --name=name                    Name of the data pack. Override the value specified in the configuration file.
 
   --namespace=namespace          The default namespace. Override the value specified in the configuration file.
 
-  --path=path                    The path to save the data pack at. Override the value specified in the configuration
+  --root                         Save the data pack & resource pack in the .minecraft/datapacks &
+                                 .minecraft/resource_packs folders. Override the value specified in the configuration
                                  file.
 
-  --root                         Save the data pack in the `.minecraft/datapacks` folder. Override the value specified
-                                 in the configuration file.
+  --serverPath=serverPath        Path of the server folder. Override the value specified in the configuration file.
 
   --strictErrors                 Stop data pack compilation on type errors.
 
@@ -211,5 +212,5 @@ EXAMPLES
   $ sand watch --verbose --dry
 ```
 
-_See code: [src/commands/watch.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.5.4/src/commands/watch.ts)_
+_See code: [src/commands/watch.ts](https://github.com/TheMrZZ/sandstone-cli/blob/v0.6.1/src/commands/watch.ts)_
 <!-- commandsstop -->

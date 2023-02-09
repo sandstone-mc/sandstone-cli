@@ -11,6 +11,7 @@ import madge from 'madge'
 import { DependencyGraph } from './graph'
 import chalk from 'chalk'
 import AdmZip from 'adm-zip'
+import deleteEmpty from 'delete-empty'
 
 const pe = new PrettyError()
 
@@ -545,6 +546,8 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
       return promisify(fs.rm)(path.join(outputFolder, name))
     })
   )
+
+  await deleteEmpty(outputFolder)
 
 
   // Override old cache

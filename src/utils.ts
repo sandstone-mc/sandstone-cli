@@ -134,4 +134,4 @@ export function getProjectFolders(projectFolder: string): ProjectFolders {
   }
 }
 
-export const datapackResources = ['mcfunction', 'advancement', 'item_modifier', 'loot_table', 'predicate', 'recipe', 'tag', 'trim_material', 'trim_pattern']
+export const datapackResources = ['functions', 'advancements', 'item_modifiers', 'loot_tables', 'predicates', 'recipes', 'tags', 'trim_materials', 'trim_patterns']

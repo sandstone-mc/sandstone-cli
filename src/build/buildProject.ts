@@ -174,7 +174,7 @@ async function getClientPath() {
  *
  * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
  */
-async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders, resourceTypes: string[], changedFiles?: string[]) {
+async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders, changedFiles?: string[]) {
   const sandstoneLocation = path.join(rootFolder, 'node_modules/sandstone/')
 
   // First, read sandstone.config.ts to get all properties
@@ -234,6 +234,8 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
     process.env.SANDSTONE_ENV = 'development'
   }
 
+  process.env.WORKING_DIR = absProjectFolder
+
   if (sandstoneConfig.packUid) {
     process.env.PACK_UID = sandstoneConfig.packUid
   }
@@ -246,13 +248,8 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
 
   const { onConflict } = sandstoneConfig
   if (onConflict) {
-    if (onConflict.default) {
-      process.env[`GENERAL_CONFLICT_STRATEGY`] = onConflict.default
-    }
-    for (const resource of resourceTypes) {
-      if (onConflict[resource]) {
-        process.env[`${resource.toUpperCase()}_CONFLICT_STRATEGY`] = onConflict[resource]
-      }
+    for (const resource of onConflict.entries()) {
+      process.env[`${resource[0].toUpperCase()}_CONFLICT_STRATEGY`] = resource[1]
     }
   }
 
@@ -569,9 +566,9 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
  *
  * @param changedFiles The files that changed since the last build.
  */
-export async function buildProject(options: BuildOptions, folders: ProjectFolders, resourceTypes: string[], changedFiles?: string[]) {
+export async function buildProject(options: BuildOptions, folders: ProjectFolders, changedFiles?: string[]) {
   try {
-    await _buildProject(options, folders, resourceTypes, changedFiles)
+    await _buildProject(options, folders, changedFiles)
   }
   catch (err: any) {
     console.log(err)

@@ -133,5 +133,3 @@ export function getProjectFolders(projectFolder: string): ProjectFolders {
     absProjectFolder, rootFolder, sandstoneConfigFolder
   }
 }
-
-export const datapackResources = ['functions', 'advancements', 'item_modifiers', 'loot_tables', 'predicates', 'recipes', 'tags', 'trim_materials', 'trim_patterns']

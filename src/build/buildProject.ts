@@ -248,8 +248,8 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
 
   const { onConflict } = sandstoneConfig
   if (onConflict) {
-    for (const resource of onConflict.entries()) {
-      process.env[`${resource[0].toUpperCase()}_CONFLICT_STRATEGY`] = resource[1]
+    for (const resource of Object.entries(onConflict)) {
+      process.env[`${resource[0].toUpperCase()}_CONFLICT_STRATEGY`] = resource[1] as string
     }
   }
 
@@ -583,7 +583,7 @@ function logError(err?: Error, file?: string) {
         `While loading "${file}", the following error happened:\n`
       )
     }
-    debugger;
+    debugger
     console.error(pe.render(err))
   }
 }

@@ -393,30 +393,101 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   // Run the beforeSave script (TODO: This is where sandstone-server will remove restart env vars)
   await scripts?.beforeSave?.()
 
+  const excludeOption = saveOptions.resources?.exclude
+
+  const fileExclusions = excludeOption ? {
+    generated: (excludeOption.generated || excludeOption) as RegExp[] | undefined,
+    existing: (excludeOption.existing || excludeOption) as RegExp[] | undefined
+  } : false
+
+  const fileHandlers = saveOptions.resources?.handle as ({ path: RegExp, callback: (contents: string | Buffer | Promise<Buffer>) => Promise<Buffer> })[] || false
+
   const packTypes = await sandstonePack.save({
     // Additional parameters
-    dryRun: cliOptions.dry,
+    dry: cliOptions.dry,
     verbose: cliOptions.verbose,
 
     fileHandler: saveOptions.customFileHandler ?? (async (relativePath: string, content: any) => {
-      // We hash the relative path alongside the content to ensure unique hash.
-      const hashValue = hash(content + relativePath)
-
-      // Add to new cache.
-      newCache[relativePath] = hashValue
-
-      if (cache[relativePath] === hashValue) {
-        // Already in cache - skip
-        return
+      let pathPass = true
+      if (fileExclusions && fileExclusions.generated) {
+        for (const exclude of fileExclusions.generated) {
+          if (!Array.isArray(exclude)) {
+            pathPass = !exclude.test(relativePath)
+          }
+        }
       }
 
-      // Not in cache: write to disk
-      const realPath = path.join(outputFolder, relativePath)
+      if (fileHandlers) {
+        for (const handler of fileHandlers) {
+          if (handler.path.test(relativePath)) {
+            content = await handler.callback(content)
+          }
+        }
+      }
 
-      await mkDir(path.dirname(realPath))
-      return await fs.writeFile(realPath, content)
+      if (pathPass) {
+        // We hash the relative path alongside the content to ensure unique hash.
+        const hashValue = hash(content + relativePath)
+
+        // Add to new cache.
+        newCache[relativePath] = hashValue
+
+        if (cache[relativePath] === hashValue) {
+          // Already in cache - skip
+          return
+        }
+
+        // Not in cache: write to disk
+        const realPath = path.join(outputFolder, relativePath)
+
+        await mkDir(path.dirname(realPath))
+        return await fs.writeFile(realPath, content)
+      }
     })
   })
+
+  async function handleResources(packType: string) {
+    const working = path.join(rootFolder, 'resources', packType)
+
+    for await (const file of walk(path.join(rootFolder, 'resources', packType), { filter: (_path) => {
+      const relativePath = path.join(packType, _path.split(working)[1])
+      let pathPass = true
+      if (fileExclusions && fileExclusions.existing) {
+        for (const exclude of fileExclusions.existing) {
+          pathPass = Array.isArray(exclude) ? !exclude[0].test(relativePath) : !exclude.test(relativePath)
+        }
+      }
+      return pathPass
+    }})) {
+      const relativePath = path.join(packType, file.path.split(working)[1])
+
+      try {
+        let content = await fs.readFile(file.path)
+
+        if (fileHandlers) {
+          for (const handler of fileHandlers) {
+            if (handler.path.test(relativePath)) {
+              content = await handler.callback(content)
+            }
+          }
+        }
+
+        // We hash the relative path alongside the content to ensure unique hash.
+        const hashValue = hash(content + relativePath)
+
+        // Add to new cache.
+        newCache[relativePath] = hashValue
+
+        if (cache[relativePath] !== hashValue) {
+          // Not in cache: write to disk
+          const realPath = path.join(outputFolder, relativePath)
+
+          await mkDir(path.dirname(realPath))
+          await fs.writeFile(realPath, content)
+        }
+      } catch (e) {}
+    }
+  }
 
   async function archiveOutput(packType: any) {
     const outputPath = path.join(rootFolder, '.sandstone/output/archives', `${packName}_${packType.type}`)
@@ -430,7 +501,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
 
   // TODO: implement linking to make the cache more useful when not archiving.
   if (!cliOptions.production) {
-    for (const _packType of packTypes) {
+    for await (const _packType of packTypes) {
       const packType = _packType[1]
       const outputPath = path.join(rootFolder, '.sandstone/output', packType.type)
 
@@ -447,6 +518,8 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
           }
         )
       }
+
+      handleResources(packType.type)
 
       if (packType.archiveOutput) {
         archiveOutput(packType)
@@ -510,7 +583,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
       }
     }
   } else {
-    for (const packType of packTypes) {
+    for await (const packType of packTypes) {
       const outputPath = path.join(rootFolder, '.sandstone/output/archives', `${packName}_${packType.type}`)
 
       if (packType.handleOutput) {
@@ -526,6 +599,8 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
           }
         )
       }
+
+      handleResources(packType.type)
 
       if (packType.archiveOutput) {
         archiveOutput(packType)

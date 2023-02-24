@@ -246,10 +246,11 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
     process.env.NAMESPACE = namespace
   }
 
-  const { onConflict } = sandstoneConfig
-  if (onConflict) {
-    for (const resource of Object.entries(onConflict)) {
-      process.env[`${resource[0].toUpperCase()}_CONFLICT_STRATEGY`] = resource[1] as string
+  for (const [k, pack] of Object.entries(sandstoneConfig.packs) as any[]) {
+    if (pack.onConflict) {
+      for (const resource of Object.entries(pack.onConflict)) {
+        process.env[`${resource[0].toUpperCase()}_CONFLICT_STRATEGY`] = resource[1] as string
+      }
     }
   }
 
@@ -449,43 +450,52 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   async function handleResources(packType: string) {
     const working = path.join(rootFolder, 'resources', packType)
 
-    for await (const file of walk(path.join(rootFolder, 'resources', packType), { filter: (_path) => {
-      const relativePath = path.join(packType, _path.split(working)[1])
-      let pathPass = true
-      if (fileExclusions && fileExclusions.existing) {
-        for (const exclude of fileExclusions.existing) {
-          pathPass = Array.isArray(exclude) ? !exclude[0].test(relativePath) : !exclude.test(relativePath)
-        }
-      }
-      return pathPass
-    }})) {
-      const relativePath = path.join(packType, file.path.split(working)[1])
+    let exists = false
 
-      try {
-        let content = await fs.readFile(file.path)
+    try {
+      await fs.access(working)
+      exists = true
+    } catch (e) {}
 
-        if (fileHandlers) {
-          for (const handler of fileHandlers) {
-            if (handler.path.test(relativePath)) {
-              content = await handler.callback(content)
-            }
+    if (exists) {
+      for await (const file of walk(path.join(rootFolder, 'resources', packType), { filter: (_path) => {
+        const relativePath = path.join(packType, _path.split(working)[1])
+        let pathPass = true
+        if (fileExclusions && fileExclusions.existing) {
+          for (const exclude of fileExclusions.existing) {
+            pathPass = Array.isArray(exclude) ? !exclude[0].test(relativePath) : !exclude.test(relativePath)
           }
         }
+        return pathPass
+      }})) {
+        const relativePath = path.join(packType, file.path.split(working)[1])
 
-        // We hash the relative path alongside the content to ensure unique hash.
-        const hashValue = hash(content + relativePath)
+        try {
+          let content = await fs.readFile(file.path)
 
-        // Add to new cache.
-        newCache[relativePath] = hashValue
+          if (fileHandlers) {
+            for (const handler of fileHandlers) {
+              if (handler.path.test(relativePath)) {
+                content = await handler.callback(content)
+              }
+            }
+          }
 
-        if (cache[relativePath] !== hashValue) {
-          // Not in cache: write to disk
-          const realPath = path.join(outputFolder, relativePath)
+          // We hash the relative path alongside the content to ensure unique hash.
+          const hashValue = hash(content + relativePath)
 
-          await mkDir(path.dirname(realPath))
-          await fs.writeFile(realPath, content)
-        }
-      } catch (e) {}
+          // Add to new cache.
+          newCache[relativePath] = hashValue
+
+          if (cache[relativePath] !== hashValue) {
+            // Not in cache: write to disk
+            const realPath = path.join(outputFolder, relativePath)
+
+            await mkDir(path.dirname(realPath))
+            await fs.writeFile(realPath, content)
+          }
+        } catch (e) {}
+      }
     }
   }
 

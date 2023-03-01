@@ -3,7 +3,6 @@
     "oclif",
     "oclif-typescript"
   ],
-  "ignorePatterns": "src/template/*/**",
   "rules": {
     "@typescript-eslint/semi": [
       "error",

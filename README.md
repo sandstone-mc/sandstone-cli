@@ -95,11 +95,11 @@ USAGE
   $ sand create PROJECT-NAME
 
 ARGUMENTS
-  PROJECT-NAME  Name of the project folder. This is not the name of the data pack.
+  PROJECT-NAME  Name of the project folder. This is not the name of the output pack(s).
 
 OPTIONS
   -c, --client-path=client-path  The client path to write packs at.
-  -d, --pack-name=pack-name      The name of the data pack.
+  -d, --pack-name=pack-name      The name of the pack(s).
   -h, --help                     show CLI help
   -n, --namespace=namespace      The default namespace that will be used.
 
@@ -107,6 +107,10 @@ OPTIONS
                                  .minecraft/resource_packs folders. Not compatible with --world.
 
   -s, --server-path=server-path  The server path to write the server-side packs at. Not compatible with --world.
+
+  -t, --library                  Whether the project will be a library for use in other Sandstone projects.
+
+  -v, --version=version          What version of Sandstone you'd like to create a project for.
 
   -w, --world=world              The world to save the packs in. Not compatible with --save-root or --server
 

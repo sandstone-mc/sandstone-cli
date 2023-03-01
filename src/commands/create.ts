@@ -8,14 +8,14 @@ import util from 'util'
 import { getFlagOrPrompt, getWorldsList, hasYarn } from '../utils'
 import { nanoid } from 'nanoid'
 
-function toJson(obj: any, pretty: boolean = false): string {
+function toJson(obj: any, pretty = false): string {
   return util.inspect(obj, {
-      depth: +Infinity,
-      colors: false,
-      breakLength: +Infinity,
-      compact: !pretty,
-      maxArrayLength: +Infinity,
-    })
+    depth: Number(Infinity),
+    colors: false,
+    breakLength: Number(Infinity),
+    compact: !pretty,
+    maxArrayLength: Number(Infinity),
+  })
 }
 
 export default class Create extends Command {
@@ -29,8 +29,8 @@ export default class Create extends Command {
     help: flags.help({ char: 'h' }),
     yarn: flags.boolean({ description: 'Use yarn instead of npm.', env: 'USE_YARN', exclusive: ['npm'] }),
     npm: flags.boolean({ description: 'Use npm.', env: 'USE_NPM', exclusive: ['yarn'] }),
-    library: flags.boolean({ char: 't', env: 'LIBRARY', description: 'Whether the project will be a library for use in other Sandstone projects.'}),
-    version: flags.string({ char: 'v', env: 'SANDSTONE_VERSION', description: `What version of Sandstone you'd like to create a project for.`}),
+    library: flags.boolean({ char: 't', env: 'LIBRARY', description: 'Whether the project will be a library for use in other Sandstone projects.' }),
+    version: flags.string({ char: 'v', env: 'SANDSTONE_VERSION', description: 'What version of Sandstone you\'d like to create a project for.' }),
     'pack-name': flags.string({ char: 'd', env: 'PACK_NAME', description: 'The name of the pack(s).' }),
     namespace: flags.string({ char: 'n', env: 'NAMESPACE', description: 'The default namespace that will be used.' }),
     'save-root': flags.boolean({ char: 'r', env: 'SAVE_ROOT', description: 'Save the data pack & resource pack in the .minecraft/datapacks & .minecraft/resource_packs folders. Not compatible with --world.', exclusive: ['world'] }),
@@ -54,7 +54,7 @@ export default class Create extends Command {
     const projectType = Boolean(await getFlagOrPrompt(flags, 'library', {
       message: 'Whether your project will be a library for use in other Sandstone projects >',
       type: 'input',
-      default: false
+      default: false,
     })) === true ? 'library' : 'pack'
 
     const versions = [['0.13.6', '0.5.4'], ['0.14.0-alpha.13', '0.5.4'], ['0.14.0-alpha.19', '0.6.2']] as const
@@ -65,17 +65,19 @@ export default class Create extends Command {
       name: 'sandstoneVersion',
       type: 'list',
       message: 'Which version of Sandstone do you want to use? These are the only supported versions for new projects.',
-      choices: versions.map(version => ({
-        name: version[0].includes('alpha') ? `Alpha Version ${version[0].split('.')[3]} for release ${version[0].split('.')[1]}` : `Major Version 0.${version[0].split('.')[1]}`
+      choices: versions.map((version) => ({
+        name: version[0].includes('alpha') ? `Alpha Version ${version[0].split('.')[3]} for release ${version[0].split('.')[1]}` : `Major Version 0.${version[0].split('.')[1]}`,
+        value: version,
+        short: version[0],
       })),
-      default: stableIndex
+      default: stableIndex,
     }) as {
       sandstoneVersion: typeof versions[any]
     }
 
-    let packName: string = ''
+    let packName = ''
 
-    let namespace: string = ''
+    let namespace = ''
 
     if (projectType === 'pack') {
       packName = await getFlagOrPrompt(flags, 'pack-name', {
@@ -183,13 +185,19 @@ export default class Create extends Command {
     // Merge with the config values
     let templateConfig = await fs.readFile(configPath, 'utf8')
 
-    if (projectType === 'pack') {
-      templateConfig.replace(`name: 'template'`, `name: ${toJson(packName)}`)
+    templateConfig = templateConfig.replace('packUid: \'kZZpDK67\'', `packUid: '${toJson(nanoid(8))}'`)
 
-      templateConfig.replace(`namespace: 'default'`, `namespace: ${toJson(namespace)}`)
-    } else {
-      templateConfig.replace(`name: 'template'`, `name: ${toJson(`${projectName}-testing`)}`)
+    let _name = packName
+    let _namespace = namespace
+
+    if (projectType === 'library') {
+      _name += '-testing'
+      _namespace += '_test'
     }
+
+    templateConfig = templateConfig.replace('name: \'template\'', `name: ${toJson(_name)}`)
+
+    templateConfig = templateConfig.replace('namespace: \'default\'', `namespace: ${toJson(_namespace)}`)
 
     // TODO: packFormat
 

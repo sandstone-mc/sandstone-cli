@@ -1,7 +1,7 @@
 {
   "name": "sandstone-cli",
   "description": "The CLI for Sandstone - the data pack creation library.",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "contributors": [
     {
       "name": "TheMrZZ - Florian ERNST",
@@ -95,7 +95,7 @@
     "postpack": "rimraf oclif.manifest.json",
     "posttest": "eslint . --ext .ts --config .eslintrc",
     "prepack": "npm run build",
-    "build": "rimraf lib && tsc -b && node ./copyTemplate.js && oclif-dev manifest && oclif-dev readme",
+    "build": "rimraf lib && tsc -b && oclif-dev manifest && oclif-dev readme",
     "watch": "npm run build && chokidar \"src/**/*\" -c \"npm run build\"",
     "test": "echo NO TESTS",
     "version": "oclif-dev readme && git add README.md"

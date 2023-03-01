@@ -185,7 +185,7 @@ export default class Create extends Command {
     // Merge with the config values
     let templateConfig = await fs.readFile(configPath, 'utf8')
 
-    templateConfig = templateConfig.replace('packUid: \'kZZpDK67\'', `packUid: '${toJson(nanoid(8))}'`)
+    templateConfig = templateConfig.replace('packUid: \'kZZpDK67\'', `packUid: ${toJson(nanoid(8))}`)
 
     let _name = packName
     let _namespace = namespace

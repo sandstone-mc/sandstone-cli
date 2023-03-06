@@ -500,20 +500,28 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   }
 
   async function archiveOutput(packType: any) {
-    const outputPath = path.join(rootFolder, '.sandstone/output/archives', `${packName}_${packType.type}`)
+    const input = path.join(outputFolder, packType.type)
 
-    const archive = new AdmZip();
+    if ((await fs.readdir(input)).length !== 0) {
+      const archive = new AdmZip()
 
-    await archive.addLocalFolderPromise(outputPath, {})
+      await archive.addLocalFolderPromise(input, {})
 
-    await archive.writeZipPromise(`${outputPath}.zip`, { overwrite: true })
+      await archive.writeZipPromise(`${path.join(outputFolder, 'archives', `${packName}_${packType.type}`)}.zip`, { overwrite: true })
+
+      return true
+    }
+
+    return false
   }
 
   // TODO: implement linking to make the cache more useful when not archiving.
   if (!cliOptions.production) {
     for await (const _packType of packTypes) {
       const packType = _packType[1]
-      const outputPath = path.join(rootFolder, '.sandstone/output', packType.type)
+      const outputPath = path.join(outputFolder, packType.type)
+
+      await fs.ensureDir(outputPath)
 
       if (packType.handleOutput) {
         await packType.handleOutput(
@@ -531,8 +539,10 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
 
       handleResources(packType.type)
 
+      let archivedOutput = false
+
       if (packType.archiveOutput) {
-        archiveOutput(packType)
+        archivedOutput = await archiveOutput(packType)
       }
 
       // Handle client
@@ -551,9 +561,12 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
         }
 
         if (packType.archiveOutput) {
-          await fs.copyFile(`${outputPath}.zip`, `${fullClientPath}.zip`)
+          if (archivedOutput) {
+            await fs.copyFile(`${path.join(outputFolder, 'archives', `${packName}_${packType.type}`)}.zip`, `${fullClientPath}.zip`)
+          }
         } else {
           await fs.remove(fullClientPath)
+
           await fs.copy(outputPath, fullClientPath)
         }
 
@@ -578,7 +591,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
 
         try { serverPath = serverPath.replace('$packName$', packName) } catch {}
 
-        if (packType.archiveOutput) {
+        if (packType.archiveOutput && archivedOutput) {
           await server.writeFile(await fs.readFile(`${outputPath}.zip`, 'utf8'), `${serverPath}.zip`)
         } else {
           server.remove(serverPath)
@@ -594,7 +607,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
     }
   } else {
     for await (const packType of packTypes) {
-      const outputPath = path.join(rootFolder, '.sandstone/output/archives', `${packName}_${packType.type}`)
+      const outputPath = path.join(outputFolder, packType.type)
 
       if (packType.handleOutput) {
         await packType.handleOutput(

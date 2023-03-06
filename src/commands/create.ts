@@ -33,7 +33,7 @@ export default class Create extends Command {
     version: flags.string({ char: 'v', env: 'SANDSTONE_VERSION', description: 'What version of Sandstone you\'d like to create a project for.' }),
     'pack-name': flags.string({ char: 'd', env: 'PACK_NAME', description: 'The name of the pack(s).' }),
     namespace: flags.string({ char: 'n', env: 'NAMESPACE', description: 'The default namespace that will be used.' }),
-    'save-root': flags.boolean({ char: 'r', env: 'SAVE_ROOT', description: 'Save the data pack & resource pack in the .minecraft/datapacks & .minecraft/resource_packs folders. Not compatible with --world.', exclusive: ['world'] }),
+    'save-root': flags.boolean({ char: 'r', env: 'SAVE_ROOT', description: 'Save the datapack & resource pack in the .minecraft/datapacks & .minecraft/resource_packs folders. Not compatible with --world.', exclusive: ['world'] }),
     world: flags.string({ char: 'w', env: 'WORLD', description: 'The world to save the packs in. Not compatible with --save-root or --server', exclusive: ['save-root', 'server'] }),
     'server-path': flags.string({ char: 's', env: 'SERVER_PATH', description: 'The server path to write the server-side packs at. Not compatible with --world.', exclusive: ['world'] }),
     'client-path': flags.string({ char: 'c', env: 'CLIENT_PATH', description: 'The client path to write packs at.' }),
@@ -57,7 +57,7 @@ export default class Create extends Command {
       default: false,
     })) === true ? 'library' : 'pack'
 
-    const versions = [['0.13.6', '0.5.4'], ['0.14.0-alpha.13', '0.5.4'], ['0.14.0-alpha.19', '0.6.2']] as const
+    const versions = [['0.13.6', '0.5.4'], ['0.14.0-alpha.13', '0.5.4'], ['0.14.0-alpha.20', '0.6.5']] as const
 
     const stableIndex = 0
 
@@ -174,7 +174,7 @@ export default class Create extends Command {
 
     exec(`git checkout ${projectType}-${sandstoneVersion[0]}`)
 
-    exec('rm -rf .git')
+    exec('npx rimraf -rf .git')
 
     exec(`${useYarn ? 'yarn' : 'npm'} install`)
 

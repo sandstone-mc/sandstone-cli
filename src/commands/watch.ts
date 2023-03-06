@@ -20,18 +20,18 @@ export default class Watch extends Command {
     dry: flags.boolean({ char: 'd', description: 'Do not save the pack. Mostly useful with `verbose`.' }),
     verbose: flags.boolean({ char: 'v', description: 'Log all resulting resources: functions, advancements...' }),
     namespace: flags.string({ description: 'The default namespace. Override the value specified in the configuration file.' }),
-    world: flags.string({ description: 'The world to save the data pack in. Override the value specified in the configuration file.' }),
-    root: flags.boolean({ description: 'Save the data pack & resource pack in the .minecraft/datapacks & .minecraft/resource_packs folders. Override the value specified in the configuration file.' }),
+    world: flags.string({ description: 'The world to save the datapack in. Override the value specified in the configuration file.' }),
+    root: flags.boolean({ description: 'Save the datapack & resource pack in the .minecraft/datapacks & .minecraft/resource_packs folders. Override the value specified in the configuration file.' }),
     clientPath: flags.string({ name: 'client-path', description: 'Path of the client folder. Override the value specified in the configuration file.' }),
     serverPath: flags.string({ name: 'server-path', description: 'Path of the server folder. Override the value specified in the configuration file.' }),
     // TODO: ssh
-    name: flags.string({ description: 'Name of the data pack. Override the value specified in the configuration file.' }),
-    description: flags.string({ description: 'Description of the data pack. Override the value specified in the configuration file.' }),
+    name: flags.string({ description: 'Name of the datapack. Override the value specified in the configuration file.' }),
+    description: flags.string({ description: 'Description of the datapack. Override the value specified in the configuration file.' }),
     formatVersion: flags.integer({ name: 'format', description: 'Pack format version. Override the value specified in the configuration file.' }),
     fullTrace: flags.boolean({ name: 'full-trace', description: 'Show the full stack trace on errors.' }),
-    strictErrors: flags.boolean({ description: 'Stop data pack compilation on type errors.', default: false }),
+    strictErrors: flags.boolean({ description: 'Stop datapack compilation on type errors.', default: false }),
     production: flags.boolean({ char: 'p', description: 'Runs Sandstone in production mode. This sets process.env.SANDSTONE_ENV to "production".', default: false }),
-    autoReload: flags.integer({ description: 'Automatically reload your data pack in-game. Requires to open the world to LAN with cheats enabled, and to specify the port.', helpValue: 'port' }),
+    autoReload: flags.integer({ description: 'Automatically reload your datapack in-game. Requires to open the world to LAN with cheats enabled, and to specify the port.', helpValue: 'port' }),
   }
 
   static args = [{
@@ -63,7 +63,7 @@ export default class Watch extends Command {
           port: flags.autoReload,
         })
       } catch (e) {
-        console.log(chalk.rgb(255, 204, 0)`Failed to connect to localhost:${flags.autoReload}. The data pack won't be auto reloaded.`)
+        console.log(chalk.rgb(255, 204, 0)`Failed to connect to localhost:${flags.autoReload}. The datapack won't be auto reloaded.`)
       }
     }
 

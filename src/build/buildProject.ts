@@ -1,7 +1,6 @@
 import path from 'path'
 import * as os from 'os'
 import crypto from 'crypto'
-import { promisify } from 'util'
 import fs from 'fs-extra'
 import { ProjectFolders } from '../utils'
 import PrettyError from 'pretty-error'
@@ -636,11 +635,9 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
 
   Object.keys(newCache).forEach(name => oldFilesNames.delete(name))
 
-  await Promise.allSettled(
-    [...oldFilesNames.values()].map(name => {
-      return promisify(fs.rm)(path.join(outputFolder, name))
-    })
-  )
+  for await (const name of oldFilesNames) {
+    await fs.rm(path.join(outputFolder, name))
+  }
 
   await deleteEmpty(outputFolder)
 

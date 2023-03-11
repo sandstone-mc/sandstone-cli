@@ -1,7 +1,7 @@
 {
   "name": "sandstone-cli",
   "description": "The CLI for Sandstone - the datapack creation library.",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "contributors": [
     {
       "name": "TheMrZZ - Florian ERNST",

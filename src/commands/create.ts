@@ -160,8 +160,10 @@ export default class Create extends Command {
         message: 'What package manager do you want to use? >',
         type: 'list',
         choices: ['npm', 'yarn'],
-      })).useYarn === 'yarn'
+      })).useYarn
     }
+
+    console.log(useYarn)
 
     fs.mkdirSync(projectPath)
 

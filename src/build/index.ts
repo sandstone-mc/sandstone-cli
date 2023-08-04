@@ -2,37 +2,39 @@ import path from 'path'
 import * as os from 'os'
 import crypto from 'crypto'
 import fs from 'fs-extra'
-import { ProjectFolders } from '../utils'
 import PrettyError from 'pretty-error'
 import walk from 'klaw'
 
 import madge from 'madge'
-import { DependencyGraph } from './graph'
+import { DependencyGraph } from './graph.js'
 import chalk from 'chalk'
 import AdmZip from 'adm-zip'
 import deleteEmpty from 'delete-empty'
+import { ProjectFolders } from '../utils.js'
+
+type BuildOptions = {
+    // Flags
+    dry?: boolean
+    verbose?: boolean
+    root?: boolean
+    fullTrace?: boolean
+    strictErrors?: boolean
+    production?: boolean
+  
+    // Values
+    path: string,
+    configPath: string,
+    name?: string
+    namespace?: string
+    world?: string
+    clientPath?: string
+    serverPath?: string
+
+    // TODO: implement ssh
+    ssh?: any
+}
 
 const pe = new PrettyError()
-
-export type BuildOptions = {
-  world?: string
-  root?: boolean
-  clientPath?: string
-  serverPath?: string
-  ssh?: string
-
-  namespace?: string
-
-  name?: string
-  description?: string
-  formatVersion?: number
-
-  dry?: boolean
-  verbose?: boolean
-
-  fullTrace?: boolean
-  production?: boolean
-}
 
 type SaveFileObject = {
   relativePath: string
@@ -191,14 +193,14 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
 
       // TODO: implement SFTP
       return {
-        readFile: async (relativePath: string, encoding: string = 'utf8') => {},
+        readFile: async (relativePath: string, encoding: fs.EncodingOption = 'utf8') => {},
         writeFile: async (relativePath: string, contents: any) => {},
         remove: async (relativePath: string) => {},
       }
     }
     const serverPath = cliOptions.serverPath || saveOptions.serverPath
     return {
-      readFile: async (relativePath: string, encoding: string = 'utf8') => await fs.readFile(path.join(serverPath, relativePath), encoding),
+      readFile: async (relativePath: string, encoding: fs.EncodingOption = 'utf8') => await fs.readFile(path.join(serverPath, relativePath), encoding),
       writeFile: async (relativePath: string, contents: any) => {
         if (contents === undefined) {
           await fs.unlink(path.join(serverPath, relativePath))
@@ -525,7 +527,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
       if (packType.handleOutput) {
         await packType.handleOutput(
           'output',
-          async (relativePath: string, encoding: string = 'utf8') => await fs.readFile(path.join(outputPath, relativePath), encoding),
+          async (relativePath: string, encoding: fs.EncodingOption = 'utf8') => await fs.readFile(path.join(outputPath, relativePath), encoding),
           async (relativePath: string, contents: any) => {
             if (contents === undefined) {
               await fs.unlink(path.join(outputPath, relativePath))
@@ -572,7 +574,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
         if (packType.handleOutput) {
           await packType.handleOutput(
             'client',
-            async (relativePath: string, encoding: string = 'utf8') => await fs.readFile(path.join(clientPath, relativePath), encoding),
+            async (relativePath: string, encoding: fs.EncodingOption = 'utf8') => await fs.readFile(path.join(clientPath, relativePath), encoding),
             async (relativePath: string, contents: any) => {
               if (contents === undefined) {
                 fs.unlink(path.join(clientPath, relativePath))
@@ -611,7 +613,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
       if (packType.handleOutput) {
         await packType.handleOutput(
           'output',
-          async (relativePath: string, encoding: string = 'utf8') => await fs.readFile(path.join(outputPath, relativePath), encoding),
+          async (relativePath: string, encoding: fs.EncodingOption = 'utf8') => await fs.readFile(path.join(outputPath, relativePath), encoding),
           async (relativePath: string, contents: any) => {
             if (contents === undefined) {
               await fs.unlink(path.join(outputPath, relativePath))

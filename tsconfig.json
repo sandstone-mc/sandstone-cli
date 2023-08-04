@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
     "declaration": true,
-    "module": "commonjs",
+    "module": "NodeNext",
     "outDir": "lib",
     "rootDir": "src",
     "strict": true,
@@ -10,7 +10,6 @@
       "es2020"
     ],
     "esModuleInterop": true,
-    "resolveJsonModule": true,
     "allowSyntheticDefaultImports": true
   },
   "include": [

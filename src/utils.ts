@@ -1,22 +1,20 @@
-import inquirer, { InputQuestion, Answers } from 'inquirer'
 import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { execSync } from 'child_process'
 import chalk from 'chalk'
 
-export async function getFlagOrPrompt<T extends Answers = Answers >(flags: Record<string, string | undefined | void | boolean>, name: string, inquirerProps: Omit<InputQuestion<T>, 'name'>): Promise<string> {
-  const flagValue = flags[name]
-  if (typeof flagValue === 'string') {
-    return flagValue
-  }
-
-  return (await inquirer.prompt({ name, ...inquirerProps }) as Record<string, string>)[name]
-}
-
 export function hasYarn(): boolean {
   try {
     execSync('yarn --version')
+    return true
+  } catch (error) {
+    return false
+  }
+}
+export function hasPnpm(): boolean {
+  try {
+    execSync('pnpm --version')
     return true
   } catch (error) {
     return false
@@ -133,3 +131,5 @@ export function getProjectFolders(projectFolder: string): ProjectFolders {
     absProjectFolder, rootFolder, sandstoneConfigFolder
   }
 }
+
+export const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)

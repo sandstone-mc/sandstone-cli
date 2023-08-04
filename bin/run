@@ -1,6 +1,0 @@
-#!/usr/bin/env node
-process.env.OCLIF_TS_NODE = '0'
-
-require('@oclif/command').run()
-.then(require('@oclif/command/flush'))
-.catch(require('@oclif/errors/handle'))

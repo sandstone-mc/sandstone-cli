@@ -1,34 +1,38 @@
-import { Command } from '@oclif/command'
-import { buildProject } from '../build/buildProject'
-import { getProjectFolders } from '../utils'
+
+import { register as tsEval } from 'ts-node'
 import path from 'path'
-import Watch from './watch'
 
-export default class Build extends Command {
-  static description = 'Build the packs. ⛏'
+import { getProjectFolders } from '../utils.js'
+import { buildProject } from '../build/index.js'
 
-  static examples = [
-    '$ sand build',
-    '$ sand build --verbose',
-    '$ sand build --verbose --dry',
-  ]
+type BuildOptions = {
+    // Flags
+    dry?: boolean
+    verbose?: boolean
+    root?: boolean
+    fullTrace?: boolean
+    strictErrors?: boolean
+    production?: boolean
+  
+    // Values
+    path: string,
+    configPath: string,
+    name?: string
+    namespace?: string
+    world?: string
+    clientPath?: string
+    serverPath?: string
 
-  static flags = Watch.flags
+    ssh?: any,
+}
 
-  static args = Watch.args
+export async function buildCommand(opts: BuildOptions) {
+    const folders = getProjectFolders(opts.path)
 
-  async run() {
-    const { args, flags } = this.parse(Build)
-
-    const folders = getProjectFolders(args.path)
-
-    // Register ts-node
-    const tsConfigPath = path.join(folders.rootFolder, 'tsconfig.json')
-
-    require('ts-node').register({
-      transpileOnly: !flags.strictErrors,
-      project: tsConfigPath,
+    tsEval({
+      transpileOnly: !opts.strictErrors,
+      project: path.join(folders.rootFolder, 'tsconfig.json'),
     })
-    buildProject(flags, folders)
-  }
+
+    buildProject(opts, folders)
 }

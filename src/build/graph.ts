@@ -1,4 +1,4 @@
-import { MadgeModuleDependencyGraph } from "madge"
+import { MadgeModuleDependencyGraph } from 'madge'
 
 export function findAllDependencies(graph: Map<string, Set<string>>, name: string, oldGraph: Map<string, Set<string>>) {
   const result = new Map(graph.entries())

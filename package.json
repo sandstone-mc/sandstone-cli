@@ -1,7 +1,29 @@
 {
   "name": "sandstone-cli",
-  "description": "The CLI for Sandstone - the datapack creation library.",
-  "version": "0.6.6",
+  "version": "1.0.0",
+  "description": "The CLI for Sandstone - the minecraft pack creation library.",
+  "type": "module",
+  "exports": "./index.js",
+  "files": [
+    "/lib"
+  ],
+  "scripts": {
+    "test": "echo NO TESTS",
+    "build": "tsc"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sandstone-mc/sandstone-cli.git"
+  },
+  "keywords": [
+    "sandstone",
+    "cli",
+    "command",
+    "line",
+    "interface",
+    "datapack",
+    "minecraft"
+  ],
   "contributors": [
     {
       "name": "TheMrZZ - Florian ERNST",
@@ -13,92 +35,36 @@
       "url": "https://github.com/MulverineX"
     }
   ],
-  "bin": {
-    "sand": "./bin/run"
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/sandstone-mc/sandstone-cli/issues"
   },
-  "bugs": "https://github.com/TheMrZZ/sandstone-cli/issues",
+  "homepage": "https://github.com/sandstone-mc/sandstone-cli#readme",
   "dependencies": {
-    "@oclif/command": "^1",
-    "@oclif/config": "^1",
-    "@oclif/plugin-help": "^3",
-    "@oclif/plugin-warn-if-update-available": "^1.7.0",
-    "@types/adm-zip": "^0.5.0",
-    "@types/delete-empty": "^3.0.2",
-    "@types/semver": "^7.3.4",
     "adm-zip": "^0.5.10",
-    "chalk": "^4.1.0",
-    "chokidar": "^3.4.3",
+    "chalk": "^5.3.0",
+    "chokidar": "^3.5.3",
+    "commander": "^10.0.1",
     "delete-empty": "^3.0.0",
-    "fs-extra": "^9.0.1",
-    "inquirer": "^7.3.3",
-    "klaw": "^3.0.0",
-    "lodash.debounce": "^4.0.8",
-    "madge": "^5.0.1",
-    "minecraft-protocol": "^1.24.2",
-    "nanoid": "^3.1.20",
-    "pretty-error": "^2.1.2",
-    "remove": "^0.1.5",
-    "semver": "^7.3.4",
-    "ts-node": "^9.0.0"
+    "figlet": "^1.6.0",
+    "fs-extra": "^11.1.1",
+    "inquirer": "^9.2.9",
+    "klaw": "^4.1.0",
+    "madge": "^6.1.0",
+    "nanoid": "^4.0.2",
+    "pretty-error": "^4.0.0",
+    "semver": "^7.5.4",
+    "ts-node": "^10.9.1"
   },
   "devDependencies": {
-    "@oclif/dev-cli": "^1",
-    "@types/fs-extra": "^9.0.4",
-    "@types/inquirer": "^7.3.1",
+    "@types/adm-zip": "^0.5.0",
+    "@types/delete-empty": "^3.0.2",
+    "@types/figlet": "^1.5.6",
+    "@types/fs-extra": "^11.0.1",
+    "@types/inquirer": "^9.0.3",
     "@types/klaw": "^3.0.3",
-    "@types/lodash.debounce": "^4.0.6",
     "@types/madge": "^5.0.0",
-    "@types/nodemon": "^1.19.0",
-    "chokidar-cli": "^3.0.0",
-    "eslint": "^5.13",
-    "eslint-config-oclif": "^3.1",
-    "eslint-config-oclif-typescript": "^0.1",
-    "globby": "^10",
-    "rimraf": "^3.0.2",
-    "typescript": "^4.3.2"
-  },
-  "engines": {
-    "node": ">=14.0.0"
-  },
-  "files": [
-    "/bin",
-    "/lib",
-    "/npm-shrinkwrap.json",
-    "/oclif.manifest.json"
-  ],
-  "homepage": "https://github.com/TheMrZZ/sandstone-cli",
-  "keywords": [
-    "sandstone",
-    "cli",
-    "command",
-    "line",
-    "interface",
-    "datapack",
-    "minecraft"
-  ],
-  "license": "MIT",
-  "main": "lib/index.js",
-  "oclif": {
-    "commands": "./lib/commands",
-    "bin": "sand",
-    "plugins": [
-      "@oclif/plugin-help",
-      "@oclif/plugin-warn-if-update-available"
-    ],
-    "warn-if-update-available": {
-      "timeoutInDays": 7,
-      "message": "<%= chalk.rgb(229,193,0)(config.name) %> has a new update available: <%= chalk.greenBright(latest) %> (current version: <%= chalk.greenBright(config.version) %>).\nUpdate with <%= chalk.gray('npm run update') %> or <%= chalk.gray('yarn update') %>."
-    }
-  },
-  "repository": "TheMrZZ/sandstone-cli",
-  "scripts": {
-    "postpack": "rimraf oclif.manifest.json",
-    "posttest": "eslint . --ext .ts --config .eslintrc",
-    "prepack": "npm run build",
-    "build": "rimraf lib && tsc -b && oclif-dev manifest && oclif-dev readme",
-    "watch": "npm run build && chokidar \"src/**/*\" -c \"npm run build\"",
-    "test": "echo NO TESTS",
-    "version": "oclif-dev readme && git add README.md"
-  },
-  "types": "lib/index.d.ts"
+    "@types/semver": "^7.5.0",
+    "typescript": "^5.1.6"
+  }
 }

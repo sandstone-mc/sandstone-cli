@@ -5,6 +5,7 @@
 /lib
 /tmp
 node_modules
+cli-old
 
 
 # Created by https://www.toptal.com/developers/gitignore/api/vscode,node

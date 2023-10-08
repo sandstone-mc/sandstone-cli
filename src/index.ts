@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { Argument, Command } from 'commander';
 import figlet from 'figlet';
 import { buildCommand, createCommand, watchCommand } from './commands/index.js';

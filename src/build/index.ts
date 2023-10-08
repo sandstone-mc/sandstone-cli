@@ -128,7 +128,7 @@ async function getClientWorldPath(worldName: string, minecraftPath: string | und
   if (minecraftPath) {
     mcPath = minecraftPath
   } else {
-    mcPath = await getClientPath()
+    mcPath = (await getClientPath())!
   }
 
   const savesPath = path.join(mcPath, 'saves')
@@ -161,8 +161,12 @@ async function getClientPath() {
 
   const mcPath = getMCPath()
 
-  if (!await fs.stat(mcPath)) {
-    throw new Error('Unable to locate the .minecraft folder. Please specify it manually.')
+  try {
+    await fs.stat(mcPath)
+  } catch (e) {
+    console.warn('Unable to locate the .minecraft folder. Will not be able to export to client.')
+
+    return undefined
   }
 
   return mcPath
@@ -176,12 +180,16 @@ async function getClientPath() {
  * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
  */
 async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders, changedFiles?: string[]) {
-  const sandstoneLocation = path.join(rootFolder, 'node_modules/sandstone/')
+  const sandstoneLocation = path.join(rootFolder, 'node_modules/sandstone/src/index.ts')
 
   // First, read sandstone.config.ts to get all properties
-  const sandstoneConfig = require(path.join(sandstoneConfigFolder, 'sandstone.config.ts')).default
+  const sandstoneConfig = (await import(path.join(sandstoneConfigFolder, 'sandstone.config.ts'))).default
 
-  const { saveOptions, scripts } = sandstoneConfig
+  const { scripts } = sandstoneConfig
+
+  let { saveOptions } = sandstoneConfig
+
+  if (saveOptions === undefined) saveOptions = {}
 
   const outputFolder = path.join(rootFolder, '.sandstone', 'output')
 
@@ -314,13 +322,14 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   // Transform resolved dependents into a flat list of files, and sort them by their number of dependencies
   const newModules = getNewModules(dependenciesCache, changedFilesPaths ?? rawFiles, absProjectFolder)
 
-  const { sandstonePack } = require(sandstoneLocation)
+  const { sandstonePack } = (await import(sandstoneLocation))
 
   // If files changed, we need to clean the cache & delete the related resources
   if (changedFiles) {
     for (const node of newModules) {
       // For each changed file, we need to reset the require cache
-      delete require.cache[path.join(absProjectFolder, node.name)]
+      // delete require.cache[path.join(absProjectFolder, node.name)]
+      // TODO: Refactor to use node worker
 
       // Then we need to delete all resources the file created
       const oldResources = fileResources.get(node.name)
@@ -333,7 +342,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   }
 
   // Now, let's build the file & its dependents. First files to be built are the ones with less dependencies.
-  for (const node of newModules) {
+  for await (const node of newModules) {
     const modulePath = path.join(absProjectFolder, node.name)
 
     const currentResources: FileResource = {
@@ -346,13 +355,21 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
     try {
       // Sometimes, a file might not exist because it has been deleted.
       if (await fs.pathExists(filePath)) {
-        require(filePath)
+        await import(filePath)
       }
     }
     catch (e: any) {
       logError(e, node.name)
       error = true
     }
+
+    setTimeout(() => {
+      console.log('CLI Context:')
+
+      sandstonePack.core.resourceNodes.forEach((node: any) => {
+        if (node.resource.creator === 'user') console.log(node.resource.path)
+      })
+    }, 100)
 
     // Now, find the resources that were added by this file & store them.
     // This will be used if those files are changed later.
@@ -547,7 +564,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
       }
 
       // Handle client
-      if (!(server && packType.networkSides === 'server')) {
+      if (!(server && packType.networkSides === 'server') && clientPath) {
         let fullClientPath: string
 
         if (worldName) {

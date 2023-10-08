@@ -3,10 +3,14 @@
   "version": "1.0.0",
   "description": "The CLI for Sandstone - the minecraft pack creation library.",
   "type": "module",
-  "exports": "./index.js",
   "files": [
-    "/lib"
+    "/lib",
+    "/package.json"
   ],
+  "exports": "./lib/index.js",
+  "bin": {
+    "sand": "./lib/index.js"
+  },
   "scripts": {
     "test": "echo NO TESTS",
     "build": "tsc"

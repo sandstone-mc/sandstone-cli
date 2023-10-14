@@ -14,11 +14,14 @@ jobs:
       - uses: actions/setup-node@v1
         with:
           node-version: 16
-      - run: npm install -f
-      - run: npm install @types/node
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - run: pnpm install -f
+      - run: pnpm install @types/node
       - run: echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ./.npmrc
         env:
           NPM_TOKEN: ${{secrets.npm_token}}
-      - run: npm run build && npm publish
+      - run: pnpm run build && npm publish
         env:
           NPM_TOKEN: ${{secrets.npm_token}}

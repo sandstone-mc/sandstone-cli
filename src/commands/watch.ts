@@ -46,7 +46,7 @@ export async function watchCommand(opts: WatchOptions) {
 
     const folders = getProjectFolders(opts.path)
 
-    async function onFilesChange(paths?: string[]) {
+    async function onFilesChange() {
         if (alreadyBuilding) {
             // If the pack is already being built & another change was made,
             // notify that a rebuild is needed & stop there
@@ -56,13 +56,13 @@ export async function watchCommand(opts: WatchOptions) {
 
         alreadyBuilding = true
 
-        await buildProject(opts, folders, paths)
+        await buildProject(opts, folders)
         //client?.write('chat', { message: '/reload' })
         alreadyBuilding = false
 
         if (needRebuild) {
             needRebuild = false
-            await onFilesChange(paths)
+            await onFilesChange()
         }
     }
 
@@ -92,7 +92,7 @@ export async function watchCommand(opts: WatchOptions) {
 
         if (timeout) clearTimeout(timeout as any)
         timeout = setTimeout(() => {
-            onFilesChange(files.length === 0 ? undefined : files)
+            onFilesChange()
             files = []
         }, 200)
     })

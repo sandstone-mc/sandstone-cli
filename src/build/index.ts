@@ -5,7 +5,6 @@ import fs from 'fs-extra'
 import PrettyError from 'pretty-error'
 import walk from 'klaw'
 
-import { DependencyGraph } from './graph.js'
 import chalk from 'chalk'
 import AdmZip from 'adm-zip'
 import deleteEmpty from 'delete-empty'
@@ -68,52 +67,6 @@ async function mkDir(dirPath: string) {
 }
 
 let cache: SandstoneCache
-
-const dependenciesCache: DependencyGraph = new DependencyGraph({})
-
-type FileResource = {
-  resources: Set<{ path: string[], resourceType: string }> // Set<File<Record<never, never>>>
-  objectives: Set<any> // Set<ObjectiveClass>
-}
-
-const fileResources: Map<string, FileResource> = new Map()
-
-function getNewModules(dependenciesGraph: DependencyGraph, rawFiles: { path: string }[], projectFolder: string) {
-  const rawFilesPath = rawFiles.map(({ path }) => path)
-
-  // Get only the new modules
-  const newModules = [...dependenciesGraph.nodes.values()].filter(
-    (node) => rawFilesPath.includes(path.join(projectFolder, node.name))
-  )
-
-  // Get their dependants, as a set to avoid duplicates
-  const newModulesDependencies = new Set(
-    newModules.flatMap((node) => [...node.getDependsOn({ recursive: true, includeSelf: true })])
-  )
-
-  // Sort them by number of dependencies, and return them
-  return [...newModulesDependencies].sort(
-    (a, b) => a.getDependencies({ recursive: true }).size - b.getDependencies({ recursive: true }).size
-  )
-}
-
-/**
- * Returns a set of all values present in set1 and not present in set2.
- */
-function diffSet<T extends unknown>(set1: Set<T>, set2: Set<T>): T {
-  return [...set1].filter((element) => !set2.has(element)) as any
-}
-
-/**
- * Returns a map of all key/value present in map1 and not present in map2.
- */
-function diffMap<T extends unknown>(map1: Map<string, T>, map2: Map<string, T>): Map<string, T> {
-  return new Map([...map1.entries()].filter(([key, value]) => !map2.has(key)))
-}
-
-function diffResources(tree1: any, tree2: any): Set<{ path: string[], resourceType: string }> {
-  return diffSet(tree1, tree2)
-}
 
 /**
  *
@@ -178,8 +131,7 @@ async function getClientPath() {
  *
  * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
  */
-async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders, changedFiles?: string[]) {
-  const sandstoneLocation = path.join(rootFolder, 'node_modules/sandstone/src/index.ts')
+async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders) {
 
   // First, read sandstone.config.ts to get all properties
   const sandstoneConfig = (await import(path.join(sandstoneConfigFolder, 'sandstone.config.ts'))).default
@@ -593,12 +545,10 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
  * @param options The options to build the project with.
  *
  * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
- *
- * @param changedFiles The files that changed since the last build.
  */
-export async function buildProject(options: BuildOptions, folders: ProjectFolders, changedFiles?: string[]) {
+export async function buildProject(options: BuildOptions, folders: ProjectFolders) {
   try {
-    await _buildProject(options, folders, changedFiles)
+    await _buildProject(options, folders)
   }
   catch (err: any) {
     console.log(err)

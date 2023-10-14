@@ -54,7 +54,6 @@
     "fs-extra": "^11.1.1",
     "inquirer": "^9.2.9",
     "klaw": "^4.1.0",
-    "madge": "^6.1.0",
     "nanoid": "^4.0.2",
     "pretty-error": "^4.0.0",
     "semver": "^7.5.4",
@@ -67,7 +66,6 @@
     "@types/fs-extra": "^11.0.1",
     "@types/inquirer": "^9.0.3",
     "@types/klaw": "^3.0.3",
-    "@types/madge": "^5.0.0",
     "@types/semver": "^7.5.0",
     "typescript": "^5.1.6"
   }

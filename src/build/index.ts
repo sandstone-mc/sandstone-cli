@@ -5,7 +5,6 @@ import fs from 'fs-extra'
 import PrettyError from 'pretty-error'
 import walk from 'klaw'
 
-import madge from 'madge'
 import { DependencyGraph } from './graph.js'
 import chalk from 'chalk'
 import AdmZip from 'adm-zip'
@@ -280,105 +279,22 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   // Now, let's run the beforeAll script
   await scripts?.beforeAll?.()
 
-  // Finally, let's import all .ts & .js files under ./src.
+  // Finally, let's import from the index.
   let error = false
 
-  // Get the list of all files
-  const rawFiles: { path: string }[] = []
-  for await (const file of walk(absProjectFolder)) {
-    rawFiles.push(file)
-  }
+  let sandstonePack: any
 
-  const changedFilesPaths = changedFiles?.map(file => ({ path: file }))
+  const filePath = path.join(absProjectFolder, 'index.ts')
 
-  /**
-   * 1. Update dependency graphs
-   * 2. Delete all cache & resources for files dependent from the changed files
-   * 3. Import all changed files, & their dependents
-   * 4. Save only newly created resources
-   */
-  const graph = await madge(rawFiles.map(f => f.path).filter(f => !f.endsWith('.json')), {
-    fileExtensions: ['.ts', '.cts', '.mts', '.tsx', '.js', '.jsx', '.cjs', '.mjs', '.json'],
-    includeNpm: false,
-    baseDir: absProjectFolder,
-
-
-    detectiveOptions: {
-      es6: {
-        skipTypeImports: true,
-      },
-      ts: {
-        skipTypeImports: true,
-      },
-    },
-  })
-
-  // This dependencies graph is only partial.
-  const dependenciesGraph = new DependencyGraph(graph.obj())
-
-  // Update the global dependency graph by merging it with the new one.
-  dependenciesCache.merge(dependenciesGraph)
-
-  // Transform resolved dependents into a flat list of files, and sort them by their number of dependencies
-  const newModules = getNewModules(dependenciesCache, changedFilesPaths ?? rawFiles, absProjectFolder)
-
-  const { sandstonePack } = (await import(sandstoneLocation))
-
-  // If files changed, we need to clean the cache & delete the related resources
-  if (changedFiles) {
-    for (const node of newModules) {
-      // For each changed file, we need to reset the require cache
-      // delete require.cache[path.join(absProjectFolder, node.name)]
-      // TODO: Refactor to use node worker
-
-      // Then we need to delete all resources the file created
-      const oldResources = fileResources.get(node.name)
-      if (oldResources) {
-        for (const resource of oldResources.resources) {
-          sandstonePack.core.deleteResource(resource.path, resource.resourceType)
-        }
-      }
+  try {
+    // Sometimes, a file might not exist because it has been deleted.
+    if (await fs.pathExists(filePath)) {
+      sandstonePack = (await import(filePath)).default
     }
   }
-
-  // Now, let's build the file & its dependents. First files to be built are the ones with less dependencies.
-  for await (const node of newModules) {
-    const modulePath = path.join(absProjectFolder, node.name)
-
-    const currentResources: FileResource = {
-      resources: new Set([...sandstonePack.core.resourceNodes]),
-      objectives: new Set([...sandstonePack.objectives.entries()])
-    }
-
-    // We have a module, let's require it!
-    const filePath = path.resolve(modulePath)
-    try {
-      // Sometimes, a file might not exist because it has been deleted.
-      if (await fs.pathExists(filePath)) {
-        await import(filePath)
-      }
-    }
-    catch (e: any) {
-      logError(e, node.name)
-      error = true
-    }
-
-    setTimeout(() => {
-      console.log('CLI Context:')
-
-      sandstonePack.core.resourceNodes.forEach((node: any) => {
-        if (node.resource.creator === 'user') console.log(node.resource.path)
-      })
-    }, 100)
-
-    // Now, find the resources that were added by this file & store them.
-    // This will be used if those files are changed later.
-    const newResources: FileResource = {
-      resources: diffResources(sandstonePack.core.resourceNodes, currentResources.resources),
-      objectives: diffSet(sandstonePack.objectives, currentResources.objectives),
-    }
-
-    fileResources.set(node.name, newResources)
+  catch (e: any) {
+    logError(e, absProjectFolder)
+    error = true
   }
 
   if (error) {

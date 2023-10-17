@@ -1,6 +1,7 @@
 import path from 'path'
 import * as os from 'os'
 import crypto from 'crypto'
+import { pathToFileURL } from 'url'
 import fs from 'fs-extra'
 import PrettyError from 'pretty-error'
 import walk from 'klaw'
@@ -134,7 +135,7 @@ async function getClientPath() {
 async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders) {
 
   // First, read sandstone.config.ts to get all properties
-  const sandstoneConfig = (await import(path.join(sandstoneConfigFolder, 'sandstone.config.ts'))).default
+  const sandstoneConfig = (await import(pathToFileURL(path.join(sandstoneConfigFolder, 'sandstone.config.ts')).toString())).default
 
   const { scripts } = sandstoneConfig
 
@@ -241,7 +242,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
   try {
     // Sometimes, a file might not exist because it has been deleted.
     if (await fs.pathExists(filePath)) {
-      sandstonePack = (await import(filePath)).default
+      sandstonePack = (await import(pathToFileURL(filePath).toString())).default
     }
   }
   catch (e: any) {

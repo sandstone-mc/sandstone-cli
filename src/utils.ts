@@ -109,7 +109,7 @@ export function getFileFolder(filename: string, from = '.'): string | null {
   return fileFolder
 }
 
-export type ProjectFolders = { absProjectFolder: string, rootFolder: string, sandstoneConfigFolder: string }
+export type ProjectFolders = { absProjectFolder: string, projectFolder: string, rootFolder: string, sandstoneConfigFolder: string }
 
 export function getProjectFolders(projectFolder: string): ProjectFolders {
   const absProjectFolder = path.resolve(projectFolder)
@@ -128,7 +128,7 @@ export function getProjectFolders(projectFolder: string): ProjectFolders {
   }
 
   return {
-    absProjectFolder, rootFolder, sandstoneConfigFolder
+    absProjectFolder, projectFolder, rootFolder, sandstoneConfigFolder
   }
 }
 

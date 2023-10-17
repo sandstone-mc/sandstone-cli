@@ -132,7 +132,7 @@ async function getClientPath() {
  *
  * @param projectFolder The folder of the project. It needs a sandstone.config.ts, and it or one of its parent needs a package.json.
  */
-async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders) {
+async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, projectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders) {
 
   // First, read sandstone.config.ts to get all properties
   const sandstoneConfig = (await import(pathToFileURL(path.join(sandstoneConfigFolder, 'sandstone.config.ts')).toString())).default
@@ -237,7 +237,7 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, rootF
 
   let sandstonePack: any
 
-  const filePath = path.join(absProjectFolder, 'index.ts')
+  const filePath = path.join(projectFolder, 'index.ts')
 
   try {
     // Sometimes, a file might not exist because it has been deleted.

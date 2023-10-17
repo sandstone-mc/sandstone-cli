@@ -2,7 +2,7 @@ import fs from 'fs'
 import os from 'os'
 import path from 'path'
 import { execSync } from 'child_process'
-import chalk from 'chalk'
+import chalk from 'chalk-template'
 
 export function hasYarn(): boolean {
   try {

@@ -1,7 +1,7 @@
 import { SemVer } from 'semver'
 import fs from 'fs-extra'
 import path from 'path'
-import chalk from 'chalk'
+import chalk from 'chalk-template'
 import util from 'util'
 import * as child from 'child_process'
 import { nanoid } from 'nanoid'

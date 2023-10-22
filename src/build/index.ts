@@ -21,8 +21,8 @@ type BuildOptions = {
     production?: boolean
   
     // Values
-    path: string,
-    configPath: string,
+    path: string
+    configPath: string
     name?: string
     namespace?: string
     world?: string
@@ -31,6 +31,8 @@ type BuildOptions = {
 
     // TODO: implement ssh
     ssh?: any
+
+    dependencies?: [string, string][]
 }
 
 const pe = new PrettyError()
@@ -252,6 +254,13 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, proje
 
   if (error) {
     return
+  }
+
+  /// Add new dependencies ///
+  if (cliOptions.dependencies) {
+    for (const dependency of cliOptions.dependencies) {
+      sandstonePack.core.depend(...dependency)
+    }
   }
 
   /// SAVING RESULTS ///
@@ -538,6 +547,8 @@ async function _buildProject(cliOptions: BuildOptions, { absProjectFolder, proje
 
   // Run the afterAll script
   await scripts?.afterAll?.()
+
+  console.log(`Pack(s) compiled! View output in ./.sandstone/output/`)
 }
 
 /**

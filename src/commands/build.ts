@@ -24,6 +24,8 @@ type BuildOptions = {
     serverPath?: string
 
     ssh?: any,
+
+    dependencies?: [string, string][]
 }
 
 export async function buildCommand(opts: BuildOptions) {

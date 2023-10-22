@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Argument, Command } from 'commander';
 import figlet from 'figlet';
-import { buildCommand, createCommand, watchCommand } from './commands/index.js';
+import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallNativeCommand, uninstallVanillaCommand, refreshCommand } from './commands/index.js';
 
 const commander = new Command()
 
@@ -84,10 +84,43 @@ create.option.apply(create, BuildDeclares.name)
   .option.apply(create, BuildDeclares.serverPath)
 
 // TODO
-/*CLI
-  .command('update')
-  .description('Update Sandstone & Sandstone-CLI.. ⛏')
-  .action(updateCommand)*/
+const install = CLI
+  .command('install')
+  .alias('add')
+  .alias('i')
+  .description('Install Native Sandstone or Vanilla Smithed libraries. ⛏')
+install
+  .command('native')
+  .description('Install Native Sandstone libraries. ⛏')
+  .action(installNativeCommand)
+  .addArgument(new Argument('[libraries...]', 'Optional. Libraries to install. When unlisted, a selector will appear.'))
+install
+  .command('vanilla')
+  .alias('smithed')
+  .description('Install Vanilla Smithed libraries. ⛏')
+  .action(installVanillaCommand)
+  .addArgument(new Argument('[libraries...]', 'Optional. Libraries to install. When unlisted, a selector will appear.'))
+
+const uninstall = CLI
+  .command('uninstall')
+  .alias('remove')
+  .description('Uninstall Native Sandstone libraries & Vanilla Smithed libraries. ⛏')
+uninstall
+  .command('native')
+  .description('Uninstall Native Sandstone libraries. ⛏')
+  .action(uninstallNativeCommand)
+  .addArgument(new Argument('[libraries...]', 'Optional. Libraries to uninstall. When unlisted, a selector will appear.'))
+install
+  .command('vanilla')
+  .alias('smithed')
+  .description('Uninstall Vanilla Smithed libraries. ⛏')
+  .action(uninstallVanillaCommand)
+  .addArgument(new Argument('[libraries...]', 'Optional. Libraries to uninstall. When unlisted, a selector will appear.'))
+
+CLI
+  .command('refresh')
+  .description('Clear & update cached Smithed libraries. ⛏')
+  .action(refreshCommand)
 
 
 CLI.parse(process.argv)

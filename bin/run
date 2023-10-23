@@ -1,2 +1,2 @@
 DIR=$(dirname "$(echo "$0" | sed -e 's,\\,/,g')")
-node $DIR/../../dotenv-cli/cli.js -e $DIR/../../sandstone-cli/bin/.env.sand node $DIR/../../sandstone-cli/lib/index.js $1
+node $DIR/../../dotenv-cli/cli.js -e $DIR/../bin/.env.sand node $DIR/../lib/index.js $1

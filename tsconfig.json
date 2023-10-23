@@ -9,6 +9,7 @@
     "lib": [
       "es2020"
     ],
+    "skipLibCheck": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true
   },

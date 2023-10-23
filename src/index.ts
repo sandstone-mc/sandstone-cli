@@ -101,18 +101,9 @@ install
   .action(installVanillaCommand)
   .addArgument(new Argument('[libraries...]', 'Optional. Libraries to install. When unlisted, a selector will appear.'))
 
-const uninstall = CLI
+CLI
   .command('uninstall')
   .alias('remove')
-  .description('Uninstall Native Sandstone libraries & Vanilla Smithed libraries. ⛏')
-uninstall
-  .command('native')
-  .description('Uninstall Native Sandstone libraries. ⛏')
-  .action(uninstallNativeCommand)
-  .addArgument(new Argument('[libraries...]', 'Optional. Libraries to uninstall. When unlisted, a selector will appear.'))
-install
-  .command('vanilla')
-  .alias('smithed')
   .description('Uninstall Vanilla Smithed libraries. ⛏')
   .action(uninstallVanillaCommand)
   .addArgument(new Argument('[libraries...]', 'Optional. Libraries to uninstall. When unlisted, a selector will appear.'))

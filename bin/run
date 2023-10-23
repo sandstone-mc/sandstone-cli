@@ -1,0 +1,1 @@
+./node_modules/sandstone-cli/node_modules/.bin/dotenv -e ./node_modules/sandstone-cli/.bin/.env.sand node ./node_modules/sandstone-cli/lib/index.js $1

@@ -1,9 +1,8 @@
-import { register as tsEval } from 'ts-node'
 import chokidar from 'chokidar'
 import path from 'path'
 
-import { buildProject } from '../build/index.js'
 import { getProjectFolders } from '../utils.js'
+import { buildCommand } from './build.js'
 
 type WatchOptions = {
     // Flags
@@ -56,7 +55,7 @@ export async function watchCommand(opts: WatchOptions) {
 
         alreadyBuilding = true
 
-        await buildProject(opts, folders)
+        await buildCommand(opts, folders)
         //client?.write('chat', { message: '/reload' })
         alreadyBuilding = false
 
@@ -66,16 +65,10 @@ export async function watchCommand(opts: WatchOptions) {
         }
     }
 
-    // Register ts-node
-    const tsConfigPath = path.join(folders.rootFolder, 'tsconfig.json')
-
-    tsEval({
-        transpileOnly: !opts.strictErrors,
-        project: tsConfigPath,
-    })
-
     let timeout: NodeJS.Timeout | null = null
     let files: string[] = []
+
+    console.log('Watching source for changes. Press Ctrl+C to exit.\n')
 
     chokidar.watch([
         path.join(folders.absProjectFolder, '/**/*'),

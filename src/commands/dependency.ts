@@ -20,7 +20,7 @@ type SmithedPack = { display: { description: string } }
 export async function installVanillaCommand(_libraries: string[]) {
   let libraries: [string, boolean][] = _libraries.map((lib) => [lib, false])
 
-  let count = libraries?.length || 0
+  let count = libraries.length || 0
 
   let manifest: Record<string, string> | false = false
   try {
@@ -152,14 +152,10 @@ export async function installVanillaCommand(_libraries: string[]) {
   console.log(`${count} libraries added`)
 }
 
-export async function uninstallNativeCommand() {
-  console.log('unimplemented')
-}
-
 export async function uninstallVanillaCommand(_libraries: string[]) {
   const libraries = _libraries || []
 
-  let count = libraries?.length || 0
+  let count = libraries.length || 0
 
   let manifestPath = path.resolve('./resources/smithed.json')
 

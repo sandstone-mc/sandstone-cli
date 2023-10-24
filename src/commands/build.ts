@@ -1,9 +1,7 @@
 
-import { register as tsEval } from 'ts-node'
 import path from 'path'
-
-import { getProjectFolders } from '../utils.js'
-import { buildProject } from '../build/index.js'
+import { fork } from 'child_process'
+import { ProjectFolders, getProjectFolders } from '../utils.js'
 
 type BuildOptions = {
     // Flags
@@ -28,13 +26,33 @@ type BuildOptions = {
     dependencies?: [string, string][]
 }
 
-export async function buildCommand(opts: BuildOptions) {
-    const folders = getProjectFolders(opts.path)
+export function buildCommand(opts: BuildOptions, _folders?: ProjectFolders) {
+  const folders = _folders?.projectFolder ? _folders : getProjectFolders(opts.path)
 
-    tsEval({
-      transpileOnly: !opts.strictErrors,
-      project: path.join(folders.rootFolder, 'tsconfig.json'),
-    })
+  console.log('Compiling source...\n')
 
-    buildProject(opts, folders)
+  const build = fork(path.join(folders.rootFolder, 'node_modules', 'sandstone-build', 'lib', 'index.js'), process.argv.slice(2), {
+    stdio: 'pipe',
+    env: {
+      NODE_OPTIONS: "--loader ts-node/esm",
+      CLI_OPTIONS: JSON.stringify(opts),
+      PROJECT_FOLDERS: JSON.stringify(folders),
+    }
+  })
+
+  let esmErrored = false
+
+  build?.stdout?.on('data', (data) => process.stdout.write(data))
+
+  build?.stderr?.on('data', (data) => {
+    if (esmErrored) {
+      process.stderr.write(data)
+    } else {
+      esmErrored = true
+    }
+  })
+
+  return new Promise<void>((resolve) => {
+    build?.stdout?.on('end', () => resolve())
+  })
 }

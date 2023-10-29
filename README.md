@@ -5,7 +5,7 @@ The CLI for Sandstone - the datapack creation library.
 
 [![Version](https://img.shields.io/npm/v/sandstone-cli.svg)](https://npmjs.org/package/sandstone-cli)
 [![Downloads/week](https://img.shields.io/npm/dw/sandstone-cli.svg)](https://npmjs.org/package/sandstone-cli)
-[![License](https://img.shields.io/npm/l/sandstone-cli.svg)](https://github.com/TheMrZZ/sandstone-cli/blob/master/package.json)
+[![License](https://img.shields.io/npm/l/sandstone-cli.svg)](https://github.com/sandstone-mc/sandstone-cli/blob/master/package.json)
 
 <!-- toc -->
 * [Usage](#usage)

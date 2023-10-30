@@ -1,5 +1,6 @@
 import fs from 'fs'
 import path from 'path'
+import os from 'os'
 import { execSync } from 'child_process'
 import chalk from 'chalk-template'
 
@@ -71,3 +72,38 @@ export function getProjectFolders(projectFolder: string): ProjectFolders {
 }
 
 export const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
+
+/**
+ * Get the .minecraft path
+ */
+export function getMinecraftPath(): string {
+  function getMCPath(): string {
+    switch (os.platform()) {
+    case 'win32':
+      return path.join(os.homedir(), 'AppData/Roaming/.minecraft')
+    case 'darwin':
+      return path.join(os.homedir(), 'Library/Application Support/minecraft')
+    case 'linux':
+    default:
+      return path.join(os.homedir(), '.minecraft')
+    }
+  }
+
+  const mcPath = getMCPath()
+
+  if (!fs.existsSync(mcPath)) {
+    throw new Error('Unable to locate the .minecraft folder. Please specify it manually.')
+  }
+
+  return mcPath
+}
+
+export function getWorldsList(): string[] {
+  const mcPath = getMinecraftPath()
+  const savesPath = path.join(mcPath, 'saves')
+
+  return fs.readdirSync(
+    savesPath,
+    { withFileTypes: true }
+  ).filter((f) => f.isDirectory).map((f) => f.name)
+}

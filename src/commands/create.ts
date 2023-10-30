@@ -45,7 +45,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   const sv = (v: string) => new SemVer(v)
 
-  const versions = [[sv('0.13.6'), sv('0.5.4')], [sv('0.14.0-alpha.13'), sv('0.5.4')], [sv('1.0.0-alpha.4'), sv('1.1.6')]] as const
+  const versions = [[sv('0.13.6'), sv('0.5.4')], [sv('0.14.0-alpha.13'), sv('0.5.4')], [sv('1.0.0-alpha.5'), sv('1.1.6')]] as const
 
   const stableIndex = 0
 

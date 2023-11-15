@@ -1,6 +1,6 @@
 {
   "name": "sandstone-cli",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "description": "The CLI for Sandstone - the minecraft pack creation library.",
   "type": "module",
   "exports": "./lib/index.js",

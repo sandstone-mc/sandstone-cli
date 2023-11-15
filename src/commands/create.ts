@@ -134,7 +134,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
         saveOptions.root = true
       } else if (saveChoice === 'world') {
         const { world }: { world: string } = await inquirer.prompt({
-          name: 'World',
+          name: 'world',
           message: 'What world do you want to save the packs in? >',
           type: 'list',
           choices: getWorldsList,
@@ -142,7 +142,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
         saveOptions.world = world
       } else { // TODO: Add native folder selector
         const { serverPath }: { serverPath: string } = await inquirer.prompt({
-          name: 'Server path',
+          name: 'serverPath',
           message: 'Where is the server to save the packs in? Relative paths are accepted. >',
           type: 'input',
         })
@@ -205,6 +205,8 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   // TODO: packFormat
 
   const optsJson = toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)))
+
+  console.log(saveOptions, optsJson)
 
   if (optsJson !== '{}') {
     templateConfig = templateConfig.replace('saveOptions: {}', `saveOptions: ${optsJson}`)

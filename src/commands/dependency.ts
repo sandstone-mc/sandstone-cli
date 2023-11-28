@@ -9,13 +9,13 @@ export async function installNativeCommand() {
   console.log('unimplemented')
 }
 
-type SmithedSearch = { id: string, displayName: string }[]
-
-type SmithedMeta = { rawId: string, stats: { downloads: { total: number } }, owner: string }
-
-type SmithedUser = { displayName: string }
-
-type SmithedPack = { display: { description: string } }
+type SmithedSearch = { 
+  id: string,
+  displayName: string,
+  data: { display: { description: string } },
+  meta: { rawId: string, stats: { downloads: { total: number } }, owner: string }
+  owner: { displayName: string }
+}[]
 
 export async function installVanillaCommand(_libraries: string[]) {
   let libraries: [string, boolean][] = _libraries.map((lib) => [lib, false])
@@ -35,18 +35,16 @@ export async function installVanillaCommand(_libraries: string[]) {
 
     const optionColumn = [0, 0, 0]
 
-    for await (const { id, displayName } of (await (await fetch(`${base}/packs?category=Library&sort=downloads${term ? `&search=${term}` : ''}`)).json() as SmithedSearch)) {
+    const scopes = ['data.display.description', 'meta.rawId', 'meta.stats.downloads.total', 'owner.displayName'].map((scope) => `scope=${scope}`).join('&')
 
-      const meta = await (await fetch(`${base}/packs/${id}/meta`)).json() as SmithedMeta
-      const owner = await(await fetch(`${base}/users/${meta.owner}`)).json() as SmithedUser
-      const { display: { description }} = await(await fetch(`${base}/packs/${id}`)).json() as SmithedPack
+    for await (const { id, displayName, meta, data, owner } of (await (await fetch(`${base}/packs?category=Library&sort=downloads&${scopes}${term ? `&search=${encodeURIComponent(term)}` : ''}`)).json() as SmithedSearch)) {
 
       const option = {
         id: meta.rawId,
         name: displayName,
         owner: owner.displayName,
         downloads: `${meta.stats.downloads.total}`,
-        description: description,
+        description: data.display.description,
       }
 
       if (manifest && !manifest[id] && !manifest[meta.rawId]) {

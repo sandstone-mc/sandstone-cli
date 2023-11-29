@@ -1,12 +1,89 @@
 import fs from 'fs-extra'
 import path from 'path'
+import { exec } from 'child_process'
 import { buildCommand } from './build.js'
 import inquirer from 'inquirer'
 
 const _fetch = import('node-fetch')
 
-export async function installNativeCommand() {
-  console.log('unimplemented')
+type LibraryManifest = {
+  libraries: {
+    name: string,
+    package: string,
+  }[]
+}
+
+export async function installNativeCommand(_libraries: string[]) {
+  let libraries: [string, boolean][] = _libraries.map((lib) => [lib, false])
+
+  let count = libraries.length || 0
+
+  const fetch = (await _fetch).default
+
+  const manifest = await (await fetch('https://raw.githubusercontent.com/sandstone-mc/sandstone-libraries/main/manifest.json')).json() as LibraryManifest
+
+  const search = async () => {
+    const { selected } = await inquirer.prompt({
+      name: 'selected',
+      type: 'checkbox',
+      message: 'Which libraries to add?',
+      choices: manifest.libraries.map((library) => ({
+        name: library.name,
+        value: library.package,
+      })),
+    }) as {
+      selected: string[]
+    }
+
+    if (selected && selected.length !== 0) {
+      libraries.push(...selected.map((lib) => [lib, true] as [string, boolean]))
+
+      count += selected.length
+    }
+  }
+
+  if (count === 0) {
+    await search()
+  }
+
+  if (count > 0) {
+    let adding: string[] | false = false
+
+    for await (const [library, searched] of libraries) {
+      if (searched) {
+        if (!adding) adding = []
+        adding.push(library)
+      } else {
+        let exists = manifest.libraries.find((lib) => lib.name === library)
+
+        if (exists) {
+          if (!adding) adding = []
+          adding.push(exists.package)
+        } else {
+          count--
+
+          console.log(`${library} doesn't exist!`)
+        }
+      }
+    }
+    if (adding) {
+      console.log(`Installing ${adding.join(', ')}...`)
+
+      const pnpm = await fs.exists(path.resolve('./pnpm-lock.yaml'))
+      const yarn = await fs.exists(path.resolve('./yarn.lock'))
+      const npm = await fs.exists(path.resolve('./package-lock.json'))
+
+      if (pnpm) {
+        exec(`pnpm i ${adding.join(' ')}`)
+      } else if (yarn) {
+        exec(`yarn add ${adding.join(' ')}`)
+      } else if (npm) {
+        exec(`npm i ${adding.join(' ')}`)
+      } else {
+        console.error('error: no package manager lockfile')
+      }
+    }
+  }
 }
 
 type SmithedSearch = { 

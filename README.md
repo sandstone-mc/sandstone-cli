@@ -1,7 +1,7 @@
 sandstone-cli
 =============
 
-The CLI for Sandstone - the datapack creation library.
+The CLI for Sandstone - the minecraft pack creation library.
 
 [![Version](https://img.shields.io/npm/v/sandstone-cli.svg)](https://npmjs.org/package/sandstone-cli)
 [![Downloads/week](https://img.shields.io/npm/dw/sandstone-cli.svg)](https://npmjs.org/package/sandstone-cli)

@@ -11,7 +11,7 @@ const CLI = commander
   .version('1.0.0')
   .description('The CLI for Sandstone - the minecraft pack creation library.')
 
-const BuildDeclares = {
+export const BuildDeclares = {
   // Flags
   dry: ['-d, --dry', 'Do not save the pack. Mostly useful with `verbose`.'],
   verbose: ['-v, --verbose', 'Log all resulting resources: functions, advancements...'],
@@ -83,7 +83,6 @@ create.option.apply(create, BuildDeclares.name)
   .option.apply(create, BuildDeclares.clientPath)
   .option.apply(create, BuildDeclares.serverPath)
 
-// TODO
 const install = CLI
   .command('install')
   .alias('add')

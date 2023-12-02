@@ -298,4 +298,27 @@ export async function uninstallVanillaCommand(_libraries: string[]) {
   console.log(`${count} libraries removed`)
 }
 
-export async function refreshCommand() {}
+export async function refreshCommand() {
+  let lockFilePath = path.resolve('./resources/cache/lock-smithed.json')
+
+  let lockFile: Record<string, {}> | false = false
+
+  try {
+    lockFile = JSON.parse(await fs.readFile(lockFilePath, 'utf-8'))
+  } catch (e) {}
+
+  if (lockFile) {
+    console.log('Refreshing libraries...')
+
+    await fs.remove(path.resolve('./resources/cache/smithed'))
+
+    await fs.writeFile(lockFilePath, '{}')
+
+    await buildCommand({
+      path: './src',
+      configPath: './'
+    })
+  } else {
+    console.log('No libraries to refresh')
+  }
+}

@@ -103,6 +103,10 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   } = {}
 
   if (version[0].major === 1) {
+    if (opts.clientPath) {
+      saveOptions.clientPath = opts.clientPath
+    }
+
     if (opts.root) {
       saveOptions.root = true
     } else if (opts.world) {
@@ -158,9 +162,6 @@ export async function createCommand(_project: string, opts: CreateOptions) {
           break
         case 'none': break
       }
-    }
-    if (opts.clientPath) {
-      saveOptions.clientPath = opts.clientPath
     }
   }
 

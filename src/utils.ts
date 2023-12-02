@@ -98,8 +98,8 @@ export function getMinecraftPath(): string {
   return mcPath
 }
 
-export function getWorldsList(): string[] {
-  const mcPath = getMinecraftPath()
+export function getWorldsList(clientPath?: string): string[] {
+  const mcPath = clientPath || getMinecraftPath()
   const savesPath = path.join(mcPath, 'saves')
 
   return fs.readdirSync(

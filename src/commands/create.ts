@@ -143,7 +143,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
             name: 'world',
             message: 'What world do you want to save the packs in? >',
             type: 'list',
-            choices: getWorldsList,
+            choices: () => getWorldsList(saveOptions.clientPath),
           })
           saveOptions.world = world
           break

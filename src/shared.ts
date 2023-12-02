@@ -17,6 +17,6 @@ export const BuildDeclares = {
     serverPath: ['--server-path <path>', 'Path of the server folder. Override the value specified in the configuration file.'],
 
     // TODO: ssh
-    
+
     enableSymlinks: ['--enable-symlinks', 'Force enable/disable symlinks. Defaults to false. Useful if you want to enable symlinks on Windows.'],
   } as unknown as Record<string, [string, string, RegExp, boolean]> // Haha TypeScript funny

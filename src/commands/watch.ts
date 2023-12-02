@@ -28,6 +28,8 @@ export async function watchCommand(opts: WatchOptions) {
     let alreadyBuilding: boolean = false
     let needRebuild: boolean = false
 
+    // TODO: reimplement auto reload
+
     // let client: Client | null = null
 
     // TODO: add support for clients & resources that require restarts & world resets, sandstone-server should override the involved environment variables if mods are present that fix it

@@ -30,6 +30,8 @@ build.option.apply(build, BuildDeclares.dry)
   .option.apply(build, BuildDeclares.world)
   .option.apply(build, BuildDeclares.clientPath)
   .option.apply(build, BuildDeclares.serverPath)
+
+  .option.apply(build, BuildDeclares.enableSymlinks)
   .action(buildCommand)
 
 const watch = CLI
@@ -50,6 +52,8 @@ watch.option.apply(watch, BuildDeclares.dry)
   .option.apply(watch, BuildDeclares.world)
   .option.apply(watch, BuildDeclares.clientPath)
   .option.apply(watch, BuildDeclares.serverPath)
+  
+  .option.apply(watch, BuildDeclares.enableSymlinks)
 
 const create = CLI
   .command('create')

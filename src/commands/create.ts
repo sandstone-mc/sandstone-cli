@@ -111,12 +111,12 @@ export async function createCommand(_project: string, opts: CreateOptions) {
       saveOptions.serverPath = opts.serverPath
     } else { // TODO: Add support for ssh
       // User didn't specify a way to save the file. Ask them.
-      const { saveChoice }: { saveChoice: 'root' | 'world' | 'server-path' } = await inquirer.prompt({
+      const { saveChoice }: { saveChoice: 'root' | 'world' | 'server-path' | 'none' } = await inquirer.prompt({
         name: 'saveChoice',
         type: 'list',
-        message: 'Where do you want your pack(s) to be saved (can be changed later)?',
+        message: 'Where do you want your pack(s) to be exported to (can be changed later)?',
         choices: [{
-          name: 'In the root client (.minecraft) folder',
+          name: 'In the root client (.minecraft/datapacks & .minecraft/resourcepacks) folder(s)',
           value: 'root',
           short: 'Client folder',
         }, {
@@ -127,27 +127,36 @@ export async function createCommand(_project: string, opts: CreateOptions) {
           name: 'In a server',
           value: 'server-path',
           short: 'Server path',
+        }, {
+          name: 'N/A',
+          value: 'none',
+          short: 'None',
         }],
       })
 
-      if (saveChoice === 'root') {
-        saveOptions.root = true
-      } else if (saveChoice === 'world') {
-        const { world }: { world: string } = await inquirer.prompt({
-          name: 'world',
-          message: 'What world do you want to save the packs in? >',
-          type: 'list',
-          choices: getWorldsList,
-        })
-        saveOptions.world = world
-      } else { // TODO: Add native folder selector
-        const { serverPath }: { serverPath: string } = await inquirer.prompt({
-          name: 'serverPath',
-          message: 'Where is the server to save the packs in? Relative paths are accepted. >',
-          type: 'input',
-        })
+      switch (saveChoice) {
+        case 'root':
+          saveOptions.root = true
+          break
+        case 'world':
+          const { world }: { world: string } = await inquirer.prompt({
+            name: 'world',
+            message: 'What world do you want to save the packs in? >',
+            type: 'list',
+            choices: getWorldsList,
+          })
+          saveOptions.world = world
+          break
+        case 'server-path':
+          const { serverPath }: { serverPath: string } = await inquirer.prompt({
+            name: 'serverPath',
+            message: 'Where is the server to save the packs in? Relative paths are accepted. >',
+            type: 'input',
+          })
 
-        saveOptions.serverPath = serverPath
+          saveOptions.serverPath = serverPath
+          break
+        case 'none': break
       }
     }
     if (opts.clientPath) {
@@ -189,8 +198,6 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   exec(`${packageManager} install`)
 
-  // TODO: Make profiles for either packs or libraries
-
   const configPath = path.join(projectPath, `${projectType === 'library' ? 'test/' : ''}sandstone.config.ts`)
 
   // Merge with the config values
@@ -205,8 +212,6 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   // TODO: packFormat
 
   const optsJson = toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)))
-
-  console.log(saveOptions, optsJson)
 
   if (optsJson !== '{}') {
     templateConfig = templateConfig.replace('saveOptions: {}', `saveOptions: ${optsJson}`)

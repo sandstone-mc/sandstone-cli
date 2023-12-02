@@ -2,7 +2,7 @@
 import { Argument, Command } from 'commander';
 import figlet from 'figlet';
 import { createCommand } from './commands/index.js';
-import { BuildDeclares } from './index.js';
+import { BuildDeclares } from './shared.js';
 
 const commander = new Command()
 

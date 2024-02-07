@@ -124,7 +124,7 @@ export async function installVanillaCommand(_libraries: string[]) {
         description: data.display.description,
       }
 
-      if (manifest && !manifest[id] && !manifest[meta.rawId]) {
+      if (!manifest || !(manifest[id] || manifest[meta.rawId])) {
         
         if (option.name.length > optionColumn[0]) optionColumn[0] = option.name.length
 
@@ -180,34 +180,32 @@ export async function installVanillaCommand(_libraries: string[]) {
   }
 
   if (count > 0) {
-
     let adding: [string, string][] | false = false
 
     for await (const [library, searched] of libraries) {
       const version = library.includes('@') ? library.split('@')[1] : 'latest'
 
+      if (searched) {
+        if (!adding) adding = []
+        adding.push([library, version])
+      }
       if (!manifest || !(manifest[library] || manifest[library] === version)) {
-        if (searched) {
+        let exists = false
+        try {
+          /* @ts-ignore */
+          exists = (await (await fetch(`${base}/packs/${library}/meta`)).json()).statusCode !== 404
+        } catch (e) {}
+
+        if (exists) {
           if (!adding) adding = []
           adding.push([library, version])
         } else {
-          let exists = false
-          try {
-            /* @ts-ignore */
-            exists = (await (await fetch(`${base}/packs/${library}/meta`)).json()).statusCode !== 404
-          } catch (e) {}
+          count--
 
-          if (exists) {
+          console.log(`${library} doesn't exist! Searching...`)
+
+          if (await search(library)) {
             if (!adding) adding = []
-            adding.push([library, version])
-          } else {
-            count--
-
-            console.log(`${library} doesn't exist! Searching...`)
-
-            if (await search(library)) {
-              if (!adding) adding = []
-            }
           }
         }
       } else {
@@ -223,7 +221,6 @@ export async function installVanillaCommand(_libraries: string[]) {
     }
   }
 
-  console.log
   console.log(`${count} libraries added`)
 }
 

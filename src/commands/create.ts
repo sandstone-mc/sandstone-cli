@@ -1,62 +1,62 @@
-import { SemVer } from 'semver'
-import fs from 'fs-extra'
-import path from 'path'
-import chalk from 'chalk-template'
-import util from 'util'
-import * as child from 'child_process'
-import { nanoid } from 'nanoid'
+import { SemVer } from 'semver';
+import fs from 'fs-extra';
+import path from 'node:path';
+import chalk from 'chalk-template';
+import util from 'node:util';
+import * as child from 'node:child_process';
+import { nanoid } from 'nanoid';
 
-import { capitalize, getWorldsList, hasPnpm, hasYarn } from '../utils.js'
+import { capitalize, getWorldsList, hasBun, hasPnpm, hasYarn } from '../utils.js';
 
 type CreateOptions = {
   // Flags
-  root: boolean
+  root: boolean;
 
   // Values
-  world?: string
-  clientPath?: string
-  serverPath?: string
+  world?: string;
+  clientPath?: string;
+  serverPath?: string;
   // TODO: ssh
-}
+};
 
 function toJson(obj: any, pretty = false): string {
   return util.inspect(obj, {
-    depth: Number(Infinity),
+    depth: Number(Number.POSITIVE_INFINITY),
     colors: false,
-    breakLength: Number(Infinity),
+    breakLength: Number(Number.POSITIVE_INFINITY),
     compact: !pretty,
-    maxArrayLength: Number(Infinity),
-  })
+    maxArrayLength: Number(Number.POSITIVE_INFINITY),
+  });
 }
 
 export async function createCommand(_project: string, opts: CreateOptions) {
 
-  const projectPath = path.resolve(_project)
-  const projectName = path.basename(projectPath)
+  const projectPath = path.resolve(_project);
+  const projectName = path.basename(projectPath);
 
-  const inquirer = (await import("inquirer")).default
+  const inquirer = (await import("inquirer")).default;
 
   const projectType = Boolean((await inquirer.prompt({
     name: 'projectType',
     message: 'Whether your project will be a library for use in other Sandstone projects >',
     type: 'confirm',
     default: false,
-  })).projectType) === true ? 'library' : 'pack'
+  })).projectType) === true ? 'library' : 'pack';
 
-  const sv = (v: string) => new SemVer(v)
+  const sv = (v: string) => new SemVer(v);
 
-  const versions = [[sv('0.13.6'), sv('0.5.4')], [sv('1.0.0-beta.0'), sv('1.1.11')]] as const
+  const versions = [[sv('0.13.6'), sv('0.5.4')], [sv('1.0.0-beta.0'), sv('1.1.11')]] as const;
 
-  const stableIndex = 0
+  const stableIndex = 0;
 
   const { version } = await inquirer.prompt({
     name: 'version',
     type: 'list',
     message: 'Which version of Sandstone do you want to use? These are the only supported versions for new projects.',
     choices: versions.map((v) => {
-      const { prerelease, major, minor } = v[0]
+      const { prerelease, major, minor } = v[0];
 
-      const release = `${major}.${minor}`
+      const release = `${major}.${minor}`;
 
       return {
         name: prerelease.length === 0 ?
@@ -64,16 +64,16 @@ export async function createCommand(_project: string, opts: CreateOptions) {
           `${capitalize(prerelease[0] as string)} Version ${prerelease[1]} for release ${release}`,
         value: v,
         short: v[0].toString(),
-      }
+      };
     }),
     default: stableIndex,
   }) as {
-    version: typeof versions[any]
-  }
+    version: typeof versions[any];
+  };
 
-  let packName = projectName
+  let packName = projectName;
 
-  let namespace = projectName.replace(RegExp(/ /g), '_')
+  let namespace = projectName.replace(RegExp(/ /g), '_');
 
   if (projectType === 'pack') {
     packName = (await inquirer.prompt({
@@ -81,41 +81,41 @@ export async function createCommand(_project: string, opts: CreateOptions) {
       message: 'Name of your output pack(s) (can be changed later) >',
       default: projectName,
       type: 'input',
-    })).projectType
+    })).projectType;
 
     namespace = (await inquirer.prompt({
       name: 'namespace',
       message: 'Default namespace (can be changed later) >',
       default: namespace,
       type: 'input',
-    })).namespace
+    })).namespace;
   } else {
-    packName += '-testing'
-    namespace += '_test'
+    packName += '-testing';
+    namespace += '_test';
   }
 
   // Find the save directory
   const saveOptions: {
-    root?: boolean | undefined
-    world?: string | undefined
-    serverPath?: string | undefined
-    clientPath?: string | undefined
-  } = {}
+    root?: boolean | undefined;
+    world?: string | undefined;
+    serverPath?: string | undefined;
+    clientPath?: string | undefined;
+  } = {};
 
   if (version[0].major === 1) {
     if (opts.clientPath) {
-      saveOptions.clientPath = opts.clientPath
+      saveOptions.clientPath = opts.clientPath;
     }
 
     if (opts.root) {
-      saveOptions.root = true
+      saveOptions.root = true;
     } else if (opts.world) {
-      saveOptions.world = opts.world
+      saveOptions.world = opts.world;
     } else if (opts.serverPath) {
-      saveOptions.serverPath = opts.serverPath
+      saveOptions.serverPath = opts.serverPath;
     } else { // TODO: Add support for ssh
       // User didn't specify a way to save the file. Ask them.
-      const { saveChoice }: { saveChoice: 'root' | 'world' | 'server-path' | 'none' } = await inquirer.prompt({
+      const { saveChoice }: { saveChoice: 'root' | 'world' | 'server-path' | 'none'; } = await inquirer.prompt({
         name: 'saveChoice',
         type: 'list',
         message: 'Where do you want your pack(s) to be exported to (can be changed later)?',
@@ -136,98 +136,117 @@ export async function createCommand(_project: string, opts: CreateOptions) {
           value: 'none',
           short: 'None',
         }],
-      })
+      });
 
       switch (saveChoice) {
         case 'root':
-          saveOptions.root = true
-          break
-        case 'world':
-          const { world }: { world: string } = await inquirer.prompt({
+          saveOptions.root = true;
+          break;
+        case 'world': {
+          const { world }: { world: string; } = await inquirer.prompt({
             name: 'world',
             message: 'What world do you want to save the packs in? >',
             type: 'list',
             choices: () => getWorldsList(saveOptions.clientPath),
-          })
-          saveOptions.world = world
-          break
-        case 'server-path':
-          const { serverPath }: { serverPath: string } = await inquirer.prompt({
+          });
+          saveOptions.world = world;
+          break;
+        }
+        case 'server-path': {
+          const { serverPath }: { serverPath: string; } = await inquirer.prompt({
             name: 'serverPath',
             message: 'Where is the server to save the packs in? Relative paths are accepted. >',
             type: 'input',
-          })
+          });
 
-          saveOptions.serverPath = serverPath
-          break
-        case 'none': break
+          saveOptions.serverPath = serverPath;
+          break;
+        }
+        case 'none': break;
       }
     }
   }
 
-  let packageManager = 'npm'
+  let packageManager = 'npm';
+  let packageRunner = 'npx';
 
-  const yarn = hasYarn()
-  const pnpm = hasPnpm()
+  const yarn = hasYarn();
+  const pnpm = hasPnpm();
+  const bun = hasBun();
 
-  if (yarn || pnpm) {
-    const choices = ['npm']
+  if (yarn || pnpm || bun) {
+    const choices = ['npm'];
 
-    if (yarn) choices.unshift('yarn')
-    if (pnpm) choices.unshift('pnpm')
+    if (yarn) choices.unshift('yarn');
+    if (pnpm) choices.unshift('pnpm');
+    if (bun) choices.unshift('bun');
 
     packageManager = (await inquirer.prompt({
       name: 'packageManager',
       message: 'What package manager do you want to use? >',
       type: 'list',
       choices: choices,
-    })).packageManager
+    })).packageManager;
+
+    switch (packageManager) {
+      case 'npm':
+        packageRunner = 'npx';
+        break;
+      case 'pnpm':
+        packageRunner = 'pnpm';
+        break;
+      case 'yarn':
+        packageRunner = 'yarn exec';
+        break;
+      case 'bun':
+        packageRunner = 'bunx';
+        break;
+    }
   }
 
-  fs.mkdirSync(projectPath)
+  fs.mkdirSync(projectPath);
 
   // Create project & install dependencies
-  console.log(chalk`Installing {rgb(229,193,0) sandstone@${version[0]}}, {rgb(229,193,0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`)
+  console.log(chalk`Installing {rgb(229,193,0) sandstone@${version[0]}}, {rgb(229,193,0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`);
 
-  const exec = (cmd: string) => child.execSync(cmd, { cwd: projectPath })
+  const exec = (cmd: string) => child.execSync(cmd, { cwd: projectPath });
 
-  exec('git clone https://github.com/sandstone-mc/sandstone-template.git .')
+  exec('git clone https://github.com/sandstone-mc/sandstone-template.git .');
 
-  exec(`git checkout ${projectType}-${version[0]}`)
+  exec(`git checkout ${projectType}-${version[0]}`);
 
-  exec('npx rimraf -rf .git')
+  exec(`${packageRunner} rimraf -rf .git`);
 
-  exec(`${packageManager} install`)
+  exec(`${packageManager} install`);
 
-  const configPath = path.join(projectPath, `${projectType === 'library' ? 'test/' : ''}sandstone.config.ts`)
+  const configPath = path.join(projectPath, `${projectType === 'library' ? 'test/' : ''}sandstone.config.ts`);
 
   // Merge with the config values
-  let templateConfig = await fs.readFile(configPath, 'utf8')
+  let templateConfig = await fs.readFile(configPath, 'utf8');
 
-  templateConfig = templateConfig.replace('packUid: \'kZZpDK67\'', `packUid: ${toJson(nanoid(8))}`)
+  templateConfig = templateConfig.replace('packUid: \'kZZpDK67\'', `packUid: ${toJson(nanoid(8))}`);
 
-  templateConfig = templateConfig.replace('name: \'template\'', `name: ${toJson(packName)}`)
+  templateConfig = templateConfig.replace('name: \'template\'', `name: ${toJson(packName)}`);
 
-  templateConfig = templateConfig.replace('namespace: \'default\'', `namespace: ${toJson(namespace)}`)
+  templateConfig = templateConfig.replace('namespace: \'default\'', `namespace: ${toJson(namespace)}`);
 
   // TODO: packFormat
 
-  const optsJson = toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)))
+  const optsJson = toJson(Object.fromEntries(Object.entries(saveOptions).filter(([_, value]) => value !== undefined)));
 
   if (optsJson !== '{}') {
-    templateConfig = templateConfig.replace('saveOptions: {}', `saveOptions: ${optsJson}`)
+    templateConfig = templateConfig.replace('saveOptions: {}', `saveOptions: ${optsJson}`);
   }
 
   // Rewrite config
-  fs.writeFileSync(configPath, templateConfig)
+  fs.writeFileSync(configPath, templateConfig);
 
-  const prefix = packageManager === 'npm' ? 'npm run' : packageManager
-  console.log(chalk`{green Success!} Created "${projectName}" at "${projectPath}"`)
+  console.log(chalk`{green Success!} Created "${projectName}" at "${projectPath}"`);
 
-  console.log('Inside that directory, you can run several commands:\n')
-  console.log(chalk`  {cyan ${prefix} build}:\n    Builds the packs. {cyan ⛏}\n`)
-  console.log(chalk`  {cyan ${prefix} watch}:\n    Builds the packs, and rebuilds on each file change. {cyan ⛏}\n`)
+  console.log('Inside that directory, you can run several commands:\n');
+  console.log(chalk`  {cyan ${packageRunner} build}:\n    Builds the packs. {cyan ⛏}\n`);
+  console.log(chalk`  {cyan ${packageRunner} watch}:\n    Builds the packs, and rebuilds on each file change. {cyan ⛏}\n`);
 
-  console.log('We suggest that you begin by typing:\n')
-  console.log(chalk`  {cyan cd} ${projectName}\n  {cyan ${prefix} watch}`)
+  console.log('We suggest that you begin by typing:\n');
+  console.log(chalk`  {cyan cd} ${projectName}\n  {cyan ${packageRunner} watch}`);
 } 

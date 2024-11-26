@@ -1,7 +1,7 @@
-import fs from 'fs'
-import path from 'path'
-import os from 'os'
-import { execSync } from 'child_process'
+import fs from 'node:fs'
+import path from 'node:path'
+import os from 'node:os'
+import { execSync } from 'node:child_process'
 import chalk from 'chalk-template'
 
 export function hasYarn(): boolean {
@@ -37,7 +37,7 @@ export function getFileFolder(filename: string, from = '.'): string | null {
     // Go up 1 folder
     const newFileFolder = path.dirname(fileFolder)
 
-    if (newFileFolder == fileFolder) {
+    if (newFileFolder === fileFolder) {
       // If we arrived to the root folder, give up.
       return null
     }

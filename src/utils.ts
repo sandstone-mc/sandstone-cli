@@ -8,7 +8,7 @@ export function hasYarn(): boolean {
   try {
     execSync('yarn --version')
     return true
-  } catch (error) {
+  } catch (_) {
     return false
   }
 }
@@ -16,7 +16,15 @@ export function hasPnpm(): boolean {
   try {
     execSync('pnpm --version')
     return true
-  } catch (error) {
+  } catch (_) {
+    return false
+  }
+}
+export function hasBun(): boolean {
+  try {
+    execSync('bun --version')
+    return true;
+  } catch (_) {
     return false
   }
 }

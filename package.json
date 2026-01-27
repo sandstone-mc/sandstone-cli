@@ -1,6 +1,6 @@
 {
   "name": "sandstone-cli",
-  "version": "1.2.5",
+  "version": "2.0.0",
   "description": "The CLI for Sandstone - the minecraft pack creation library.",
   "type": "module",
   "exports": "./lib/index.js",
@@ -9,8 +9,7 @@
     "create-sandstone": "./lib/create.js"
   },
   "scripts": {
-    "test": "echo NO TESTS",
-    "build": "tsc"
+    "build": "bun tsc"
   },
   "repository": {
     "type": "git",
@@ -42,22 +41,26 @@
   },
   "homepage": "https://github.com/sandstone-mc/sandstone-cli#readme",
   "dependencies": {
+    "@inquirer/prompts": "^8.2.0",
+    "@parcel/watcher": "^2.5.6",
+    "adm-zip": "^0.5.10",
     "chalk": "^5.3.0",
     "chalk-template": "^1.1.0",
-    "chokidar": "^3.5.3",
     "commander": "^10.0.1",
     "figlet": "^1.6.0",
     "fs-extra": "^11.1.1",
-    "inquirer": "^9.2.11",
     "nanoid": "^4.0.2",
     "node-fetch": "^3.3.2",
     "semver": "^7.5.4"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.2",
     "@types/figlet": "^1.5.6",
     "@types/fs-extra": "^11.0.2",
-    "@types/inquirer": "^9.0.4",
     "@types/semver": "^7.5.3",
     "typescript": "^5.2.2"
+  },
+  "peerDependencies": {
+    "sandstone": "file:../sandstone"
   }
 }

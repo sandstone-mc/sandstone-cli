@@ -2,7 +2,7 @@ import fs from 'fs-extra'
 import path from 'path'
 import { exec } from 'child_process'
 import { buildCommand } from './build.js'
-import inquirer from 'inquirer'
+import { checkbox } from '@inquirer/prompts'
 
 const _fetch = import('node-fetch')
 
@@ -23,17 +23,13 @@ export async function installNativeCommand(_libraries: string[]) {
   const manifest = await (await fetch('https://raw.githubusercontent.com/sandstone-mc/sandstone-libraries/main/manifest.json')).json() as LibraryManifest
 
   const search = async () => {
-    const { selected } = await inquirer.prompt({
-      name: 'selected',
-      type: 'checkbox',
+    const selected = await checkbox({
       message: 'Which libraries to add?',
       choices: manifest.libraries.map((library) => ({
         name: library.name,
         value: library.package,
       })),
-    }) as {
-      selected: string[]
-    }
+    })
 
     if (selected && selected.length !== 0) {
       libraries.push(...selected.map((lib) => [lib, true] as [string, boolean]))
@@ -151,24 +147,19 @@ export async function installVanillaCommand(_libraries: string[]) {
     if (options.length === 0) {
       console.log('No results found!')
     } else {
-      const { selected } = await inquirer.prompt({
-        name: 'selected',
-        type: 'checkbox',
+      const selected = await checkbox({
         message: 'Which libraries to add?',
         choices: options.map((option) => ({
           name: `${option.name}${space(0, option.name)}by ${option.owner}${space(1, option.owner)}${option.downloads} downloads${space(2, option.downloads)}${option.description}`,
-          short: `${option.name} - by ${option.owner} - ${option.downloads} downloads - ${option.description}`,
-          value: [option.id, true],
+          value: [option.id, true] as [string, true],
         })),
-      }) as {
-        selected: [string, true][]
-      }
-  
+      })
+
       if (selected && selected.length !== 0) {
         libraries.push(...selected)
-  
+
         count += selected.length
-  
+
         return true
       }
     }
@@ -244,17 +235,13 @@ export async function uninstallVanillaCommand(_libraries: string[]) {
 
   if (manifest) {
     if (count === 0) {
-      const { selected } = await inquirer.prompt({
-        name: 'selected',
-        type: 'checkbox',
+      const selected = await checkbox({
         message: 'Which libraries to remove?',
         choices: Object.entries(manifest).map(([name]) => ({
           short: name,
           value: name,
         })),
-      }) as {
-        selected: string[]
-      }
+      })
 
       if (selected && selected.length !== 0) {
         count = selected.length

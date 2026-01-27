@@ -1,94 +1,119 @@
-import chokidar from 'chokidar'
-import path from 'path'
+import { subscribe, type Event } from '@parcel/watcher'
 
 import { getProjectFolders } from '../utils.js'
-import { buildCommand } from './build.js'
+import { buildCommand, type BuildOptions } from './build.js'
 
-type WatchOptions = {
-    // Flags
-    dry?: boolean
-    verbose?: boolean
-    root?: boolean
-    fullTrace?: boolean
-    strictErrors?: boolean
+export async function watchCommand(opts: BuildOptions) {
+  let alreadyBuilding = false
+  let needRebuild = false
 
-    // Values
-    path: string,
-    configPath: string,
-    name?: string
-    namespace?: string
-    world?: string
-    clientPath?: string
-    serverPath?: string
-    // TODO: ssh
-    // TODO: implement auto /reload & F3+F
-}
+  const folders = getProjectFolders(opts.path)
 
-export async function watchCommand(opts: WatchOptions) {
-    let alreadyBuilding: boolean = false
-    let needRebuild: boolean = false
-
-    // TODO: reimplement auto reload
-
-    // let client: Client | null = null
-
-    // TODO: add support for clients & resources that require restarts & world resets, sandstone-server should override the involved environment variables if mods are present that fix it
-    /*if (flags.autoReload !== undefined) {
-      try {
-        client = (await require('minecraft-protocol')).createClient({
-          username: 'SandstoneBot',
-          host: 'localhost',
-          port: flags.autoReload,
-        })
-      } catch (e) {
-        console.log(chalk.rgb(255, 204, 0)`Failed to connect to localhost:${flags.autoReload}. The datapack won't be auto reloaded.`)
-      }
-    }*/
-
-    const folders = getProjectFolders(opts.path)
-
-    async function onFilesChange() {
-        if (alreadyBuilding) {
-            // If the pack is already being built & another change was made,
-            // notify that a rebuild is needed & stop there
-            needRebuild = true
-            return
-        }
-
-        alreadyBuilding = true
-
-        await buildCommand(opts, folders)
-        //client?.write('chat', { message: '/reload' })
-        alreadyBuilding = false
-
-        if (needRebuild) {
-            needRebuild = false
-            await onFilesChange()
-        }
+  async function onFilesChange() {
+    if (alreadyBuilding) {
+      needRebuild = true
+      return
     }
 
-    let timeout: NodeJS.Timeout | null = null
-    let files: string[] = []
+    alreadyBuilding = true
 
-    console.log('Watching source for changes. Press Ctrl+C to exit.\n')
+    await buildCommand(opts, folders)
 
-    chokidar.watch([
-        path.join(folders.absProjectFolder, '/**/*'),
-        path.join(folders.sandstoneConfigFolder, 'sandstone.config.ts'),
-        path.join(folders.rootFolder, 'package.json'),
-        path.join(folders.rootFolder, 'tsconfig.json'),
-        /* @ts-ignore */
-    ]).on('all', (event, path) => {
-        if (event === 'addDir') {
-            return
-        }
+    alreadyBuilding = false
 
-        files.push(path)
+    if (needRebuild) {
+      needRebuild = false
+      await onFilesChange()
+    }
+  }
 
-        if (timeout) clearTimeout(timeout as any)
-        timeout = setTimeout(() => {
-            onFilesChange()
-            files = []
-        }, 200)
+  let timeout: ReturnType<typeof setTimeout> | null = null
+
+  const handleEvents = (events: Event[]) => {
+    // Filter out irrelevant events
+    const relevantEvents = events.filter(e => {
+      const relativePath = e.path.toLowerCase()
+      // Ignore node_modules, .sandstone, .git
+      if (relativePath.includes('node_modules') ||
+          relativePath.includes('.sandstone') ||
+          relativePath.includes('.git')) {
+        return false
+      }
+      return true
     })
+
+    if (relevantEvents.length === 0) return
+
+    if (timeout) clearTimeout(timeout)
+    timeout = setTimeout(() => {
+      const changedFiles = relevantEvents.map(e => e.path).join(', ')
+      console.log(`\nFile changed: ${changedFiles}\nRebuilding...\n`)
+      onFilesChange()
+    }, 200)
+  }
+
+  console.log('Watching source for changes. Press Ctrl+C to exit.\n')
+
+  // Initial build
+  await onFilesChange()
+
+  // Watch the project folder
+  const projectSubscription = await subscribe(
+    folders.absProjectFolder,
+    (err, events) => {
+      if (err) {
+        console.error('Watch error:', err)
+        return
+      }
+      handleEvents(events)
+    }
+  )
+
+  // Watch config file (in sandstoneConfigFolder)
+  const configSubscription = await subscribe(
+    folders.sandstoneConfigFolder,
+    (err, events) => {
+      if (err) {
+        console.error('Watch error:', err)
+        return
+      }
+      // Only react to sandstone.config.ts changes
+      const configEvents = events.filter(e =>
+        e.path.endsWith('sandstone.config.ts')
+      )
+      if (configEvents.length > 0) {
+        handleEvents(configEvents)
+      }
+    }
+  )
+
+  // Watch root folder for package.json and tsconfig.json changes
+  const rootSubscription = await subscribe(
+    folders.rootFolder,
+    (err, events) => {
+      if (err) {
+        console.error('Watch error:', err)
+        return
+      }
+      // Only react to package.json or tsconfig.json changes
+      const rootEvents = events.filter(e =>
+        e.path.endsWith('package.json') || e.path.endsWith('tsconfig.json')
+      )
+      if (rootEvents.length > 0) {
+        handleEvents(rootEvents)
+      }
+    },
+    {
+      ignore: ['node_modules', '.sandstone', '.git', 'src']
+    }
+  )
+
+  // Handle cleanup on exit
+  process.on('SIGINT', async () => {
+    console.log('\nStopping watch...')
+    await projectSubscription.unsubscribe()
+    await configSubscription.unsubscribe()
+    await rootSubscription.unsubscribe()
+    process.exit(0)
+  })
 }

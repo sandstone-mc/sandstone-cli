@@ -1,8 +1,8 @@
 #!/usr/bin/env node
-import { Argument, Command } from 'commander';
-import figlet from 'figlet';
-import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand } from './commands/index.js';
-import { BuildDeclares } from './shared.js';
+import { Argument, Command } from 'commander'
+import figlet from 'figlet'
+import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand } from './commands/index.js'
+import { BuildDeclares } from './shared.js'
 
 const commander = new Command()
 

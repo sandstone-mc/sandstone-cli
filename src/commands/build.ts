@@ -129,11 +129,11 @@ async function _buildProject(
 
   // Build the context for sandstone
   const namespace = cliOptions.namespace || sandstoneConfig.namespace
-  const conflictStrategies: Record<string, string> = {}
+  const conflictStrategies: NonNullable<SandstoneContext['conflictStrategies']> = {}
 
   if (sandstoneConfig.onConflict) {
     for (const [resource, strategy] of Object.entries(sandstoneConfig.onConflict)) {
-      conflictStrategies[resource] = strategy as string
+      conflictStrategies[resource] = strategy as NonNullable<SandstoneContext['conflictStrategies']>[string]
     }
   }
 
@@ -217,11 +217,10 @@ async function _buildProject(
 
   // Save the pack
   const packTypes = await sandstonePack.save({
-    dry: cliOptions.dry,
-    verbose: cliOptions.verbose,
+    dry: cliOptions.dry ?? false,
+    verbose: cliOptions.verbose ?? false,
 
-    fileHandler:
-      saveOptions.customFileHandler ??
+    fileHandler: (saveOptions.customFileHandler as ((relativePath: string, content: any) => Promise<void>) | undefined) ??
       (async (relativePath: string, content: any) => {
         let pathPass = true
         if (fileExclusions && fileExclusions.generated) {

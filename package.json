@@ -59,8 +59,5 @@
     "@types/fs-extra": "^11.0.2",
     "@types/semver": "^7.5.3",
     "typescript": "^5.2.2"
-  },
-  "peerDependencies": {
-    "sandstone": "^1.0.0-beta.0"
   }
 }

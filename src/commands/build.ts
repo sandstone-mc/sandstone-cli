@@ -138,7 +138,9 @@ async function _buildProject(
   }
 
   // Import sandstone and set up context
+  /* @ts-ignore */
   const { createSandstonePack, resetSandstonePack } = await import('sandstone')
+  /* @ts-ignore */
   type SandstoneContext = import('sandstone').SandstoneContext
 
   // Reset any existing pack state

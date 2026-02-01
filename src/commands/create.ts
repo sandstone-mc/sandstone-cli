@@ -5,8 +5,9 @@ import chalk from 'chalk-template'
 import util from 'util'
 import * as child from 'child_process'
 import { nanoid } from 'nanoid'
+import { confirm, select, input } from '@inquirer/prompts'
 
-import { capitalize, getWorldsList, hasPnpm, hasYarn } from '../utils.js'
+import { capitalize, getWorldsList, hasBun, hasPnpm, hasYarn } from '../utils.js'
 
 type CreateOptions = {
   // Flags
@@ -34,24 +35,16 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   const projectPath = path.resolve(_project)
   const projectName = path.basename(projectPath)
 
-  const inquirer = (await import("inquirer")).default
-
-  const projectType = Boolean((await inquirer.prompt({
-    name: 'projectType',
+  const projectType = (await confirm({
     message: 'Whether your project will be a library for use in other Sandstone projects >',
-    type: 'confirm',
     default: false,
-  })).projectType) === true ? 'library' : 'pack'
+  })) === true ? 'library' : 'pack'
 
   const sv = (v: string) => new SemVer(v)
 
   const versions = [[sv('0.13.6'), sv('0.5.4')], [sv('1.0.0-beta.0'), sv('1.1.11')]] as const
 
-  const stableIndex = 0
-
-  const { version } = await inquirer.prompt({
-    name: 'version',
-    type: 'list',
+  const version = await select({
     message: 'Which version of Sandstone do you want to use? These are the only supported versions for new projects.',
     choices: versions.map((v) => {
       const { prerelease, major, minor } = v[0]
@@ -66,29 +59,23 @@ export async function createCommand(_project: string, opts: CreateOptions) {
         short: v[0].toString(),
       }
     }),
-    default: stableIndex,
-  }) as {
-    version: typeof versions[any]
-  }
+    default: versions[0],
+  })
 
   let packName = projectName
 
   let namespace = projectName.replace(RegExp(/ /g), '_')
 
   if (projectType === 'pack') {
-    packName = (await inquirer.prompt({
-      name: 'projectType',
+    packName = (await input({
       message: 'Name of your output pack(s) (can be changed later) >',
       default: projectName,
-      type: 'input',
-    })).projectType
+    }))
 
-    namespace = (await inquirer.prompt({
-      name: 'namespace',
+    namespace = (await input({
       message: 'Default namespace (can be changed later) >',
       default: namespace,
-      type: 'input',
-    })).namespace
+    }))
   } else {
     packName += '-testing'
     namespace += '_test'
@@ -115,9 +102,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
       saveOptions.serverPath = opts.serverPath
     } else { // TODO: Add support for ssh
       // User didn't specify a way to save the file. Ask them.
-      const { saveChoice }: { saveChoice: 'root' | 'world' | 'server-path' | 'none' } = await inquirer.prompt({
-        name: 'saveChoice',
-        type: 'list',
+      const saveChoice = await select<'root' | 'world' | 'server-path' | 'none'>({
         message: 'Where do you want your pack(s) to be exported to (can be changed later)?',
         choices: [{
           name: 'In the root client (.minecraft/datapacks & .minecraft/resourcepacks) folder(s)',
@@ -143,19 +128,15 @@ export async function createCommand(_project: string, opts: CreateOptions) {
           saveOptions.root = true
           break
         case 'world':
-          const { world }: { world: string } = await inquirer.prompt({
-            name: 'world',
+          const world = await select({
             message: 'What world do you want to save the packs in? >',
-            type: 'list',
-            choices: () => getWorldsList(saveOptions.clientPath),
+            choices: getWorldsList(saveOptions.clientPath),
           })
           saveOptions.world = world
           break
         case 'server-path':
-          const { serverPath }: { serverPath: string } = await inquirer.prompt({
-            name: 'serverPath',
+          const serverPath = await input({
             message: 'Where is the server to save the packs in? Relative paths are accepted. >',
-            type: 'input',
           })
 
           saveOptions.serverPath = serverPath
@@ -169,19 +150,19 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   const yarn = hasYarn()
   const pnpm = hasPnpm()
+  const bun =  hasBun()
 
   if (yarn || pnpm) {
     const choices = ['npm']
 
     if (yarn) choices.unshift('yarn')
     if (pnpm) choices.unshift('pnpm')
+    if (bun)  choices.unshift('bun')
 
-    packageManager = (await inquirer.prompt({
-      name: 'packageManager',
+    packageManager = (await select({
       message: 'What package manager do you want to use? >',
-      type: 'list',
-      choices: choices,
-    })).packageManager
+      choices: choices
+    }))
   }
 
   fs.mkdirSync(projectPath)

@@ -20,6 +20,14 @@ export function hasPnpm(): boolean {
     return false
   }
 }
+export function hasBun(): boolean {
+  try {
+    execSync('bun --version')
+    return true
+  } catch (error) {
+    return false
+  }
+}
 
 /**
  * Recursively search for a file.

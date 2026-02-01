@@ -1,5 +1,0 @@
-{
-  "peerDependencies": {
-    "sandstone": "file:../sandstone"
-  }
-}

@@ -138,6 +138,7 @@ async function _buildProject(
   }
 
   // Import sandstone and set up context
+  // TODO: Remove these ts-ignore's once beta 1 releases
   /* @ts-ignore */
   const { createSandstonePack, resetSandstonePack } = await import('sandstone')
   /* @ts-ignore */

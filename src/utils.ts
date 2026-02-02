@@ -4,6 +4,9 @@ import os from 'os'
 import { execSync } from 'child_process'
 import chalk from 'chalk-template'
 
+/** Normalize a path to use forward slashes */
+export const normalizePath = (p: string) => p.replaceAll('\\', '/')
+
 export function hasYarn(): boolean {
   try {
     execSync('yarn --version')
@@ -53,13 +56,13 @@ export function getFileFolder(filename: string, from = '.'): string | null {
     fileFolder = newFileFolder
   }
 
-  return fileFolder
+  return normalizePath(fileFolder)
 }
 
 export type ProjectFolders = { absProjectFolder: string, projectFolder: string, rootFolder: string, sandstoneConfigFolder: string }
 
 export function getProjectFolders(projectFolder: string): ProjectFolders {
-  const absProjectFolder = path.resolve(projectFolder)
+  const absProjectFolder = normalizePath(path.resolve(projectFolder))
 
   /// GETTING ALL MANDATORY FILES ///
   // Resolve the location of package.json, in order to get the node_modules folder.
@@ -75,7 +78,10 @@ export function getProjectFolders(projectFolder: string): ProjectFolders {
   }
 
   return {
-    absProjectFolder, projectFolder, rootFolder, sandstoneConfigFolder
+    absProjectFolder,
+    projectFolder: normalizePath(projectFolder),
+    rootFolder,
+    sandstoneConfigFolder,
   }
 }
 

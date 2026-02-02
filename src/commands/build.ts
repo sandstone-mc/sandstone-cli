@@ -103,7 +103,8 @@ async function _buildProject(
 
   // Load sandstone.config.ts
   const configPath = path.join(sandstoneConfigFolder, 'sandstone.config.ts')
-  const sandstoneConfig = (await import(pathToFileURL(configPath).toString())).default
+  const configUrl = pathToFileURL(configPath).toString()
+  const sandstoneConfig = (await import(configUrl)).default
 
   const { scripts } = sandstoneConfig
   const saveOptions = sandstoneConfig.saveOptions || {}
@@ -167,7 +168,8 @@ async function _buildProject(
 
   try {
     if (await fs.pathExists(entrypointPath)) {
-      await import(pathToFileURL(entrypointPath).toString())
+      const entrypointUrl = pathToFileURL(entrypointPath).toString()
+      await import(entrypointUrl)
     }
   } catch (e: any) {
     console.error(chalk.bgRed.white('BuildError') + chalk.gray(':'), `While loading "${entrypointPath}":\n`)

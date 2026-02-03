@@ -44,6 +44,7 @@ watch.option.apply(watch, BuildDeclares.dry)
   .option.apply(watch, BuildDeclares.root)
   .option.apply(watch, BuildDeclares.fullTrace)
   .option.apply(watch, BuildDeclares.strictErrors)
+  .option.apply(watch, BuildDeclares.manual)
 
   .option.apply(watch, BuildDeclares.path)
   .option.apply(watch, BuildDeclares.config)
@@ -52,7 +53,7 @@ watch.option.apply(watch, BuildDeclares.dry)
   .option.apply(watch, BuildDeclares.world)
   .option.apply(watch, BuildDeclares.clientPath)
   .option.apply(watch, BuildDeclares.serverPath)
-  
+
   .option.apply(watch, BuildDeclares.enableSymlinks)
 
 const create = CLI

@@ -8,6 +8,47 @@ import AdmZip from 'adm-zip'
 
 import type { ProjectFolders } from '../utils.js'
 import { getProjectFolders } from '../utils.js'
+import type { BuildResult, ResourceCounts } from '../ui/types.js'
+import { log, logInfo, logWarn, logError as logErrorFn, logDebug, logTrace } from '../ui/logger.js'
+
+// Console capture for watch mode - wraps console to redirect output to our log file
+const originalConsole = globalThis.console
+let consoleWrapped = false
+
+export function enableConsoleCapture() {
+  if (consoleWrapped) return
+  consoleWrapped = true
+
+  // Wrap console methods to redirect to our logger with appropriate levels
+  ;(globalThis.console as any).log = (...args: any[]) => log(...args)
+  ;(globalThis.console as any).info = (...args: any[]) => logInfo(...args)
+  ;(globalThis.console as any).warn = (...args: any[]) => logWarn(...args)
+  ;(globalThis.console as any).error = (...args: any[]) => logErrorFn(args.join(' '))
+  ;(globalThis.console as any).debug = (...args: any[]) => logDebug(...args)
+
+  // Special handling for trace - capture stack at call site
+  ;(globalThis.console as any).trace = (...args: any[]) => {
+    const traceObj = { stack: '' }
+    Error.captureStackTrace(traceObj, globalThis.console.trace)
+    const cleanedStack = traceObj.stack
+      .replace(/^Error\n/, '') // Remove "Error" header line
+      .replace(/\?hot-hook=\d+/g, '')
+      .replace(/file:\/\/\//g, '')
+      .replace(/file:\/\//g, '')
+    logTrace(...args, '\n' + cleanedStack)
+  }
+}
+
+export function disableConsoleCapture() {
+  if (!consoleWrapped) return
+  consoleWrapped = false
+
+  // Restore original methods
+  const methodsToRestore = ['log', 'info', 'warn', 'error', 'debug', 'trace'] as const
+  for (const method of methodsToRestore) {
+    ;(globalThis.console as any)[method] = originalConsole[method].bind(originalConsole)
+  }
+}
 
 export type BuildOptions = {
   // Flags
@@ -34,6 +75,12 @@ export type BuildOptions = {
 
 type SandstoneCache = Record<string, string>
 
+export interface BuildContext {
+  sandstoneConfig: any
+  sandstonePack: any
+  resetSandstonePack: () => void
+}
+
 function hash(stringToHash: string): string {
   return crypto.createHash('md5').update(stringToHash).digest('hex')
 }
@@ -58,7 +105,7 @@ async function getClientPath() {
   try {
     await fs.stat(mcPath)
   } catch {
-    console.warn('Unable to locate the .minecraft folder. Will not be able to export to client.')
+    log('Unable to locate the .minecraft folder. Will not be able to export to client.')
     return undefined
   }
 
@@ -83,10 +130,104 @@ async function getClientWorldPath(worldName: string, minecraftPath?: string) {
   return worldPath
 }
 
+// Boilerplate resources to exclude from counts
+const BOILERPLATE_NAMESPACES = new Set(['load', '__sandstone__'])
+const BOILERPLATE_FUNCTIONS = new Set(['__init__'])
+const BOILERPLATE_TAG = { namespace: 'minecraft', name: 'load' }
+
+function isBoilerplateResource(resource: { path?: string[]; namespace?: string }): boolean {
+  const ns = resource.namespace || ''
+  const pathParts = resource.path || []
+  const name = pathParts[pathParts.length - 1] || ''
+
+  // Exclude load namespace and __sandstone__ namespace
+  if (BOILERPLATE_NAMESPACES.has(ns)) return true
+
+  // Exclude __init__ functions
+  if (BOILERPLATE_FUNCTIONS.has(name)) return true
+
+  if (ns === BOILERPLATE_TAG.namespace && name === BOILERPLATE_TAG.name) return true
+
+  return false
+}
+
+function countResources(sandstonePack: { core: { resourceNodes: Iterable<{ resource: unknown }> } }): ResourceCounts {
+  let functions = 0
+  let other = 0
+
+  for (const node of sandstonePack.core.resourceNodes) {
+    const resource = node.resource as { constructor?: { name?: string }; path?: string[]; namespace?: string }
+
+    // Skip boilerplate resources
+    if (isBoilerplateResource(resource)) continue
+
+    // Check if it's a function (MCFunctionClass)
+    if (resource.constructor?.name === '_RawMCFunctionClass') {
+      functions++
+    } else {
+      other++
+    }
+  }
+
+  return { functions, other }
+}
+
+export async function loadBuildContext(
+  cliOptions: BuildOptions,
+  { absProjectFolder, sandstoneConfigFolder, rootFolder }: ProjectFolders,
+): Promise<BuildContext> {
+  // Load sandstone.config.ts
+  const configPath = path.join(sandstoneConfigFolder, 'sandstone.config.ts')
+  const configUrl = pathToFileURL(configPath).toString()
+  const sandstoneConfig = (await import(configUrl)).default
+
+  // Build the context for sandstone
+  const namespace = cliOptions.namespace || sandstoneConfig.namespace
+  const conflictStrategies: NonNullable<SandstoneContext['conflictStrategies']> = {}
+
+  if (sandstoneConfig.onConflict) {
+    for (const [resource, strategy] of Object.entries(sandstoneConfig.onConflict)) {
+      conflictStrategies[resource] = strategy as NonNullable<SandstoneContext['conflictStrategies']>[string]
+    }
+  }
+
+  // Import sandstone from the project's node_modules, not the CLI's
+  // This ensures we use the same module instance as the user code
+  const sandstoneUrl = await import.meta.resolve('sandstone', pathToFileURL(path.join(rootFolder, 'package.json')).toString())
+  /* @ts-ignore */
+  const { createSandstonePack, resetSandstonePack } = await import(sandstoneUrl)
+  /* @ts-ignore */
+  type SandstoneContext = import('sandstone').SandstoneContext
+
+  const context: SandstoneContext = {
+    workingDir: absProjectFolder,
+    namespace,
+    packUid: sandstoneConfig.packUid,
+    packOptions: sandstoneConfig.packs,
+    conflictStrategies,
+    loadVersion: sandstoneConfig.loadVersion,
+  }
+
+  // Create the pack with context
+  const sandstonePack = createSandstonePack(context)
+
+  return { sandstoneConfig, sandstonePack, resetSandstonePack }
+}
+
+interface BuildProjectResult {
+  resourceCounts: ResourceCounts
+  sandstoneConfig: any
+  sandstonePack: any
+  resetSandstonePack: () => void
+}
+
 async function _buildProject(
   cliOptions: BuildOptions,
   { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders,
-) {
+  silent = false,
+  existingContext?: BuildContext,
+  watching = false
+): Promise<BuildProjectResult | undefined> {
   // Read project package.json to get entrypoint
   const packageJsonPath = path.join(rootFolder, 'package.json')
   const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'))
@@ -101,10 +242,12 @@ async function _buildProject(
 
   const entrypointPath = path.join(rootFolder, entrypoint)
 
-  // Load sandstone.config.ts
-  const configPath = path.join(sandstoneConfigFolder, 'sandstone.config.ts')
-  const configUrl = pathToFileURL(configPath).toString()
-  const sandstoneConfig = (await import(configUrl)).default
+  // Load or use existing context
+  const { sandstoneConfig, sandstonePack, resetSandstonePack } = existingContext ??
+    await loadBuildContext(cliOptions, { absProjectFolder, sandstoneConfigFolder, rootFolder } as ProjectFolders)
+
+  // Reset pack state before each build
+  resetSandstonePack()
 
   const { scripts } = sandstoneConfig
   const saveOptions = sandstoneConfig.saveOptions || {}
@@ -128,57 +271,31 @@ async function _buildProject(
     throw new Error("Expected only 'world' or 'root'. Got both.")
   }
 
-  // Build the context for sandstone
-  const namespace = cliOptions.namespace || sandstoneConfig.namespace
-  const conflictStrategies: NonNullable<SandstoneContext['conflictStrategies']> = {}
-
-  if (sandstoneConfig.onConflict) {
-    for (const [resource, strategy] of Object.entries(sandstoneConfig.onConflict)) {
-      conflictStrategies[resource] = strategy as NonNullable<SandstoneContext['conflictStrategies']>[string]
-    }
-  }
-
-  // Import sandstone and set up context
-  // TODO: Remove these ts-ignore's once beta 1 releases
-  /* @ts-ignore */
-  const { createSandstonePack, resetSandstonePack } = await import('sandstone')
-  /* @ts-ignore */
-  type SandstoneContext = import('sandstone').SandstoneContext
-
-  // Reset any existing pack state
-  resetSandstonePack()
-
-  const context: SandstoneContext = {
-    workingDir: absProjectFolder,
-    namespace,
-    packUid: sandstoneConfig.packUid,
-    packOptions: sandstoneConfig.packs,
-    conflictStrategies,
-    loadVersion: sandstoneConfig.loadVersion,
-  }
-
-  // Create the pack with context
-  const sandstonePack = createSandstonePack(context)
-
   // Run beforeAll script
   await scripts?.beforeAll?.()
 
   // Import user code (this executes their pack definitions)
-  console.log('Compiling source...\n')
+  if (!silent) console.log('Compiling source...\n')
+  log('Compiling source...')
 
   try {
     if (await fs.pathExists(entrypointPath)) {
       const entrypointUrl = pathToFileURL(entrypointPath).toString()
-      await import(entrypointUrl)
+
+      if (watching) {
+        // only this should be hot reloaded, if anything other than stuff in `src` changes the watch CLI should restart itself
+        await import(entrypointUrl, { with: { hot: 'true' } })
+      } else {
+        await import(entrypointUrl)
+      }
     }
   } catch (e: any) {
-    console.error(chalk.bgRed.white('BuildError') + chalk.gray(':'), `While loading "${entrypointPath}":\n`)
-    if (cliOptions.fullTrace) {
-      console.error(e)
-    } else {
-      console.error(e.message || e)
+    const errorMsg = `While loading "${entrypointPath}":\n${cliOptions.fullTrace ? e : (e.message || e)}`
+    if (!silent) {
+      console.error(chalk.bgRed.white('BuildError') + chalk.gray(':'), errorMsg)
     }
-    return
+    log('BuildError:', errorMsg)
+    throw e  // Re-throw for buildCommand to handle
   }
 
   // Add dependencies if specified
@@ -429,21 +546,92 @@ async function _buildProject(
   // Run afterAll script
   await scripts?.afterAll?.()
 
+  // Count resources (excluding boilerplate)
+  const resourceCounts = countResources(sandstonePack)
+
   const exports = clientPath ? 'client' : false
-  console.log(
-    `\nPack(s) compiled!${exports ? ` Exported to ${exports}.` : ''} View output in ./.sandstone/output/\n`,
-  )
+  const countMsg = `${resourceCounts.functions} functions, ${resourceCounts.other} other resources`
+  if (!silent) {
+    console.log(
+      `\nPack(s) compiled! (${countMsg})${exports ? ` Exported to ${exports}.` : ''} View output in ./.sandstone/output/\n`,
+    )
+  }
+  log(`Pack(s) compiled! (${countMsg})${exports ? ` Exported to ${exports}.` : ''}`)
+
+  return { resourceCounts, sandstoneConfig, sandstonePack, resetSandstonePack }
 }
 
-export async function buildCommand(opts: BuildOptions, _folders?: ProjectFolders) {
+export async function _buildCommand(
+  opts: BuildOptions,
+  _folders?: ProjectFolders,
+  existingContext?: BuildContext,
+  watching = false
+): Promise<BuildResult> {
   const folders = _folders?.projectFolder ? _folders : getProjectFolders(opts.path)
 
   try {
-    await _buildProject(opts, folders)
+    const result = await _buildProject(opts, folders, true, existingContext, watching)
+    return {
+      success: true,
+      resourceCounts: result?.resourceCounts ?? { functions: 0, other: 0 },
+      timestamp: Date.now(),
+      sandstoneConfig: result?.sandstoneConfig,
+      sandstonePack: result?.sandstonePack,
+      resetSandstonePack: result?.resetSandstonePack,
+    }
   } catch (err: any) {
-    console.error(chalk.red('Build failed:'), err.message || err)
-    if (opts.fullTrace) {
-      console.error(err)
+    const errorMessage = err.message || String(err)
+    // Always include stack trace for better debugging - format paths for terminal clickability
+    const stack = err.stack || ''
+    // Clean up stack trace: remove ?hot-hook query params and convert file:// URLs to paths
+    const cleanedStack = stack
+      .replace(/\?hot-hook=\d+/g, '') // Remove hot-hook cache busting params
+      .replace(/file:\/\/\//g, '') // Convert file:/// URLs to paths (Windows)
+      .replace(/file:\/\//g, '') // Convert file:// URLs to paths (Unix)
+    const formattedError = cleanedStack ? `${errorMessage}\n${cleanedStack}` : errorMessage
+    log('Build failed:', errorMessage)
+    return {
+      success: false,
+      error: formattedError,
+      resourceCounts: { functions: 0, other: 0 },
+      timestamp: Date.now(),
+    }
+  }
+}
+
+export async function buildCommand(opts: BuildOptions, _folders?: ProjectFolders): Promise<void>
+export async function buildCommand(opts: BuildOptions, _folders: ProjectFolders | undefined, silent: true): Promise<BuildResult>
+export async function buildCommand(opts: BuildOptions, _folders?: ProjectFolders, silent = false): Promise<BuildResult | void> {
+  const folders = _folders?.projectFolder ? _folders : getProjectFolders(opts.path)
+
+  try {
+    const result = await _buildProject(opts, folders, silent)
+    if (silent) {
+      return {
+        success: true,
+        resourceCounts: result?.resourceCounts ?? { functions: 0, other: 0 },
+        timestamp: Date.now(),
+        sandstoneConfig: result?.sandstoneConfig,
+        sandstonePack: result?.sandstonePack,
+        resetSandstonePack: result?.resetSandstonePack,
+      }
+    }
+  } catch (err: any) {
+    const errorMessage = err.message || String(err)
+    if (!silent) {
+      console.error(chalk.red('Build failed:'), errorMessage)
+      if (opts.fullTrace) {
+        console.error(err)
+      }
+    }
+    log('Build failed:', errorMessage)
+    if (silent) {
+      return {
+        success: false,
+        error: opts.fullTrace ? String(err) : errorMessage,
+        resourceCounts: { functions: 0, other: 0 },
+        timestamp: Date.now(),
+      }
     }
   }
 }

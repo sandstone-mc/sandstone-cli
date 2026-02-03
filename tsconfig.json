@@ -12,7 +12,8 @@
     "skipLibCheck": true,
     "esModuleInterop": true,
     "allowSyntheticDefaultImports": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "types": ["@sandstone-mc/hot-hook/import-meta"]
   },
   "include": [
     "src/**/*"

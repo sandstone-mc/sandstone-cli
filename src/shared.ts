@@ -19,4 +19,5 @@ export const BuildDeclares = {
     // TODO: ssh
 
     enableSymlinks: ['--enable-symlinks', 'Force enable/disable symlinks. Defaults to false. Useful if you want to enable symlinks on Windows.'],
+    manual: ['-m, --manual', 'Manual reload mode - press r or Enter to rebuild after changes.'],
   } as unknown as Record<string, [string, string, RegExp, boolean]> // Haha TypeScript funny

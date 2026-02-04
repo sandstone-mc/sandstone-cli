@@ -4,6 +4,8 @@ import { stripVTControlCharacters, format } from 'util'
 
 let logPath: string
 let liveLogCallback: ((level: string | false, args: unknown[]) => void) | null = null
+let liveLogBuffer: { level: string | false; args: unknown[] }[] = []
+let liveLogReady = false
 
 // Track initialization and pending writes
 let initPromise: Promise<void> | null = null
@@ -24,10 +26,25 @@ export function setLiveLogCallback(callback: typeof liveLogCallback) {
   liveLogCallback = callback
 }
 
+export function drainLiveLogBuffer() {
+  liveLogReady = true
+  if (liveLogCallback && liveLogBuffer.length > 0) {
+    for (const { level, args } of liveLogBuffer) {
+      liveLogCallback(level, args)
+    }
+    liveLogBuffer = []
+  }
+}
+
 async function logWorkerInit() {
   await fs.ensureDir(path.dirname(logPath))
   await fs.writeFile(logPath, `=== Watch started at ${new Date().toISOString()} ===\n`)
   writer = fs.createWriteStream(logPath, { flags: 'a' })
+  // Wait for the stream to be ready before allowing writes
+  await new Promise<void>((resolve, reject) => {
+    writer!.once('open', () => resolve())
+    writer!.once('error', reject)
+  })
 }
 
 async function logWorkerMain(level: string | false, ...args: unknown[]) {
@@ -36,38 +53,50 @@ async function logWorkerMain(level: string | false, ...args: unknown[]) {
     await initPromise
   }
 
-  if (args.length === 1 && typeof args === 'string' && (args[0] === '' || stripVTControlCharacters(args[0]) === '')) {
-    await writeChunk('\n')
+  // Skip empty log calls
+  if (args.length === 0) {
     return
   }
 
-  // Write timestamp and level prefix
-  const prefix = `[${new Date().toISOString()}]${level !== false ? ` [${level}]` : ''} `
-  await writeChunk(prefix)
+  // Skip logs that are just empty strings
+  if (args.length === 1 && typeof args[0] === 'string' && stripVTControlCharacters(args[0]).trim() === '') {
+    return
+  }
 
-  // Write each argument
+  // Collect all chunks first
+  const chunks: (string | Buffer | Uint8Array)[] = []
+
+  // Timestamp and level prefix
+  chunks.push(`[${new Date().toISOString()}]${level !== false ? ` [${level}]` : ''} `)
+
+  // Process each argument
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
     if (typeof arg === 'string') {
-      await writeChunk(stripVTControlCharacters(arg))
+      chunks.push(stripVTControlCharacters(arg))
     } else if (Buffer.isBuffer(arg) || arg instanceof Uint8Array) {
-      await writeChunk(arg)
+      chunks.push(arg)
     } else if (arg instanceof ArrayBuffer) {
-      await writeChunk(new Uint8Array(arg))
+      chunks.push(new Uint8Array(arg))
     } else if (arg instanceof Blob) {
-      await writeChunk(new Uint8Array(await arg.arrayBuffer()))
+      chunks.push(new Uint8Array(await arg.arrayBuffer()))
     } else {
       // Use util.format for objects, numbers, etc.
-      await writeChunk(format('%O', arg))
+      chunks.push(format('%O', arg))
     }
     // Add space between args (but not after last)
     if (i < args.length - 1) {
-      await writeChunk(' ')
+      chunks.push(' ')
     }
   }
 
-  // Write newline at end
-  await writeChunk('\n')
+  chunks.push('\n')
+
+  // Concatenate all chunks into a single buffer for atomic write
+  const buffers = chunks.map(chunk =>
+    typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk)
+  )
+  await writeChunk(Buffer.concat(buffers))
 }
 
 function writeChunk(chunk: string | Buffer | Uint8Array): Promise<void> {
@@ -105,16 +134,25 @@ async function logWorkerFinish() {
 }
 
 function writeLog(level: string | false, ...args: unknown[]) {
-  liveLogCallback?.(level, args)
+  if (liveLogReady) {
+    liveLogCallback?.(level, args)
+  } else {
+    liveLogBuffer.push({ level, args })
+  }
   if (logPath) {
     // Call logWorkerMain detached and track the promise
     const writePromise = logWorkerMain(level, ...args)
     pendingWrites.push(writePromise)
     // Clean up completed promises to avoid memory leak
-    writePromise.finally(() => {
-      const idx = pendingWrites.indexOf(writePromise)
-      if (idx !== -1) pendingWrites.splice(idx, 1)
-    })
+    writePromise
+      .catch((err) => {
+        // Log to stderr so we can see file write errors
+        process.stderr.write(`[logger] Write error: ${err}\n`)
+      })
+      .finally(() => {
+        const idx = pendingWrites.indexOf(writePromise)
+        if (idx !== -1) pendingWrites.splice(idx, 1)
+      })
   }
 }
 

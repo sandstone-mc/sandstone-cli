@@ -3,6 +3,7 @@ import { Box, Text, useInput, useApp } from 'ink'
 import Spinner from 'ink-spinner'
 import { format } from 'util'
 import type { WatchStatus, TrackedChange, BuildResult, ResourceCounts, WatchUIAPI, ChangeCategory } from './types.js'
+import { drainLiveLogBuffer } from './logger.js'
 
 const TOTAL_HEIGHT = 16
 const LOG_LINES = 5
@@ -271,6 +272,8 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
     }
     // Store in global for access from watch.ts
     ;(globalThis as Record<string, unknown>).__watchUIAPI = api
+    // Drain any logs that were buffered before the API was ready
+    drainLiveLogBuffer()
     return () => {
       delete (globalThis as Record<string, unknown>).__watchUIAPI
     }

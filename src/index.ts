@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import { Argument, Command } from 'commander'
 import figlet from 'figlet'
 import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand } from './commands/index.js'
@@ -24,7 +23,6 @@ build.option.apply(build, BuildDeclares.dry)
   .option.apply(build, BuildDeclares.production)
 
   .option.apply(build, BuildDeclares.path)
-  .option.apply(build, BuildDeclares.config)
   .option.apply(build, BuildDeclares.name)
   .option.apply(build, BuildDeclares.namespace)
   .option.apply(build, BuildDeclares.world)
@@ -44,16 +42,16 @@ watch.option.apply(watch, BuildDeclares.dry)
   .option.apply(watch, BuildDeclares.root)
   .option.apply(watch, BuildDeclares.fullTrace)
   .option.apply(watch, BuildDeclares.strictErrors)
-  .option.apply(watch, BuildDeclares.manual)
 
   .option.apply(watch, BuildDeclares.path)
-  .option.apply(watch, BuildDeclares.config)
   .option.apply(watch, BuildDeclares.name)
   .option.apply(watch, BuildDeclares.namespace)
   .option.apply(watch, BuildDeclares.world)
   .option.apply(watch, BuildDeclares.clientPath)
   .option.apply(watch, BuildDeclares.serverPath)
 
+  .option.apply(watch, BuildDeclares.library)
+  .option.apply(watch, BuildDeclares.manual)
   .option.apply(watch, BuildDeclares.enableSymlinks)
 
 const create = CLI

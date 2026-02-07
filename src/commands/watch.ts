@@ -3,7 +3,7 @@ import ParcelWatcher, { subscribe, type Event } from '@parcel/watcher'
 import React from 'react'
 import { render } from 'ink'
 
-import { getProjectFolders, normalizePath } from '../utils.js'
+import { normalizePath } from '../utils.js'
 import { _buildCommand, type BuildOptions, type BuildContext, enableConsoleCapture, disableConsoleCapture } from './build.js'
 import { WatchUI, getWatchUIAPI } from '../ui/WatchUI.js'
 import { initLogger, log, logError, setLiveLogCallback } from '../ui/logger.js'
@@ -14,28 +14,7 @@ import { join } from 'node:path'
 
 export interface WatchOptions extends BuildOptions {
   manual?: boolean
-}
-
-async function exit(subscriptions: ParcelWatcher.AsyncSubscription[], unmountInk?: () => void) {
-  log('Watch stopped')
-  unmountInk?.()
-  await Promise.all(subscriptions.map((s) => s.unsubscribe()))
-  process.exit(0)
-}
-
-function categorizeChange(eventPath: string): ChangeCategory {
-  if (eventPath.includes('src/')) return 'src'
-  if (eventPath.includes('resources/')) return 'resources'
-  if (eventPath.endsWith('sandstone.config.ts')) return 'config'
-  if (
-    eventPath.endsWith('.lock') ||
-    eventPath.endsWith('-lock.yml') ||
-    eventPath.endsWith('-lock.json') ||
-    eventPath.includes('node_modules/')
-  ) {
-    return 'dependencies'
-  }
-  return 'other'
+  library?: boolean
 }
 
 export async function watchCommand(opts: WatchOptions) {
@@ -44,12 +23,13 @@ export async function watchCommand(opts: WatchOptions) {
   let pendingChanges: TrackedChange[] = []
   let buildContext: BuildContext | undefined
   let hotInitialized = false
-  let lastBuildId = 0 // Used to deduplicate rapid build triggers
 
-  const folders = getProjectFolders(opts.path)
+  const folder = opts.library ? join(opts.path, 'test') : opts.path
+
+  let subscription: Awaited<ReturnType<typeof subscribe>>
 
   // Initialize logger
-  initLogger(folders.rootFolder)
+  initLogger(folder)
 
   // Set up live log callback to send to UI
   setLiveLogCallback((level, args) => {
@@ -71,7 +51,8 @@ export async function watchCommand(opts: WatchOptions) {
     React.createElement(WatchUI, {
       manual: opts.manual ?? false,
       onManualRebuild: handleManualRebuild,
-      exit: () => exit(subscriptions, unmountInk)
+      // Since this isn't SIGINT, its fine that we don't await this
+      exit: () => exit(subscription, unmountInk)
     })
   )
   unmountInk = unmount
@@ -90,18 +71,28 @@ export async function watchCommand(opts: WatchOptions) {
     }
     alreadyBuilding = true
 
-    // Increment build ID to deduplicate
-    const currentBuildId = ++lastBuildId
     const api = getWatchUIAPI()
 
     api?.setStatus('building')
     api?.setChangedFiles(changes)
     log('Building...', changes.map(c => c.path).join(', '))
 
+    const libChanges = opts.library && Object.hasOwn(globalThis, 'Bun') ? changes.filter((change) => !change.path.includes('test/')) : []
+
+    if (libChanges.length !== 0) {
+      /* @ts-ignore */
+      const CLI = Bun.spawn(['bun', 'dev:build'], {
+        windowsHide: true,
+        windowsVerbatimArguments: true,
+      })
+
+      await CLI.exited
+    }
+
     // Initialize hot-hook only once on the first build
     if (!hotInitialized) {
       await hot.init({
-        root: join(folders.rootFolder, JSON.parse(await fs.readFile(join(folders.rootFolder, 'package.json'), 'utf-8'))['module']),
+        root: join(folder, JSON.parse(await fs.readFile(join(folder, 'package.json'), 'utf-8'))['module']),
         // Ensure sandstone remains a singleton so CLI and user code share the same pack instance
         globalSingletons: ['**/node_modules/sandstone/**', '**/sandstone/dist/**'],
         // Disable hot-hook's internal watcher - we use parcel watcher and notify hot-hook
@@ -115,6 +106,16 @@ export async function watchCommand(opts: WatchOptions) {
     for (const change of changes) {
       hot.notifyFileChange(change.path)
     }
+    if (libChanges.length !== 0) {
+      // TODO: getting this name every time is not ideal
+      const libName = JSON.parse(await fs.readFile(join(opts.path, 'package.json'), 'utf-8')).name
+
+      const libModuleFiles = await fs.readdir(join(opts.path, 'lib'), { recursive: true })
+
+      for (const file of libModuleFiles) {
+        hot.notifyFileChange(join(opts.path, 'test', 'node_modules', libName, 'lib', file as unknown as string))
+      }
+    }
     // Small delay to let the loader process the invalidations
     if (changes.length > 0) {
       await new Promise(resolve => setTimeout(resolve, 10))
@@ -124,7 +125,7 @@ export async function watchCommand(opts: WatchOptions) {
     enableConsoleCapture()
     let result
     try {
-      result = await _buildCommand(opts, folders, buildContext, true)
+      result = await _buildCommand(opts, folder, buildContext, true)
     } finally {
       disableConsoleCapture()
     }
@@ -267,44 +268,8 @@ export async function watchCommand(opts: WatchOptions) {
   // Initial build
   await onFilesChange([])
 
-  const subscriptions: Awaited<ReturnType<typeof subscribe>>[] = []
-
-  // TODO: The three-folder concept (projectFolder, sandstoneConfigFolder, rootFolder) is being
-  // deprecated. Always use a single watcher from rootFolder to avoid race conditions.
-  if (true) {
-    const watchFolder = folders.rootFolder
-    // Use a single watcher for all events
-    const subscription = await subscribe(
-      watchFolder,
-      (err, events) => {
-        if (err) {
-          logError(err)
-          return
-        }
-        handleEvents(events)
-      },
-      {
-        ignore: ['.git/**/*', '.sandstone/**/*', 'resources/cache/**/*', '**/*tmp*'],
-      }
-    )
-    subscriptions.push(subscription)
-  } else {
-    subscriptions.push(...(await createSplitSubscriptions(folders, handleEvents)))
-  }
-
-  // Handle cleanup on exit
-  process.on('SIGINT', async () => await exit(subscriptions, unmountInk))
-}
-
-async function createSplitSubscriptions(
-  folders: ReturnType<typeof getProjectFolders>,
-  handleEvents: (events: Event[]) => void
-) {
-  const subscriptions: Awaited<ReturnType<typeof subscribe>>[] = []
-
-  // Watch the project folder
-  const projectSubscription = await subscribe(
-    folders.absProjectFolder,
+  subscription = await subscribe(
+    opts.path,
     (err, events) => {
       if (err) {
         logError(err)
@@ -313,56 +278,32 @@ async function createSplitSubscriptions(
       handleEvents(events)
     },
     {
-      ignore: ['.git/**/*', '.sandstone/**/*', 'resources/cache/**/*'],
+      ignore: ['**/.git/**/*', '**/.sandstone/**/*', '**/resources/cache/**/*', '**/*tmp*', 'lib/**/*'],
     }
   )
-  subscriptions.push(projectSubscription)
 
-  // Watch config file (in sandstoneConfigFolder) if different from project folder
-  if (folders.sandstoneConfigFolder !== folders.absProjectFolder) {
-    const configSubscription = await subscribe(
-      folders.sandstoneConfigFolder,
-      (err, events) => {
-        if (err) {
-          logError(err)
-          return
-        }
-        // Only react to sandstone.config.ts changes
-        const configEvents = events.filter((e) =>
-          e.path.endsWith('sandstone.config.ts')
-        )
-        if (configEvents.length > 0) {
-          handleEvents(configEvents)
-        }
-      },
-      {
-        ignore: ['!sandstone.config.ts', '**/*'],
-      }
-    )
-    subscriptions.push(configSubscription)
+  // Handle cleanup on exit
+  process.on('SIGINT', async () => await exit(subscription, unmountInk))
+}
+
+async function exit(subscription: ParcelWatcher.AsyncSubscription, unmountInk?: () => void) {
+  log('Watch stopped')
+  unmountInk?.()
+  await subscription.unsubscribe()
+  process.exit(0)
+}
+
+function categorizeChange(eventPath: string): ChangeCategory {
+  if (eventPath.includes('src/')) return 'src'
+  if (eventPath.includes('resources/')) return 'resources'
+  if (eventPath.endsWith('sandstone.config.ts')) return 'config'
+  if (
+    eventPath.endsWith('.lock') ||
+    eventPath.endsWith('-lock.yml') ||
+    eventPath.endsWith('-lock.json') ||
+    eventPath.includes('node_modules/')
+  ) {
+    return 'dependencies'
   }
-
-  // Watch root folder for package.json and tsconfig.json changes if different from project folder
-  if (folders.rootFolder !== folders.absProjectFolder) {
-    const rootSubscription = await subscribe(
-      folders.rootFolder,
-      (err, events) => {
-        if (err) {
-          logError(err)
-          return
-        }
-        const rootEvents = events.filter((e) => e.path.endsWith('.json'))
-
-        if (rootEvents.length > 0) {
-          handleEvents(rootEvents)
-        }
-      },
-      {
-        ignore: ['.git/**/*', '.sandstone/**/*', 'resources/cache/**/*'],
-      }
-    )
-    subscriptions.push(rootSubscription)
-  }
-
-  return subscriptions
+  return 'other'
 }

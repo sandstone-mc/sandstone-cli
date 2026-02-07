@@ -6,8 +6,6 @@ import fs from 'fs-extra'
 import chalk from 'chalk'
 import AdmZip from 'adm-zip'
 
-import type { ProjectFolders } from '../utils.js'
-import { getProjectFolders } from '../utils.js'
 import type { BuildResult, ResourceCounts } from '../ui/types.js'
 import { log, logInfo, logWarn, logError as logErrorFn, logDebug, logTrace } from '../ui/logger.js'
 
@@ -33,8 +31,7 @@ export function enableConsoleCapture() {
     const cleanedStack = traceObj.stack
       .replace(/^Error\n/, '') // Remove "Error" header line
       .replace(/\?hot-hook=\d+/g, '')
-      .replace(/file:\/\/\//g, '')
-      .replace(/file:\/\//g, '')
+      .replace(/file:\/\/\/?/g, '')
     logTrace(...args, '\n' + cleanedStack)
   }
 }
@@ -61,7 +58,6 @@ export type BuildOptions = {
 
   // Values
   path: string
-  configPath: string
   name?: string
   namespace?: string
   world?: string
@@ -174,10 +170,10 @@ function countResources(sandstonePack: { core: { resourceNodes: Iterable<{ resou
 
 export async function loadBuildContext(
   cliOptions: BuildOptions,
-  { absProjectFolder, sandstoneConfigFolder, rootFolder }: ProjectFolders,
+  folder: string,
 ): Promise<BuildContext> {
   // Load sandstone.config.ts
-  const configPath = path.join(sandstoneConfigFolder, 'sandstone.config.ts')
+  const configPath = path.join(folder, 'sandstone.config.ts')
   const configUrl = pathToFileURL(configPath).toString()
   const sandstoneConfig = (await import(configUrl)).default
 
@@ -193,14 +189,15 @@ export async function loadBuildContext(
 
   // Import sandstone from the project's node_modules, not the CLI's
   // This ensures we use the same module instance as the user code
-  const sandstoneUrl = await import.meta.resolve('sandstone', pathToFileURL(path.join(rootFolder, 'package.json')).toString())
+  const sandstoneUrl = pathToFileURL(path.join(folder, 'node_modules', 'sandstone', 'dist', 'index.js'))
   /* @ts-ignore */
   const { createSandstonePack, resetSandstonePack } = await import(sandstoneUrl)
+  
   /* @ts-ignore */
   type SandstoneContext = import('sandstone').SandstoneContext
 
   const context: SandstoneContext = {
-    workingDir: absProjectFolder,
+    workingDir: folder,
     namespace,
     packUid: sandstoneConfig.packUid,
     packOptions: sandstoneConfig.packs,
@@ -223,13 +220,13 @@ interface BuildProjectResult {
 
 async function _buildProject(
   cliOptions: BuildOptions,
-  { absProjectFolder, rootFolder, sandstoneConfigFolder }: ProjectFolders,
+  folder: string,
   silent = false,
   existingContext?: BuildContext,
   watching = false
 ): Promise<BuildProjectResult | undefined> {
   // Read project package.json to get entrypoint
-  const packageJsonPath = path.join(rootFolder, 'package.json')
+  const packageJsonPath = path.join(folder, 'package.json')
   const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'))
 
   // Get the entrypoint from the "module" field
@@ -240,11 +237,11 @@ async function _buildProject(
     )
   }
 
-  const entrypointPath = path.join(rootFolder, entrypoint)
+  const entrypointPath = path.join(folder, entrypoint)
 
   // Load or use existing context
   const { sandstoneConfig, sandstonePack, resetSandstonePack } = existingContext ??
-    await loadBuildContext(cliOptions, { absProjectFolder, sandstoneConfigFolder, rootFolder } as ProjectFolders)
+    await loadBuildContext(cliOptions, folder)
 
   // Reset pack state before each build
   resetSandstonePack()
@@ -252,7 +249,7 @@ async function _buildProject(
   const { scripts } = sandstoneConfig
   const saveOptions = sandstoneConfig.saveOptions || {}
 
-  const outputFolder = path.join(rootFolder, '.sandstone', 'output')
+  const outputFolder = path.join(folder, '.sandstone', 'output')
 
   // Resolve options
   const clientPath = !cliOptions.production
@@ -307,7 +304,7 @@ async function _buildProject(
 
   // Setup cache
   const newCache: SandstoneCache = {}
-  const cacheFile = path.join(rootFolder, '.sandstone', 'cache.json')
+  const cacheFile = path.join(folder, '.sandstone', 'cache.json')
 
   if (cache === undefined) {
     try {
@@ -378,7 +375,7 @@ async function _buildProject(
 
   // Handle resources folder
   async function handleResources(packType: string) {
-    const working = path.join(rootFolder, 'resources', packType)
+    const working = path.join(folder, 'resources', packType)
 
     if (!(await fs.pathExists(working))) {
       return
@@ -565,14 +562,14 @@ async function _buildProject(
 
 export async function _buildCommand(
   opts: BuildOptions,
-  _folders?: ProjectFolders,
+  _folder?: string,
   existingContext?: BuildContext,
   watching = false
 ): Promise<BuildResult> {
-  const folders = _folders?.projectFolder ? _folders : getProjectFolders(opts.path)
+  const folder = _folder ?? opts.path
 
   try {
-    const result = await _buildProject(opts, folders, true, existingContext, watching)
+    const result = await _buildProject(opts, folder, true, existingContext, watching)
     return {
       success: true,
       resourceCounts: result?.resourceCounts ?? { functions: 0, other: 0 },
@@ -601,13 +598,13 @@ export async function _buildCommand(
   }
 }
 
-export async function buildCommand(opts: BuildOptions, _folders?: ProjectFolders): Promise<void>
-export async function buildCommand(opts: BuildOptions, _folders: ProjectFolders | undefined, silent: true): Promise<BuildResult>
-export async function buildCommand(opts: BuildOptions, _folders?: ProjectFolders, silent = false): Promise<BuildResult | void> {
-  const folders = _folders?.projectFolder ? _folders : getProjectFolders(opts.path)
+export async function buildCommand(opts: BuildOptions, _?: string): Promise<void>
+export async function buildCommand(opts: BuildOptions, _folder: string | undefined, silent: true): Promise<BuildResult>
+export async function buildCommand(opts: BuildOptions, _folder?: string, silent = false): Promise<BuildResult | void> {
+  const folder = _folder ?? opts.path
 
   try {
-    const result = await _buildProject(opts, folders, silent)
+    const result = await _buildProject(opts, folder, silent)
     if (silent) {
       return {
         success: true,

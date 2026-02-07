@@ -205,8 +205,7 @@ export async function installVanillaCommand(_libraries: string[]) {
     }
     if (adding) {
       await buildCommand({
-        path: './src',
-        configPath: './',
+        path: './',
         dependencies: adding
       })
     }
@@ -299,8 +298,7 @@ export async function refreshCommand() {
     await fs.writeFile(lockFilePath, '{}')
 
     await buildCommand({
-      path: './src',
-      configPath: './'
+      path: './',
     })
   } else {
     console.log('No libraries to refresh')

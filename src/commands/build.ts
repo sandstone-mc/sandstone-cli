@@ -529,19 +529,21 @@ async function _buildProject(
   }
 
   // Clean up old files not in new cache
-  const oldFileNames = new Set<string>(Object.keys(cache))
-  Object.keys(newCache).forEach((name) => oldFileNames.delete(name))
+  if (cliOptions.dry !== true) {
+    const oldFileNames = new Set<string>(Object.keys(cache))
+    Object.keys(newCache).forEach((name) => oldFileNames.delete(name))
 
-  for (const name of oldFileNames) {
-    try {
-      await fs.rm(path.join(outputFolder, name))
-    } catch {}
+    for (const name of oldFileNames) {
+      try {
+        await fs.rm(path.join(outputFolder, name))
+      } catch {}
+    }
+
+    // Update cache
+    cache = newCache
+    await fs.ensureDir(path.dirname(cacheFile))
+    await fs.writeFile(cacheFile, JSON.stringify(cache))
   }
-
-  // Update cache
-  cache = newCache
-  await fs.ensureDir(path.dirname(cacheFile))
-  await fs.writeFile(cacheFile, JSON.stringify(cache))
 
   // Run afterAll script
   await scripts?.afterAll?.()

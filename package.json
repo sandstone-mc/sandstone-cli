@@ -9,7 +9,7 @@
     "create-sandstone": "./lib/create.js"
   },
   "scripts": {
-    "build": "bun tsc"
+    "dev:build": "bun tsc"
   },
   "repository": {
     "type": "git",

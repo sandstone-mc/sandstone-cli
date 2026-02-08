@@ -1,27 +1,16 @@
 import React, { useState, useCallback, useEffect } from 'react'
-import { Box, Text, useInput, useApp } from 'ink'
+import { Box, Text, useInput } from 'ink'
 import Spinner from 'ink-spinner'
 import { format } from 'util'
-import type { WatchStatus, TrackedChange, BuildResult, ResourceCounts, WatchUIAPI, ChangeCategory } from './types.js'
+import type { WatchStatus, TrackedChange, BuildResult, WatchUIAPI, ChangeCategory } from './types.js'
 import { drainLiveLogBuffer } from './logger.js'
 
-const TOTAL_HEIGHT = 16
-const LOG_LINES = 5
-const ERROR_LINES = 8
+const CONTENT_LINES = 8
 
 interface WatchUIProps {
   manual: boolean
   onManualRebuild?: () => void
   exit?: () => void
-}
-
-function formatTime(timestamp: number): string {
-  const seconds = Math.floor((Date.now() - timestamp) / 1000)
-  if (seconds < 60) return `${seconds}s ago`
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes}m ago`
-  const hours = Math.floor(minutes / 60)
-  return `${hours}h ${minutes % 60}m ago`
 }
 
 function formatChangedFiles(files: TrackedChange[]): string {
@@ -46,140 +35,85 @@ function groupByCategory(files: TrackedChange[]): Record<ChangeCategory, string[
   return groups
 }
 
-function EmptyLine() {
-  return <Text> </Text>
+const categoryLabels: Record<ChangeCategory, string> = {
+  src: 'src',
+  resources: 'resources',
+  config: 'config',
+  dependencies: 'dependencies',
+  other: 'other',
 }
 
-interface StatusLineProps {
-  status: WatchStatus
-  reason?: string
-}
-
-function StatusLine({ status, reason }: StatusLineProps) {
-  const statusText: Record<WatchStatus, string> = {
-    watching: 'Watching for changes...',
-    building: 'Building...',
-    restarting: 'Restarting...',
-    error: 'Build Error',
-    pending: 'Pending changes',
-  }
-
-  const showSpinner = status === 'building' || status === 'restarting'
-  const statusColor = status === 'error' ? 'red' : status === 'pending' ? 'yellow' : 'green'
-
-  return (
-    <Text>
-      {showSpinner && (
-        <>
-          <Text color="cyan"><Spinner type="dots" /></Text>
-          <Text> </Text>
-        </>
-      )}
-      <Text color={statusColor}>{statusText[status]}</Text>
-      {reason && <Text color="gray"> ({reason})</Text>}
-    </Text>
-  )
-}
-
-interface LogDisplayProps {
-  lines: string[]
-  scrollOffset: number
-}
-
-function LogDisplay({ lines, scrollOffset }: LogDisplayProps) {
-  const visibleLines = lines.slice(lines.length - (scrollOffset + LOG_LINES), lines.length - scrollOffset)
-  const hasMore = lines.length > LOG_LINES
-  const canScrollUp = scrollOffset < (lines.length - 1)
-  const canScrollDown = scrollOffset > 0
-
-  return (
-    <>
-      {Array.from({ length: LOG_LINES - visibleLines.length }).map((_, i) => (
-        <Text key={`empty-${i}`}> </Text>
-      ))}
-      {visibleLines.map((line, i) => (
-        <Text key={i}>{line}</Text>
-      ))}
-      {hasMore && (
-        <Text color="gray">
-          {canScrollUp && '▲'}{canScrollDown && '▼'} ({lines.length - LOG_LINES - scrollOffset}-{lines.length - scrollOffset}/{lines.length})
-        </Text>
-      )}
-    </>
-  )
-}
-
-interface ErrorDisplayProps {
-  error: string
-  scrollOffset: number
-}
-
-function ErrorDisplay({ error, scrollOffset }: ErrorDisplayProps) {
-  const lines = error.split('\n')
-  const visibleLines = lines.slice(scrollOffset, scrollOffset + ERROR_LINES)
-  const hasMore = lines.length > ERROR_LINES
-  const canScrollUp = scrollOffset > 0
-  const canScrollDown = scrollOffset + ERROR_LINES < lines.length
-
-  return (
-    <>
-      {visibleLines.map((line, i) => (
-        <Text key={i} color="red">{line || ' '}</Text>
-      ))}
-      {/* Fill remaining lines if error is short */}
-      {Array.from({ length: ERROR_LINES - visibleLines.length }).map((_, i) => (
-        <Text key={`empty-${i}`}> </Text>
-      ))}
-      {hasMore && (
-        <Text color="gray">
-          {canScrollUp && '▲'}{canScrollDown && '▼'} ({scrollOffset + 1}-{Math.min(scrollOffset + ERROR_LINES, lines.length)}/{lines.length})
-        </Text>
-      )}
-    </>
-  )
-}
-
-interface ManualChangesDisplayProps {
+interface ContentDisplayProps {
+  mode: 'logs' | 'error' | 'changes'
+  logLines: string[]
+  errorText: string | null
   changes: TrackedChange[]
+  scrollOffset: number
 }
 
-function ManualChangesDisplay({ changes }: ManualChangesDisplayProps) {
-  const groups = groupByCategory(changes)
-  const categoryLabels: Record<ChangeCategory, string> = {
-    src: 'src',
-    resources: 'resources',
-    config: 'config',
-    dependencies: 'dependencies',
-    other: 'other',
+function ContentDisplay({ mode, logLines, errorText, changes, scrollOffset }: ContentDisplayProps) {
+  let contentData: { text: string; color?: string }[] = []
+
+  if (mode === 'error' && errorText) {
+    contentData = errorText.split('\n').map(line => ({ text: line || ' ', color: 'red' }))
+  } else if (mode === 'changes') {
+    const groups = groupByCategory(changes)
+    const nonEmpty = Object.entries(groups).filter(([, files]) => files.length > 0) as [ChangeCategory, string[]][]
+
+    contentData.push({ text: 'Changes by category:', color: undefined })
+    for (const [category, files] of nonEmpty.slice(0, 4)) {
+      const fileList = files.slice(0, 3).join(', ') + (files.length > 3 ? ` +${files.length - 3} more` : '')
+      const suffix = category === 'dependencies' ? ' (restart required)' : ''
+      contentData.push({ text: `  ${categoryLabels[category]}: ${fileList}${suffix}`, color: 'cyan' })
+    }
+    if (nonEmpty.length === 0) {
+      contentData.push({ text: '  No changes tracked', color: 'gray' })
+    }
+  } else {
+    contentData = logLines.map(line => ({ text: line }))
   }
 
-  const nonEmpty = Object.entries(groups).filter(([, files]) => files.length > 0) as [ChangeCategory, string[]][]
+  const totalLines = contentData.length
+  const hasMore = totalLines > CONTENT_LINES
+
+  let visibleLines: { text: string; color?: string }[]
+  let scrollInfo = ''
+
+  if (mode === 'logs') {
+    const start = Math.max(0, totalLines - scrollOffset - CONTENT_LINES)
+    const end = Math.max(0, totalLines - scrollOffset)
+    visibleLines = contentData.slice(start, end)
+    if (hasMore) {
+      const canUp = scrollOffset < totalLines - CONTENT_LINES
+      const canDown = scrollOffset > 0
+      scrollInfo = `${canUp ? '▲' : ''}${canDown ? '▼' : ''} (${start + 1}-${end}/${totalLines})`
+    }
+  } else {
+    visibleLines = contentData.slice(scrollOffset, scrollOffset + CONTENT_LINES)
+    if (hasMore) {
+      const canUp = scrollOffset > 0
+      const canDown = scrollOffset + CONTENT_LINES < totalLines
+      scrollInfo = `${canUp ? '▲' : ''}${canDown ? '▼' : ''} (${scrollOffset + 1}-${scrollOffset + visibleLines.length}/${totalLines})`
+    }
+  }
+
+  const padding = CONTENT_LINES - visibleLines.length
+  const paddingBefore = mode === 'logs' ? padding : 0
+  const paddingAfter = mode === 'logs' ? 0 : padding
 
   return (
     <>
-      <Text bold>Changes by category:</Text>
-      {nonEmpty.map(([category, files]) => (
-        <Text key={category}>
-          <Text color="cyan">  {categoryLabels[category]}: </Text>
-          <Text>{files.slice(0, 3).join(', ')}{files.length > 3 ? ` +${files.length - 3} more` : ''}</Text>
-          {category === 'dependencies' && <Text color="yellow"> (restart required)</Text>}
-        </Text>
+      {Array.from({ length: paddingBefore }).map((_, i) => (
+        <Text key={`pad-before-${i}`}> </Text>
       ))}
-      {nonEmpty.length === 0 && <Text color="gray">  No changes tracked</Text>}
+      {visibleLines.map((line, i) => (
+        <Text key={`content-${i}`} color={line.color as any}>{line.text}</Text>
+      ))}
+      {Array.from({ length: paddingAfter }).map((_, i) => (
+        <Text key={`pad-after-${i}`}> </Text>
+      ))}
+      <Text color="gray">{scrollInfo || ' '}</Text>
     </>
-  )
-}
-
-interface ResourceCountsDisplayProps {
-  counts: ResourceCounts | null
-}
-
-function ResourceCountsDisplay({ counts }: ResourceCountsDisplayProps) {
-  if (!counts) return <Text color="gray">No build results yet</Text>
-  return (
-    <Text>
-      <Text color="cyan">{counts.functions}</Text> functions | <Text color="cyan">{counts.other}</Text> others
-    </Text>
   )
 }
 
@@ -189,21 +123,15 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
   const [changedFiles, setChangedFilesState] = useState<TrackedChange[]>([])
   const [buildResult, setBuildResultState] = useState<BuildResult | null>(null)
   const [logLines, setLogLinesState] = useState<string[]>([])
-  const [, setLiveLogState] = useState<{ level: string | false; args: unknown[] } | null>(null)
-  const [logScrollOffset, setLogScrollOffset] = useState(0)
-  const [errorScrollOffset, setErrorScrollOffset] = useState(0)
-  const [, setTick] = useState(0)
+  const [scrollOffset, setScrollOffset] = useState(0)
 
-  // Force re-render every second to update "time since" display
-  useEffect(() => {
-    const interval = setInterval(() => setTick(t => t + 1), 1000)
-    return () => clearInterval(interval)
-  }, [])
+  const isError = status === 'error' && buildResult?.error
+  const isManualPending = manual && status === 'pending' && changedFiles.length > 0
+  const contentMode = isError ? 'error' : isManualPending ? 'changes' : 'logs'
 
-  // Reset error scroll when error changes
   useEffect(() => {
-    setErrorScrollOffset(0)
-  }, [buildResult?.error])
+    setScrollOffset(0)
+  }, [contentMode, buildResult?.error])
 
   const setStatus = useCallback((newStatus: WatchStatus, newReason?: string) => {
     setStatusState(newStatus)
@@ -224,35 +152,37 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
   }, [manual])
 
   const setLiveLog = useCallback((level: string | false, args: unknown[]) => {
-    setLiveLogState({ level, args })
     const formatted = format(...args).split('\n')
     setLogLinesState((prev) => {
-      prev.push(
-        `> ${(level !== false ? `[${level}] ` : '')} ${formatted[0]}`,
+      const newLines = [...prev]
+      newLines.push(
+        `> ${level !== false ? `[${level}] ` : ''}${formatted[0]}`,
         ...formatted.slice(1).map((line) => `> ${line}`)
       )
-      return prev
+      return newLines
     })
   }, [])
 
-  // Handle keyboard input
+  const getMaxScroll = useCallback(() => {
+    if (isError && buildResult?.error) {
+      return Math.max(0, buildResult.error.split('\n').length - CONTENT_LINES)
+    } else if (isManualPending) {
+      return 0
+    } else {
+      return Math.max(0, logLines.length - CONTENT_LINES)
+    }
+  }, [isError, isManualPending, buildResult?.error, logLines.length])
+
   useInput((input, key) => {
     if (input === 'q') {
       exit!()
     }
-    if (status === 'error' && buildResult?.error) {
-      const lines = buildResult.error.split('\n')
-      if (key.upArrow) {
-        setErrorScrollOffset(prev => Math.max(0, prev - 1))
-      } else if (key.downArrow) {
-        setErrorScrollOffset(prev => Math.min(lines.length - ERROR_LINES, prev + 1))
-      }
-    } else if (logLines.length > 5) {
-      if (key.upArrow) {
-        setLogScrollOffset(prev => Math.min(logLines.length - LOG_LINES, prev + 1))
-      } else if (key.downArrow) {
-        setLogScrollOffset(prev => Math.max(0, prev - 1))
-      }
+
+    const maxScroll = getMaxScroll()
+    if (key.upArrow) {
+      setScrollOffset(prev => Math.min(maxScroll, prev + 1))
+    } else if (key.downArrow) {
+      setScrollOffset(prev => Math.max(0, prev - 1))
     }
 
     if (manual && status === 'pending') {
@@ -262,7 +192,6 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
     }
   })
 
-  // Expose API via ref-like pattern
   useEffect(() => {
     const api: WatchUIAPI = {
       setStatus,
@@ -270,92 +199,67 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
       setBuildResult,
       setLiveLog,
     }
-    // Store in global for access from watch.ts
     ;(globalThis as Record<string, unknown>).__watchUIAPI = api
-    // Drain any logs that were buffered before the API was ready
     drainLiveLogBuffer()
     return () => {
       delete (globalThis as Record<string, unknown>).__watchUIAPI
     }
   }, [setStatus, setChangedFiles, setBuildResult, setLiveLog])
 
-  const isError = status === 'error' && buildResult?.error
-  const isManualPending = manual && status === 'pending' && changedFiles.length > 0
-
-  // Render different layouts based on state
-  if (isError) {
-    // Error layout - maximize error visibility
-    return (
-      <Box flexDirection="column" height={TOTAL_HEIGHT}>
-        {/* Line 1: Header */}
-        <Text bold color="yellow">Watch Mode</Text>
-        {/* Line 2: Status */}
-        <StatusLine status={status} reason={reason} />
-        {/* Line 3: Empty */}
-        <EmptyLine />
-        {/* Lines 4-11: Error (8 lines) */}
-        <ErrorDisplay error={buildResult.error!} scrollOffset={errorScrollOffset} />
-        {/* Line 12: Empty */}
-        <EmptyLine />
-        {/* Line 13: Changed files */}
-        <Text color="gray">Changed: {formatChangedFiles(changedFiles)}</Text>
-        {/* Line 14: Empty */}
-        <EmptyLine />
-        {/* Line 15: Waiting message */}
-        <Text color="yellow">Waiting for changes to retry...</Text>
-        {/* Line 16: Footer */}
-        <Text color="gray">↑↓ scroll error, Press Q to exit</Text>
-      </Box>
-    )
+  const statusText: Record<WatchStatus, string> = {
+    watching: 'Watching for changes...',
+    building: 'Building...',
+    restarting: 'Restarting...',
+    error: 'Build Error',
+    pending: 'Pending changes',
   }
+  const showSpinner = status === 'building' || status === 'restarting'
+  const statusColor = status === 'error' ? 'red' : status === 'pending' ? 'yellow' : 'green'
 
-  if (isManualPending) {
-    // Manual mode with pending changes
-    return (
-      <Box flexDirection="column" height={TOTAL_HEIGHT}>
-        {/* Line 1: Header */}
-        <Text bold color="yellow">Watch Mode <Text color="cyan">(Manual)</Text></Text>
-        {/* Line 2: Status */}
-        <StatusLine status={status} reason={reason} />
-        {/* Line 3: Empty */}
-        <EmptyLine />
-        {/* Lines 4-8: Changes by category */}
-        <ManualChangesDisplay changes={changedFiles} />
-        {/* Line 9: Empty */}
-        <EmptyLine />
-        {/* Line 10: Resource counts */}
-        <ResourceCountsDisplay counts={buildResult?.resourceCounts ?? null} />
-        {/* Line 11: Time since last build */}
-        <Text color="gray">
-          Last build: {buildResult ? formatTime(buildResult.timestamp) : 'No builds yet'}
-        </Text>
-        {/* Lines 12-15: Reserved */}
-        <EmptyLine />
-        <EmptyLine />
-        <EmptyLine />
-        <EmptyLine />
-        {/* Line 16: Footer */}
-        <Text color="gray">Press R/Enter to rebuild, Press Q to exit</Text>
-      </Box>
-    )
+  const footerParts: string[] = []
+  if (manual) footerParts.push('R/Enter: rebuild')
+  if (logLines.length > CONTENT_LINES || (isError && buildResult?.error && buildResult.error.split('\n').length > CONTENT_LINES)) {
+    footerParts.push('↑↓: scroll')
   }
+  footerParts.push('Q: exit')
 
-  // Normal/watching layout
   return (
-    <Box flexDirection="column" height={TOTAL_HEIGHT}>
-      <Text bold color="yellow">Watch Mode {manual ? <Text color="cyan"> (Manual)</Text> : ''}</Text>
-      <StatusLine status={status} reason={reason} />
-      <EmptyLine />
-      <LogDisplay lines={logLines} scrollOffset={logScrollOffset} />
-      <EmptyLine />
-      <Text color="gray">Changed: {formatChangedFiles(changedFiles)}</Text>
-      <EmptyLine />
-      <ResourceCountsDisplay counts={buildResult?.resourceCounts ?? null} />
-      <Text color="gray">
-        Last build: {buildResult ? formatTime(buildResult.timestamp) : 'No builds yet'}
+    <Box flexDirection="column">
+      <Text bold color="yellow">
+        Watch Mode{manual ? <Text color="cyan"> (Manual)</Text> : ''}
       </Text>
-      <EmptyLine />
-      <Text color="gray">{manual ? 'Press R/Enter to rebuild, ' : ''}{logLines.length > 5 ? '↑↓ scroll build log, ' : ''}Press Q to exit</Text>
+
+      <Text>
+        {showSpinner && <><Text color="cyan"><Spinner type="dots" /></Text><Text> </Text></>}
+        <Text color={statusColor}>{statusText[status]}</Text>
+        {reason && <Text color="gray"> ({reason})</Text>}
+      </Text>
+
+      <Text> </Text>
+
+      <ContentDisplay
+        mode={contentMode}
+        logLines={logLines}
+        errorText={buildResult?.error ?? null}
+        changes={changedFiles}
+        scrollOffset={scrollOffset}
+      />
+
+      <Text> </Text>
+
+      <Text color="gray">Changed: {formatChangedFiles(changedFiles)}</Text>
+
+      {buildResult?.resourceCounts ? (
+        <Text>
+          <Text color="cyan">{buildResult.resourceCounts.functions}</Text> functions | <Text color="cyan">{buildResult.resourceCounts.other}</Text> others
+        </Text>
+      ) : (
+        <Text color="gray">No build results yet</Text>
+      )}
+
+      {isError ? <Text color="yellow">Waiting for changes to retry...</Text> : <Text> </Text>}
+
+      <Text color="gray">{footerParts.join(' | ')}</Text>
     </Box>
   )
 }

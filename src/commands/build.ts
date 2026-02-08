@@ -277,10 +277,12 @@ async function _buildProject(
 
   try {
     if (await fs.pathExists(entrypointPath)) {
+      const isBun = Object.hasOwn(globalThis, 'Bun')
       const entrypointUrl = pathToFileURL(entrypointPath).toString()
 
-      if (watching) {
-        // only this should be hot reloaded, if anything other than stuff in `src` changes the watch CLI should restart itself
+      if (watching && !isBun) {
+        // Hot-hook for Node.js - only this should be hot reloaded
+        // Bun doesn't support hot-hook, we clear require.cache instead in watch.ts
         await import(entrypointUrl, { with: { hot: 'true' } })
       } else {
         await import(entrypointUrl)

@@ -23,6 +23,7 @@ export async function watchCommand(opts: WatchOptions) {
   let pendingChanges: TrackedChange[] = []
   let buildContext: BuildContext | undefined
   let hotInitialized = false
+  let lastBuildFailed = false
 
   const folder = opts.library ? join(opts.path, 'test') : opts.path
 
@@ -53,7 +54,8 @@ export async function watchCommand(opts: WatchOptions) {
       onManualRebuild: handleManualRebuild,
       // Since this isn't SIGINT, its fine that we don't await this
       exit: () => exit(subscription, unmountInk)
-    })
+    }),
+    { patchConsole: false }
   )
   unmountInk = unmount
 
@@ -84,6 +86,8 @@ export async function watchCommand(opts: WatchOptions) {
       const CLI = Bun.spawn(['bun', 'dev:build'], {
         windowsHide: true,
         windowsVerbatimArguments: true,
+        stdout: 'ignore',
+        stderr: 'ignore',
       })
 
       await CLI.exited
@@ -101,24 +105,50 @@ export async function watchCommand(opts: WatchOptions) {
       hotInitialized = true
     }
 
-    // Notify hot-hook about file changes so it can invalidate module versions
-    // This must happen BEFORE re-importing so versions are incremented
-    for (const change of changes) {
-      hot.notifyFileChange(change.path)
-    }
-    if (libChanges.length !== 0) {
-      // TODO: getting this name every time is not ideal
-      const libName = JSON.parse(await fs.readFile(join(opts.path, 'package.json'), 'utf-8')).name
+    if (Object.hasOwn(globalThis, 'Bun') && changes.length > 0) {
+      // Bun ignores query params for module caching and doesn't support MessagePort
+      // in register(), so hot-hook's invalidation mechanism is non-functional.
+      // Instead, clear Bun's module cache for project source files before re-importing.
+      const resolvedFolder = normalizePath(await fs.realpath(folder))
+      const resolvedRoot = opts.library ? normalizePath(await fs.realpath(opts.path)) : resolvedFolder
 
-      const libModuleFiles = await fs.readdir(join(opts.path, 'lib'), { recursive: true })
+      let clearedCount = 0
+      for (const key of Object.keys(require.cache)) {
+        const normalizedKey = normalizePath(key)
 
-      for (const file of libModuleFiles) {
-        hot.notifyFileChange(join(opts.path, 'test', 'node_modules', libName, 'lib', file as unknown as string))
+        // Only clear modules within the project
+        if (!normalizedKey.startsWith(resolvedFolder) && !normalizedKey.startsWith(resolvedRoot)) continue
+
+        // Keep sandstone singleton cached so CLI and user code share the same pack instance
+        if (normalizedKey.includes('/node_modules/sandstone/')) continue
+
+        delete require.cache[key]
+        clearedCount++
       }
-    }
-    // Small delay to let the loader process the invalidations
-    if (changes.length > 0) {
-      await new Promise(resolve => setTimeout(resolve, 10))
+
+      // If recovering from a failed build but no modules were in cache, Bun had a parse error
+      // and won't be able to reimport. Exit and ask user to restart.
+      if (lastBuildFailed && clearedCount === 0) {
+        getWatchUIAPI()?.setStatus('error', 'Parse error - restart required')
+        unmountInk?.()
+        process.stderr.write('\n\x1b[33mBun encountered a parse error and cannot recover. Please restart the watch command.\x1b[0m\n\n')
+        process.exit(1)
+      }
+    } else {
+      // Node.js path: use hot-hook's message port invalidation
+      for (const change of changes) {
+        hot.notifyFileChange(change.path)
+      }
+      if (libChanges.length !== 0) {
+        const libModuleFiles = await fs.readdir(join(opts.path, 'lib'), { recursive: true })
+        for (const file of libModuleFiles) {
+          hot.notifyFileChange(join(opts.path, 'lib', file as unknown as string))
+        }
+      }
+      // Small delay to let the loader process the invalidations
+      if (changes.length > 0) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
     }
 
     // Replace global console during build to capture user console.log without messing up Ink UI
@@ -143,8 +173,10 @@ export async function watchCommand(opts: WatchOptions) {
 
     if (result.success) {
       log(`Build successful: ${result.resourceCounts.functions} functions, ${result.resourceCounts.other} others`)
+      lastBuildFailed = false
     } else {
       logError(result.error)
+      lastBuildFailed = true
     }
 
     alreadyBuilding = false

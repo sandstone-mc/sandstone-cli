@@ -603,7 +603,8 @@ export async function _buildCommand(
 export async function buildCommand(opts: BuildOptions, _?: string): Promise<void>
 export async function buildCommand(opts: BuildOptions, _folder: string | undefined, silent: true): Promise<BuildResult>
 export async function buildCommand(opts: BuildOptions, _folder?: string, silent = false): Promise<BuildResult | void> {
-  const folder = _folder ?? opts.path
+  // Commander passes Command object as second arg, so check for string explicitly
+  const folder = (typeof _folder === 'string') ? _folder : opts.path
 
   try {
     const result = await _buildProject(opts, folder, silent)

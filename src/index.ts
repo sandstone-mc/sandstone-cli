@@ -9,7 +9,7 @@ const commander = new Command()
 console.log(figlet.textSync('Sandstone'));
 
 const CLI = commander
-  .version('2.0.2', '-v, --version')
+  .version('2.0.4', '-v, --version')
   .description('The CLI for Sandstone - the minecraft pack creation library.')
 
 const build = CLI

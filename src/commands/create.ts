@@ -176,7 +176,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   exec(`git checkout ${projectType}-${version[0]}`)
 
-  exec('npx rimraf -rf .git')
+  await fs.rm('.git', { force: true, recursive: true })
 
   exec(`${packageManager} install`)
 

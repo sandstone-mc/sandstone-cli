@@ -12,6 +12,7 @@ import { canUseSymlinks } from '../utils.js'
 import { split } from 'obliterator'
 
 import type * as sandstone from 'sandstone'
+import type { handlerReadFile } from 'sandstone/pack'
 
 type SandstoneContext = ReturnType<typeof sandstone['getSandstoneContext']>
 
@@ -565,8 +566,8 @@ async function _buildProject(
       if (packType.handleOutput) {
         await packType.handleOutput(
           'output',
-          async (relativePath: string, encoding: BufferEncoding = 'utf8') =>
-            await fs.readFile(path.join(outputPath, relativePath), encoding),
+          (async (relativePath: string, encoding: BufferEncoding = 'utf8') =>
+            await fs.readFile(path.join(outputPath, relativePath), encoding)) as unknown as handlerReadFile,
           async (relativePath: string, contents: any) => {
             if (contents === undefined) {
               await fs.unlink(path.join(outputPath, relativePath))
@@ -655,8 +656,8 @@ async function _buildProject(
       if (packType.handleOutput) {
         await packType.handleOutput(
           'output',
-          async (relativePath: string, encoding: BufferEncoding = 'utf8') =>
-            await fs.readFile(path.join(outputPath, relativePath), encoding),
+          (async (relativePath: string, encoding: BufferEncoding = 'utf8') =>
+            await fs.readFile(path.join(outputPath, relativePath), encoding)) as unknown as handlerReadFile,
           async (relativePath: string, contents: any) => {
             if (contents === undefined) {
               await fs.unlink(path.join(outputPath, relativePath))

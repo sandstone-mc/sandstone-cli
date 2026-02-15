@@ -152,7 +152,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   const pnpm = hasPnpm()
   const bun =  hasBun()
 
-  if (yarn || pnpm) {
+  if (yarn || pnpm || bun) {
     const choices = ['npm']
 
     if (yarn) choices.unshift('yarn')

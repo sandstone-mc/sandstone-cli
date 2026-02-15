@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { Argument, Command } from 'commander'
 import figlet from 'figlet'
 import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand } from './commands/index.js'
@@ -8,7 +9,7 @@ const commander = new Command()
 console.log(figlet.textSync('Sandstone'));
 
 const CLI = commander
-  .version('2.0.1')
+  .version('2.0.2', '-v, --version')
   .description('The CLI for Sandstone - the minecraft pack creation library.')
 
 const build = CLI

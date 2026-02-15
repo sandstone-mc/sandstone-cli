@@ -1,7 +1,7 @@
 export const BuildDeclares = {
     // Flags
     dry: ['-d, --dry', 'Do not save the pack. Mostly useful with `verbose`.'],
-    verbose: ['-v, --verbose', 'Log all resulting resources: functions, advancements...'],
+    verbose: ['-f, --verbose', 'Fully log all resulting resources: functions, advancements...'],
     root: ['-r, --root', 'Save the pack & resource pack in the .minecraft/datapacks & .minecraft/resource_packs folders. Override the value specified in the configuration file.'],
     fullTrace: ['-t, --full-trace', 'Show the full stack trace on errors.'],
     strictErrors: ['-s, --strict-errors', 'Stop pack compilation on type errors.'],

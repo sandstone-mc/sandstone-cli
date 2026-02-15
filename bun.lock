@@ -29,7 +29,7 @@
         "@types/fs-extra": "^11.0.2",
         "@types/react": "^19.2.10",
         "@types/semver": "^7.5.3",
-        "sandstone": "^1.0.0-beta.1",
+        "sandstone": "1.0.0-beta.1",
         "typescript": "^5.2.2",
       },
     },

@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 import { Argument, Command } from 'commander'
 import figlet from 'figlet'
 import { createCommand } from './commands/index.js'

@@ -572,7 +572,7 @@ async function _buildProject(
             if (contents === undefined) {
               await fs.unlink(path.join(outputPath, relativePath))
             } else {
-              await fs.writeFile(path.join(outputPath, relativePath), contents)
+              await fs.writeFile(path.join(outputPath, relativePath), contents.replaceAll('"min_version"', '"min_format"').replace('"max_version"', '"max_format"'))
             }
           },
         )
@@ -662,7 +662,7 @@ async function _buildProject(
             if (contents === undefined) {
               await fs.unlink(path.join(outputPath, relativePath))
             } else {
-              await fs.writeFile(path.join(outputPath, relativePath), contents)
+              await fs.writeFile(path.join(outputPath, relativePath), contents.replaceAll('"min_version"', '"min_format"').replace('"max_version"', '"max_format"'))
             }
           },
         )

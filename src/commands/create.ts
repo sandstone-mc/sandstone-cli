@@ -42,7 +42,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   const sv = (v: string) => new SemVer(v)
 
-  const versions = [[sv('0.13.6'), sv('0.5.4')], [sv('1.0.0-beta.0'), sv('1.1.11')]] as const
+  const versions = [[sv('1.0.0-beta.1'), sv('2.0.0')]] as const
 
   const version = await select({
     message: 'Which version of Sandstone do you want to use? These are the only supported versions for new projects.',
@@ -160,7 +160,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
     if (bun)  choices.unshift('bun')
 
     packageManager = (await select({
-      message: 'What package manager do you want to use? >',
+      message: 'What package manager do you want to use? (For now you have to use Bun) >',
       choices: choices
     }))
   }
@@ -168,7 +168,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   fs.mkdirSync(projectPath)
 
   // Create project & install dependencies
-  console.log(chalk`Installing {rgb(229,193,0) sandstone@${version[0]}}, {rgb(229,193,0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`)
+  console.log(chalk`Installing {rgb(229, 193, 0) sandstone@${version[0]}}, {rgb(229, 193, 0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`)
 
   const exec = (cmd: string) => child.execSync(cmd, { cwd: projectPath })
 

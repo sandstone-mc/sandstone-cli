@@ -2,10 +2,11 @@ import fs from 'fs-extra'
 import path from 'path'
 import { stripVTControlCharacters, format } from 'util'
 
-let logPath: string
+let logPath: string | null = null
 let liveLogCallback: ((level: string | false, args: unknown[]) => void) | null = null
 let liveLogBuffer: { level: string | false; args: unknown[] }[] = []
 let liveLogReady = false
+let silent = false
 
 // Track initialization and pending writes
 let initPromise: Promise<void> | null = null
@@ -20,6 +21,26 @@ export function initLogger(rootFolder: string): () => Promise<void> {
 
   // Return async function that awaits logWorkerFinish
   return () => logWorkerFinish()
+}
+
+/**
+ * Initialize the logger without file writing.
+ * Use this for `sand build` where we want logging but no persistent log file.
+ */
+export function initLoggerNoFile() {
+  logPath = null
+  liveLogReady = true
+  // Set a default callback that prints to console
+  liveLogCallback = (level, args) => {
+    console.log(...(level ? [`[${level}]`] : []), ...args)
+  }
+}
+
+/**
+ * Set whether the logger should suppress live output.
+ */
+export function setSilent(value: boolean) {
+  silent = value
 }
 
 export function setLiveLogCallback(callback: typeof liveLogCallback) {
@@ -37,9 +58,9 @@ export function drainLiveLogBuffer() {
 }
 
 async function logWorkerInit() {
-  await fs.ensureDir(path.dirname(logPath))
-  await fs.writeFile(logPath, `=== Watch started at ${new Date().toISOString()} ===\n`)
-  writer = fs.createWriteStream(logPath, { flags: 'a' })
+  await fs.ensureDir(path.dirname(logPath!))
+  await fs.writeFile(logPath!, `=== Watch started at ${new Date().toISOString()} ===\n`)
+  writer = fs.createWriteStream(logPath!, { flags: 'a' })
   // Wait for the stream to be ready before allowing writes
   await new Promise<void>((resolve, reject) => {
     writer!.once('open', () => resolve())
@@ -134,11 +155,14 @@ async function logWorkerFinish() {
 }
 
 function writeLog(level: string | false, ...args: unknown[]) {
-  if (liveLogReady) {
-    liveLogCallback?.(level, args)
-  } else {
-    liveLogBuffer.push({ level, args })
+  if (!silent) {
+    if (liveLogReady) {
+      liveLogCallback?.(level, args)
+    } else {
+      liveLogBuffer.push({ level, args })
+    }
   }
+
   if (logPath) {
     // Call logWorkerMain detached and track the promise
     const writePromise = logWorkerMain(level, ...args)

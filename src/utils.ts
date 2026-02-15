@@ -35,6 +35,36 @@ export function hasBun(): boolean {
 export const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 
 /**
+ * Check if symlinks can be used on this system.
+ * Returns true on non-Windows platforms.
+ * On Windows, tests if symlinking actually works (requires admin or developer mode).
+ */
+export async function canUseSymlinks(): Promise<boolean> {
+  if (os.platform() !== 'win32') {
+    return true
+  }
+
+  const testDir = path.join(os.tmpdir(), `symlink-test-${Date.now()}`)
+  const targetPath = path.join(testDir, 'target')
+  const linkPath = path.join(testDir, 'link')
+
+  try {
+    await fs.promises.mkdir(testDir)
+    await fs.promises.mkdir(targetPath)
+    await fs.promises.writeFile(path.join(targetPath, 'test.txt'), 'symlink-test')
+    await fs.promises.symlink(targetPath, linkPath, 'dir')
+
+    // Verify the symlink actually works by reading through it
+    const content = await fs.promises.readFile(path.join(linkPath, 'test.txt'), 'utf-8')
+    return content === 'symlink-test'
+  } catch {
+    return false
+  } finally {
+    await fs.promises.rm(testDir, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+/**
  * Get the .minecraft path
  */
 export function getMinecraftPath(): string {

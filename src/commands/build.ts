@@ -7,7 +7,19 @@ import chalk from 'chalk'
 import AdmZip from 'adm-zip'
 
 import type { BuildResult, ResourceCounts } from '../ui/types.js'
-import { log, logInfo, logWarn, logError as logErrorFn, logDebug, logTrace } from '../ui/logger.js'
+import { log, logInfo, logWarn, logError as logErrorFn, logDebug, logTrace, initLoggerNoFile, setSilent } from '../ui/logger.js'
+import { canUseSymlinks } from '../utils.js'
+import { split } from 'obliterator'
+
+import type * as sandstone from 'sandstone'
+
+type SandstoneContext = ReturnType<typeof sandstone['getSandstoneContext']>
+
+declare global {
+  interface RegExpConstructor {
+    escape(str: string): string;
+  }
+}
 
 // Console capture for watch mode - wraps console to redirect output to our log file
 const originalConsole = globalThis.console
@@ -69,11 +81,16 @@ export type BuildOptions = {
   dependencies?: [string, string][]
 }
 
-type SandstoneCache = Record<string, string>
+type SandstoneCache = {
+  files: Record<string, string>
+  archives?: string[]
+  canUseSymlinks?: boolean
+  symlinks?: string[]
+}
 
 export interface BuildContext {
-  sandstoneConfig: any
-  sandstonePack: any
+  sandstoneConfig: sandstone.SandstoneConfig
+  sandstonePack: sandstone.SandstonePack
   resetSandstonePack: () => void
 }
 
@@ -82,6 +99,7 @@ function hash(stringToHash: string): string {
 }
 
 let cache: SandstoneCache
+let symlinksAvailable: boolean | undefined
 
 async function getClientPath() {
   function getMCPath(): string {
@@ -168,6 +186,30 @@ function countResources(sandstonePack: { core: { resourceNodes: Iterable<{ resou
   return { functions, other }
 }
 
+async function handleSymlink(folder: string, packName: string, cache: SandstoneCache, minecraftPath: string, targetPath: string, linkPath: string) {
+  const allowPath = `[glob]${path.resolve(folder)}${path.sep}**${path.sep}*`
+
+  const allowedList = path.join(minecraftPath, 'allowed_symlinks.txt')
+
+  const comment = `# Sandstone Pack: ${packName}\n`
+  try {
+    const currentlyAllowed = await fs.readFile(allowedList)
+
+    if (!currentlyAllowed.includes(allowPath)) {
+      await fs.writeFile(allowedList, `${currentlyAllowed}\n#\n${comment}${allowPath}`)
+    }
+  } catch (e) {
+    await fs.writeFile(allowedList, `${comment}${allowPath}`)
+  }
+
+  await fs.lstat(linkPath).then(() => {
+    throw new Error(`Tried to add a symlink at "${linkPath}", encountered an existing file.`)
+  }).catch(() => {})
+  await fs.symlink(path.resolve(targetPath), linkPath)
+  cache.symlinks ??= []
+  cache.symlinks.push(linkPath)
+}
+
 export async function loadBuildContext(
   cliOptions: BuildOptions,
   folder: string,
@@ -191,10 +233,7 @@ export async function loadBuildContext(
   // This ensures we use the same module instance as the user code
   const sandstoneUrl = pathToFileURL(path.join(folder, 'node_modules', 'sandstone', 'dist', 'index.js'))
   /* @ts-ignore */
-  const { createSandstonePack, resetSandstonePack } = await import(sandstoneUrl)
-  
-  /* @ts-ignore */
-  type SandstoneContext = import('sandstone').SandstoneContext
+  const { createSandstonePack, resetSandstonePack } = (await import(sandstoneUrl)) as typeof sandstone
 
   const context: SandstoneContext = {
     workingDir: folder,
@@ -213,8 +252,8 @@ export async function loadBuildContext(
 
 interface BuildProjectResult {
   resourceCounts: ResourceCounts
-  sandstoneConfig: any
-  sandstonePack: any
+  sandstoneConfig: sandstone.SandstoneConfig
+  sandstonePack: sandstone.SandstonePack
   resetSandstonePack: () => void
 }
 
@@ -246,22 +285,35 @@ async function _buildProject(
   // Reset pack state before each build
   resetSandstonePack()
 
-  const { scripts } = sandstoneConfig
+  const { scripts, resources } = sandstoneConfig
   const saveOptions = sandstoneConfig.saveOptions || {}
 
   const outputFolder = path.join(folder, '.sandstone', 'output')
 
   // Resolve options
-  const clientPath = !cliOptions.production
-    ? cliOptions.clientPath || saveOptions.clientPath || (await getClientPath())
+  const worldName: string | undefined = cliOptions.world || saveOptions.world
+  const root: boolean | undefined = cliOptions.root !== undefined ? cliOptions.root : saveOptions.root
+
+  // Only use explicitly configured client path for now
+  // We'll auto-detect after save() if there are client-side packs that need exporting
+  let clientPath = !cliOptions.production
+    ? cliOptions.clientPath || saveOptions.clientPath
     : undefined
 
-  let worldName: string | undefined = cliOptions.world || saveOptions.world
   if (worldName && !cliOptions.production) {
-    await getClientWorldPath(worldName, clientPath)
+    // Need client path for world export
+    clientPath ??= await getClientPath()
+    if (clientPath) {
+      await getClientWorldPath(worldName, clientPath)
+    }
+  } else if (root && !cliOptions.production) {
+    // Need client path for root export
+    clientPath ??= await getClientPath()
   }
 
-  const root = cliOptions.root !== undefined ? cliOptions.root : saveOptions.root
+  const serverPath = !cliOptions.production
+    ? cliOptions.serverPath || saveOptions.serverPath
+    : undefined
   const packName: string = cliOptions.name ?? sandstoneConfig.name
 
   if (worldName && root) {
@@ -272,8 +324,9 @@ async function _buildProject(
   await scripts?.beforeAll?.()
 
   // Import user code (this executes their pack definitions)
-  if (!silent) console.log('Compiling source...\n')
-  log('Compiling source...')
+  if (!silent) {
+    log('Compiling source...')
+  }
 
   try {
     if (await fs.pathExists(entrypointPath)) {
@@ -305,33 +358,53 @@ async function _buildProject(
   }
 
   // Setup cache
-  const newCache: SandstoneCache = {}
+  const newCache: SandstoneCache = { files: {}, archives: [] }
   const cacheFile = path.join(folder, '.sandstone', 'cache.json')
+  // Track which pack types have changed files
+  const changedPackTypes = new Set<string>()
+  // Track directories containing new files
+  const newDirs = new Set<string>()
 
   if (cache === undefined) {
     try {
       const fileRead = await fs.readFile(cacheFile, 'utf8')
       if (fileRead) {
-        cache = JSON.parse(fileRead)
+        const parsed = JSON.parse(fileRead)
+        // Handle legacy cache format (plain Record<string, string>)
+        if (parsed.files) {
+          cache = parsed
+        } else {
+          cache = { files: parsed }
+        }
       }
     } catch {
-      cache = {}
+      cache = { files: {} }
     }
   }
+
+  // Check symlink availability (use cached value if available)
+  if (symlinksAvailable === undefined) {
+    if (cache.canUseSymlinks !== undefined) {
+      symlinksAvailable = cache.canUseSymlinks
+    } else {
+      symlinksAvailable = await canUseSymlinks()
+    }
+  }
+  newCache.canUseSymlinks = symlinksAvailable
 
   // Run beforeSave script
   await scripts?.beforeSave?.()
 
   // File exclusion setup
-  const excludeOption = saveOptions.resources?.exclude
+  const excludeOption = resources?.exclude
   const fileExclusions = excludeOption
     ? {
-        generated: (excludeOption.generated || excludeOption) as RegExp[] | undefined,
-        existing: (excludeOption.existing || excludeOption) as RegExp[] | undefined,
+        generated: ('generated' in excludeOption ? excludeOption.generated : excludeOption) as RegExp[] | undefined,
+        existing: ('existing' in excludeOption ? excludeOption.existing : excludeOption) as RegExp[] | undefined,
       }
     : false
 
-  const fileHandlers = (saveOptions.resources?.handle as {
+  const fileHandlers = (resources?.handle as {
     path: RegExp
     callback: (contents: string | Buffer | Promise<Buffer>) => Promise<Buffer>
   }[]) || false
@@ -362,11 +435,19 @@ async function _buildProject(
 
         if (pathPass) {
           const hashValue = hash(content + relativePath)
-          newCache[relativePath] = hashValue
+          newCache.files[relativePath] = hashValue
+          // Track parent directories
+          for (let dir = path.dirname(relativePath); dir && dir !== '.'; dir = path.dirname(dir)) {
+            newDirs.add(dir)
+          }
 
-          if (cache[relativePath] === hashValue) {
+          if (cache.files[relativePath] === hashValue) {
             return
           }
+
+          // Track that this pack type has changed
+          const packTypeDir = relativePath.split(/[/\\]/)[0]
+          changedPackTypes.add(packTypeDir)
 
           const realPath = path.join(outputFolder, relativePath)
           await fs.ensureDir(path.dirname(realPath))
@@ -421,9 +502,20 @@ async function _buildProject(
         }
 
         const hashValue = hash(content + relativePath)
-        newCache[relativePath] = hashValue
+        newCache.files[relativePath] = hashValue
 
-        if (cache[relativePath] !== hashValue) {
+        for (let dir = path.dirname(relativePath); dir && dir !== '.'; dir = path.dirname(dir)) {
+          if (newDirs.has(dir)) {
+            break
+          } else {
+            newDirs.add(dir)
+          }
+        }
+
+        if (cache.files[relativePath] !== hashValue) {
+          // Track that this pack type has changed
+          changedPackTypes.add(packType)
+
           const realPath = path.join(outputFolder, relativePath)
           await fs.ensureDir(path.dirname(realPath))
           await fs.writeFile(realPath, content)
@@ -439,11 +531,14 @@ async function _buildProject(
     const files = await fs.readdir(input).catch(() => [])
     if (files.length === 0) return false
 
+    const archiveName = `${packName}_${packType.type}.zip`
+    newCache.archives!.push(archiveName)
+
     const archive = new AdmZip()
     await archive.addLocalFolderPromise(input, {})
     await fs.ensureDir(path.join(outputFolder, 'archives'))
     await archive.writeZipPromise(
-      path.join(outputFolder, 'archives', `${packName}_${packType.type}.zip`),
+      path.join(outputFolder, 'archives', archiveName),
       { overwrite: true },
     )
 
@@ -452,7 +547,18 @@ async function _buildProject(
 
   // Export to client/server
   if (!cliOptions.production) {
-    for await (const [, packType] of packTypes) {
+    // Check if there are any client-side packs that need exporting
+    // If so and clientPath not set, try to find it now (after dependencies resolved)
+    const packTypesArray = [...packTypes]
+    const hasClientPacks = packTypesArray.some(([, pt]) => pt.networkSides === 'client')
+    if (hasClientPacks && !clientPath && (root || worldName)) {
+      clientPath = await getClientPath()
+    }
+
+    // When no world/root specified, only export client-side packs (resource packs + dependencies)
+    const resourcePackOnlyExport = !worldName && !root
+
+    for (const [, packType] of packTypesArray) {
       const outputPath = path.join(outputFolder, packType.type)
       await fs.ensureDir(outputPath)
 
@@ -473,16 +579,23 @@ async function _buildProject(
 
       await handleResources(packType.type)
 
+      // Skip archive and export if no files in this pack type changed
+      if (!changedPackTypes.has(packType.type)) {
+        continue
+      }
+
       let archivedOutput = false
-      if (packType.archiveOutput) {
+      if (packType.archiveOutput && saveOptions.exportZips) {
         archivedOutput = await archiveOutput(packType)
       }
 
       // Handle client export
-      if (clientPath) {
+      // Skip non-client packs (datapacks) when in resource pack only mode (no world/root specified)
+      if (clientPath && !(resourcePackOnlyExport && packType.networkSides !== 'client')) {
         let fullClientPath: string
 
-        if (worldName) {
+        // Only export the resource pack to `$worldName$/resources.zip` if exportZips is on
+        if (worldName && (packType.type !== 'resourcepack' || saveOptions.exportZips)) {
           fullClientPath = path.join(clientPath, packType.clientPath)
             .replace('$packName$', packName)
             .replace('$worldName$', worldName)
@@ -490,12 +603,47 @@ async function _buildProject(
           fullClientPath = path.join(clientPath, packType.rootPath).replace('$packName$', packName)
         }
 
-        if (packType.archiveOutput && archivedOutput) {
+        if (packType.archiveOutput && archivedOutput && saveOptions.exportZips) {
           const archivePath = path.join(outputFolder, 'archives', `${packName}_${packType.type}.zip`)
           await fs.copyFile(archivePath, `${fullClientPath}.zip`)
+        } else if (symlinksAvailable) {
+          if (cache.symlinks === undefined || !cache.symlinks.includes(fullClientPath)) {
+            handleSymlink(
+              folder,
+              packName,
+              newCache,
+              clientPath,
+              outputPath,
+              fullClientPath,
+            )
+          }
         } else {
           await fs.remove(fullClientPath)
           await fs.copy(outputPath, fullClientPath)
+        }
+      }
+
+      // Handle server export (skip client-only packs like resource packs)
+      if (serverPath && packType.networkSides === 'server') {
+        const fullServerPath = path.join(serverPath, packType.serverPath).replace('$packName$', packName)
+
+        if (packType.archiveOutput && archivedOutput && saveOptions.exportZips) {
+          const archivePath = path.join(outputFolder, 'archives', `${packName}_${packType.type}.zip`)
+          await fs.copyFile(archivePath, `${fullServerPath}.zip`)
+        } else if (symlinksAvailable) {
+          if (cache.symlinks === undefined || !cache.symlinks.includes(fullServerPath)) {
+            handleSymlink(
+              folder,
+              packName,
+              newCache,
+              serverPath,
+              outputPath,
+              fullServerPath,
+            )
+          }
+        } else {
+          await fs.remove(fullServerPath)
+          await fs.copy(outputPath, fullServerPath)
         }
       }
     }
@@ -520,22 +668,48 @@ async function _buildProject(
       }
 
       await handleResources(packType.type)
-
-      if (packType.archiveOutput) {
-        await archiveOutput(packType)
-      }
     }
   }
 
-  // Clean up old files not in new cache
+  // Clean up old files, directories, and symlinks not in new cache
   if (cliOptions.dry !== true) {
-    const oldFileNames = new Set<string>(Object.keys(cache))
-    Object.keys(newCache).forEach((name) => oldFileNames.delete(name))
+    for (const file of Object.keys(cache.files)) {
+      if (!(file in newCache.files)) {
+        await fs.rm(path.join(outputFolder, file))
 
-    for (const name of oldFileNames) {
-      try {
-        await fs.rm(path.join(outputFolder, name))
-      } catch {}
+        let dir: string | undefined = undefined
+        for (const segment of split(new RegExp(RegExp.escape(path.sep)), path.dirname(file))) {
+          dir = dir === undefined ? segment : path.join(dir, segment)
+
+          if (!newDirs.has(dir)) {
+            await fs.rm(path.join(outputFolder, dir), { force: true, recursive: true })
+            break
+          }
+        }
+      }
+    }
+
+    // Clean up old archives
+    if (cache.archives) {
+      const archivesDir = path.join(outputFolder, 'archives')
+      if (newCache.archives === undefined || newCache.archives.length === 0) {
+        await fs.rm(archivesDir, { force: true, recursive: true })
+      }
+      for (const archive of cache.archives) {
+        if (!newCache.archives!.includes(archive)) {
+          await fs.rm(path.join(archivesDir, archive))
+        }
+      }
+    }
+
+    if (cache.symlinks) {
+      const newSymlinks = new Set(newCache.symlinks)
+
+      for (const symlink of cache.symlinks) {
+        if (!newSymlinks.has(symlink)) {
+          await fs.rm(symlink)
+        }
+      }
     }
 
     // Update cache
@@ -550,14 +724,11 @@ async function _buildProject(
   // Count resources (excluding boilerplate)
   const resourceCounts = countResources(sandstonePack)
 
-  const exports = clientPath ? 'client' : false
+  const exports = [clientPath && 'client', serverPath && 'server'].filter(Boolean).join(' & ') || false
   const countMsg = `${resourceCounts.functions} functions, ${resourceCounts.other} other resources`
   if (!silent) {
-    console.log(
-      `\nPack(s) compiled! (${countMsg})${exports ? ` Exported to ${exports}.` : ''} View output in ./.sandstone/output/\n`,
-    )
+    log(`Pack(s) compiled! (${countMsg})${exports ? ` Exported to ${exports}.` : ''}`)
   }
-  log(`Pack(s) compiled! (${countMsg})${exports ? ` Exported to ${exports}.` : ''}`)
 
   return { resourceCounts, sandstoneConfig, sandstonePack, resetSandstonePack }
 }
@@ -605,6 +776,10 @@ export async function buildCommand(opts: BuildOptions, _folder: string | undefin
 export async function buildCommand(opts: BuildOptions, _folder?: string, silent = false): Promise<BuildResult | void> {
   // Commander passes Command object as second arg, so check for string explicitly
   const folder = (typeof _folder === 'string') ? _folder : opts.path
+
+  // Initialize logger without file for build mode
+  initLoggerNoFile()
+  setSilent(silent)
 
   try {
     const result = await _buildProject(opts, folder, silent)

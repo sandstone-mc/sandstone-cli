@@ -1,3 +1,5 @@
+import type { SandstoneConfig,SandstonePack } from "sandstone"
+
 export type WatchStatus = 'watching' | 'building' | 'restarting' | 'error' | 'pending'
 
 export type ChangeCategory = 'src' | 'resources' | 'config' | 'dependencies' | 'other'
@@ -17,8 +19,8 @@ export interface BuildResult {
   error?: string
   resourceCounts: ResourceCounts
   timestamp: number
-  sandstoneConfig?: unknown
-  sandstonePack?: unknown
+  sandstoneConfig?: SandstoneConfig
+  sandstonePack?: SandstonePack
   resetSandstonePack?: () => void
 }
 

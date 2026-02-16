@@ -42,7 +42,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   const sv = (v: string) => new SemVer(v)
 
-  const versions = [[sv('1.0.0-beta.1'), sv('2.0.4')]] as const
+  const versions = [[sv('1.0.0-beta.1'), sv('2.0.7')]] as const
 
   const version = await select({
     message: 'Which version of Sandstone do you want to use? These are the only supported versions for new projects.',

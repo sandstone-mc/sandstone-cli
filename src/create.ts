@@ -9,7 +9,7 @@ const commander = new Command()
 console.log(figlet.textSync('Sandstone'));
 
 const createCLI = commander
-  .version('2.0.6')
+  .version('2.0.7')
   .description('Create a new Sandstone project. ⛏')
   .action(createCommand)
   .addArgument(new Argument('<projectName>', 'Not the name of the output pack'))

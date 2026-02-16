@@ -187,26 +187,68 @@ function countResources(sandstonePack: { core: { resourceNodes: Iterable<{ resou
   return { functions, other }
 }
 
+function splitPath(split: string) {
+  let parts: string[] = []
+  let current = split
+
+  while (current !== 'C:') {
+    let dirname = path.dirname(current)
+    if (dirname.endsWith('\\')) {
+      dirname = dirname.slice(0, -1)
+    }
+    parts.unshift(current.replace(`${dirname}${path.sep}`, ''))
+    current = dirname
+  }
+  parts.unshift('C:')
+  return parts
+}
+
 async function handleSymlink(folder: string, packName: string, cache: SandstoneCache, minecraftPath: string, targetPath: string, linkPath: string) {
-  const allowPath = `[glob]${path.resolve(folder)}${path.sep}**${path.sep}*`
+  let rawPath = path.resolve(path.join(folder))
+  let sep: string = path.sep
+  if (os.platform() === 'win32') {
+    sep = `${path.sep}${path.sep}`
+
+    rawPath = splitPath(rawPath).join(sep)
+  }
+  const allowPath = `[glob]${rawPath}${sep}**${sep}*`
 
   const allowedList = path.join(minecraftPath, 'allowed_symlinks.txt')
 
   const comment = `# Sandstone Pack: ${packName}\n`
   try {
-    const currentlyAllowed = await fs.readFile(allowedList)
+    const currentlyAllowed = await fs.readFile(allowedList, 'utf-8')
 
     if (!currentlyAllowed.includes(allowPath)) {
+      log('[handleSymlink] Adding workspace to allowed_symlinks.txt at minecraft path. If the game is running please restart it.')
       await fs.writeFile(allowedList, `${currentlyAllowed}\n#\n${comment}${allowPath}`)
+    } else {
+      log('[handleSymlink] Workspace is already in allowed_symlinks.txt at minecraft path, skipping...')
     }
   } catch (e) {
+    log('[handleSymlink] Creating allowed_symlinks.txt at minecraft path. If the game is running please restart it.')
     await fs.writeFile(allowedList, `${comment}${allowPath}`)
   }
 
-  await fs.lstat(linkPath).then(() => {
-    throw new Error(`Tried to add a symlink at "${linkPath}", encountered an existing file.`)
-  }).catch(() => {})
-  await fs.symlink(path.resolve(targetPath), linkPath)
+  let skip = false
+  let errored = false
+  try {
+    const stats = await fs.lstat(linkPath)
+    if (stats.isSymbolicLink() && await fs.readlink(linkPath) === path.resolve(targetPath)) {
+      log('[handleSymlink] Symlink already created, skipping...')
+      skip = true
+    } else {
+      errored = true
+    }
+  } catch {}
+  if (errored) {
+    throw new Error(`Tried to add a symlink at "${linkPath}",\n encountered an existing FS entry.`)
+  }
+
+  if (!skip) {
+    log(`[handleSymlink] Creating symlink for ${targetPath.replace(`${path.dirname(targetPath)}${path.sep}`, '')}`)
+    await fs.symlink(path.resolve(targetPath), linkPath)
+  }
   cache.symlinks ??= []
   cache.symlinks.push(linkPath)
 }
@@ -609,7 +651,7 @@ async function _buildProject(
           await fs.copyFile(archivePath, `${fullClientPath}.zip`)
         } else if (symlinksAvailable) {
           if (cache.symlinks === undefined || !cache.symlinks.includes(fullClientPath)) {
-            handleSymlink(
+            await handleSymlink(
               folder,
               packName,
               newCache,
@@ -633,7 +675,7 @@ async function _buildProject(
           await fs.copyFile(archivePath, `${fullServerPath}.zip`)
         } else if (symlinksAvailable) {
           if (cache.symlinks === undefined || !cache.symlinks.includes(fullServerPath)) {
-            handleSymlink(
+            await handleSymlink(
               folder,
               packName,
               newCache,

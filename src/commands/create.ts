@@ -42,7 +42,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   const sv = (v: string) => new SemVer(v)
 
-  const versions = [[sv('1.0.0-beta.1'), sv('2.0.7')]] as const
+  const versions = [[sv('1.0.0-beta.1'), sv('2.0.8')]] as const
 
   const version = await select({
     message: 'Which version of Sandstone do you want to use? These are the only supported versions for new projects.',
@@ -206,9 +206,9 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   console.log(chalk`{green Success!} Created "${projectName}" at "${projectPath}"`)
 
   console.log('Inside that directory, you can run several commands:\n')
-  console.log(chalk`  {cyan ${prefix} build}:\n    Builds the packs. {cyan ⛏}\n`)
-  console.log(chalk`  {cyan ${prefix} watch}:\n    Builds the packs, and rebuilds on each file change. {cyan ⛏}\n`)
+  console.log(chalk`  {cyan ${prefix} dev:build}:\n    Builds the packs. {cyan ⛏}\n`)
+  console.log(chalk`  {cyan ${prefix} dev:watch}:\n    Builds the packs, and rebuilds on each file change. {cyan ⛏}\n`)
 
   console.log('We suggest that you begin by typing:\n')
-  console.log(chalk`  {cyan cd} ${projectName}\n  {cyan ${prefix} watch}`)
+  console.log(chalk`  {cyan cd} ${projectName}\n  {cyan ${prefix} dev:watch}`)
 } 

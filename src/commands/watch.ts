@@ -10,11 +10,12 @@ import { initLogger, log, logError, setLiveLogCallback } from '../ui/logger.js'
 import type { TrackedChange, ChangeCategory } from '../ui/types.js'
 import { hot } from '@sandstone-mc/hot-hook'
 import fs from 'fs-extra'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 
 export interface WatchOptions extends BuildOptions {
   manual?: boolean
   library?: boolean
+  ignore?: string[]
 }
 
 export async function watchCommand(opts: WatchOptions) {
@@ -77,7 +78,7 @@ export async function watchCommand(opts: WatchOptions) {
 
     api?.setStatus('building')
     api?.setChangedFiles(changes)
-    log('Building...', changes.map(c => c.path).join(', '))
+    log('Building...', changes.map(c => './' + relative(opts.path, c.path).replace(/\\/g, '/')).join(', '))
 
     const libChanges = opts.library && Object.hasOwn(globalThis, 'Bun') ? changes.filter((change) => !change.path.includes('test/')) : []
 
@@ -283,8 +284,14 @@ export async function watchCommand(opts: WatchOptions) {
       }
 
       if (opts.manual) {
-        // In manual mode, accumulate changes and wait for user input
-        pendingChanges = [...pendingChanges, ...changesToProcess]
+        // In manual mode, accumulate changes and wait for user input (deduplicated)
+        const existingPaths = new Set(pendingChanges.map(c => c.path))
+        for (const change of changesToProcess) {
+          if (!existingPaths.has(change.path)) {
+            pendingChanges.push(change)
+            existingPaths.add(change.path)
+          }
+        }
         getWatchUIAPI()?.setStatus('pending')
         getWatchUIAPI()?.setChangedFiles(pendingChanges)
       } else {
@@ -300,6 +307,10 @@ export async function watchCommand(opts: WatchOptions) {
   // Initial build
   await onFilesChange([])
 
+  const defaultIgnore = ['**/.git/**/*', '**/.sandstone/**/*', '**/resources/cache/**/*', '**/*tmp*', '**/*.swp', 'lib/**/*']
+  const cliIgnore = (opts.ignore ?? []).flatMap(p => p.split(',').filter(Boolean))
+  const ignorePatterns = [...defaultIgnore, ...cliIgnore]
+
   subscription = await subscribe(
     opts.path,
     (err, events) => {
@@ -310,7 +321,7 @@ export async function watchCommand(opts: WatchOptions) {
       handleEvents(events)
     },
     {
-      ignore: ['**/.git/**/*', '**/.sandstone/**/*', '**/resources/cache/**/*', '**/*tmp*', 'lib/**/*'],
+      ignore: ignorePatterns,
     }
   )
 

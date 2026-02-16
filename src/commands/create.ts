@@ -7,6 +7,7 @@ import * as child from 'child_process'
 import { nanoid } from 'nanoid'
 import { confirm, select, input } from '@inquirer/prompts'
 
+import { CLI_VERSION } from '../version.js'
 import { capitalize, getWorldsList, hasBun, hasPnpm, hasYarn } from '../utils.js'
 
 type CreateOptions = {
@@ -42,7 +43,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   const sv = (v: string) => new SemVer(v)
 
-  const versions = [[sv('1.0.0-beta.1'), sv('2.0.8')]] as const
+  const versions = [[sv('1.0.0-beta.1'), sv(CLI_VERSION)]] as const
 
   const version = await select({
     message: 'Which version of Sandstone do you want to use? These are the only supported versions for new projects.',

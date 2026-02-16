@@ -1,71 +1,65 @@
 #!/usr/bin/env bun
 import { Argument, Command } from 'commander'
 import figlet from 'figlet'
+
+import { CLI_VERSION } from './version.js'
 import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand } from './commands/index.js'
-import { BuildDeclares } from './shared.js'
+import { BuildOptions } from './shared.js'
 
 const commander = new Command()
 
 console.log(figlet.textSync('Sandstone'));
 
 const CLI = commander
-  .version('2.0.8', '-v, --version')
+  .version(CLI_VERSION, '-v, --version')
   .description('The CLI for Sandstone - the minecraft pack creation library.')
 
-const build = CLI
+CLI
   .command('build')
   .description('Build the pack(s). ⛏')
-
-build.option.apply(build, BuildDeclares.dry)
-  .option.apply(build, BuildDeclares.verbose)
-  .option.apply(build, BuildDeclares.root)
-  .option.apply(build, BuildDeclares.fullTrace)
-  .option.apply(build, BuildDeclares.strictErrors)
-  .option.apply(build, BuildDeclares.production)
-
-  .option.apply(build, BuildDeclares.path)
-  .option.apply(build, BuildDeclares.name)
-  .option.apply(build, BuildDeclares.namespace)
-  .option.apply(build, BuildDeclares.world)
-  .option.apply(build, BuildDeclares.clientPath)
-  .option.apply(build, BuildDeclares.serverPath)
-
-  .option.apply(build, BuildDeclares.enableSymlinks)
+  .addOption(BuildOptions.get('dry'))
+  .addOption(BuildOptions.get('verbose'))
+  .addOption(BuildOptions.get('root'))
+  .addOption(BuildOptions.get('fullTrace'))
+  .addOption(BuildOptions.get('strictErrors'))
+  .addOption(BuildOptions.get('production'))
+  .addOption(BuildOptions.get('path'))
+  .addOption(BuildOptions.get('name'))
+  .addOption(BuildOptions.get('namespace'))
+  .addOption(BuildOptions.get('world'))
+  .addOption(BuildOptions.get('clientPath'))
+  .addOption(BuildOptions.get('serverPath'))
   .action(buildCommand)
 
-const watch = CLI
+CLI
   .command('watch')
   .description('Build the packs, and rebuild them on file change. ⛏')
+  .addOption(BuildOptions.get('dry'))
+  .addOption(BuildOptions.get('verbose'))
+  .addOption(BuildOptions.get('root'))
+  .addOption(BuildOptions.get('fullTrace'))
+  .addOption(BuildOptions.get('strictErrors'))
+  .addOption(BuildOptions.get('path'))
+  .addOption(BuildOptions.get('name'))
+  .addOption(BuildOptions.get('namespace'))
+  .addOption(BuildOptions.get('world'))
+  .addOption(BuildOptions.get('clientPath'))
+  .addOption(BuildOptions.get('serverPath'))
+  .addOption(BuildOptions.get('library'))
+  .addOption(BuildOptions.get('manual'))
+  .addOption(BuildOptions.get('ignore'))
   .action(watchCommand)
 
-watch.option.apply(watch, BuildDeclares.dry)
-  .option.apply(watch, BuildDeclares.verbose)
-  .option.apply(watch, BuildDeclares.root)
-  .option.apply(watch, BuildDeclares.fullTrace)
-  .option.apply(watch, BuildDeclares.strictErrors)
-
-  .option.apply(watch, BuildDeclares.path)
-  .option.apply(watch, BuildDeclares.name)
-  .option.apply(watch, BuildDeclares.namespace)
-  .option.apply(watch, BuildDeclares.world)
-  .option.apply(watch, BuildDeclares.clientPath)
-  .option.apply(watch, BuildDeclares.serverPath)
-
-  .option.apply(watch, BuildDeclares.library)
-  .option.apply(watch, BuildDeclares.manual)
-  .option.apply(watch, BuildDeclares.enableSymlinks)
-
-const create = CLI
+CLI
   .command('create')
   .description('Create a new Sandstone project. ⛏')
+  .addOption(BuildOptions.get('name'))
+  .addOption(BuildOptions.get('namespace'))
+  .addOption(BuildOptions.get('world'))
+  .addOption(BuildOptions.get('clientPath'))
+  .addOption(BuildOptions.get('serverPath'))
   .action(createCommand)
   .addArgument(new Argument('<projectName>', 'Not the name of the output pack'))
-
-create.option.apply(create, BuildDeclares.name)
-  .option.apply(create, BuildDeclares.namespace)
-  .option.apply(create, BuildDeclares.world)
-  .option.apply(create, BuildDeclares.clientPath)
-  .option.apply(create, BuildDeclares.serverPath)
 
 const install = CLI
   .command('install')

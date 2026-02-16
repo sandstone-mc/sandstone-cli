@@ -146,6 +146,8 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
     setBuildResultState(result)
     if (result.success) {
       setStatusState(manual ? 'pending' : 'watching')
+      // Clear changed files so contentMode switches back to 'logs'
+      setChangedFilesState([])
     } else {
       setStatusState('error')
     }

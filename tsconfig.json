@@ -1,9 +1,11 @@
 {
   "compilerOptions": {
-    "declaration": true,
     "module": "NodeNext",
-    "outDir": "lib",
-    "rootDir": "src",
+    "noEmit": true,
+    "paths": {
+      "*": ["./*"],
+      "react-devtools-core": ["./src/stubs/react-devtools-core.js"]
+    },
     "strict": true,
     "target": "ES2024",
     "lib": [

@@ -177,7 +177,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   exec(`git checkout ${projectType}-${version[0]}`)
 
-  await fs.rm('.git', { force: true, recursive: true })
+  await fs.rm(path.join(projectPath, '.git'), { force: true, recursive: true })
 
   exec(`${packageManager} install`)
 

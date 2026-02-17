@@ -56,7 +56,7 @@ export async function watchCommand(opts: WatchOptions) {
       // Since this isn't SIGINT, its fine that we don't await this
       exit: () => exit(subscription, unmountInk)
     }),
-    { patchConsole: false }
+    { patchConsole: false, exitOnCtrlC: false }
   )
   unmountInk = unmount
 

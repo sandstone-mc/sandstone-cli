@@ -65,7 +65,6 @@ export type BuildOptions = {
   dry?: boolean
   verbose?: boolean
   root?: boolean
-  fullTrace?: boolean
   strictErrors?: boolean
   production?: boolean
 
@@ -385,11 +384,12 @@ async function _buildProject(
       }
     }
   } catch (e: any) {
-    const errorMsg = `While loading "${entrypointPath}":\n${cliOptions.fullTrace ? e : (e.message || e)}`
-    if (!silent) {
+    const errorMsg = `While loading "${entrypointPath}":\n${e.stack || e.message || e}`
+    if (silent) {
+      log('BuildError:', errorMsg)
+    } else {
       console.error(chalk.bgRed.white('BuildError') + chalk.gray(':'), errorMsg)
     }
-    log('BuildError:', errorMsg)
     throw e  // Re-throw for buildCommand to handle
   }
 
@@ -839,19 +839,15 @@ export async function buildCommand(opts: BuildOptions, _folder?: string, silent 
   } catch (err: any) {
     const errorMessage = err.message || String(err)
     if (!silent) {
-      console.error(chalk.red('Build failed:'), errorMessage)
-      if (opts.fullTrace) {
-        console.error(err)
-      }
+      // Error already logged by _buildProject with highlighting
+      process.exit(1)
     }
     log('Build failed:', errorMessage)
-    if (silent) {
-      return {
-        success: false,
-        error: opts.fullTrace ? String(err) : errorMessage,
-        resourceCounts: { functions: 0, other: 0 },
-        timestamp: Date.now(),
-      }
+    return {
+      success: false,
+      error: err.stack || errorMessage,
+      resourceCounts: { functions: 0, other: 0 },
+      timestamp: Date.now(),
     }
   }
 }

@@ -28,7 +28,6 @@ const options = {
   dry: opt('-d, --dry', 'Do not save the pack. Mostly useful with `verbose`.'),
   verbose: opt('-f, --verbose', 'Fully log all resulting resources: functions, advancements...'),
   root: opt('-r, --root', 'Save the pack & resource pack in the .minecraft/datapacks & .minecraft/resource_packs folders. Override the value specified in the configuration file.'),
-  fullTrace: opt('-t, --full-trace', 'Show the full stack trace on errors.'),
   strictErrors: opt('-e, --strict-errors', 'Stop pack compilation on type errors.'),
   production: opt('-p, --production', 'Runs Sandstone in production mode. This sets process.env.SANDSTONE_ENV to "production".'),
 

@@ -176,7 +176,7 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
   }, [isError, isManualPending, buildResult?.error, logLines.length])
 
   useInput((input, key) => {
-    if (input === 'q') {
+    if (input === 'q' || (key.ctrl && input === 'c')) {
       exit!()
     }
 

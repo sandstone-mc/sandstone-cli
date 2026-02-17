@@ -9,8 +9,8 @@
     "create-sandstone": "./lib/create.js"
   },
   "scripts": {
-    "build": "bun scripts/version.ts && bun build src/index.ts --outfile=lib/index.js --target=bun --external=@parcel/watcher --external=figlet --external=@inquirer/prompts && bun build src/create.ts --outfile=lib/create.js --target=bun --external=@parcel/watcher --external=figlet --external=@inquirer/prompts",
-    "dev:build": "tsc && bun run build"
+    "bundle": "bun scripts/version.ts && bun build src/index.ts --outfile=lib/index.js --target=bun --external=@parcel/watcher --external=figlet --external=@inquirer/prompts && bun build src/create.ts --outfile=lib/create.js --target=bun --external=@parcel/watcher --external=figlet --external=@inquirer/prompts",
+    "dev:build": "tsc && bun bundle"
   },
   "repository": {
     "type": "git",

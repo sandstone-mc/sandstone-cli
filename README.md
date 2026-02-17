@@ -9,23 +9,18 @@ The CLI for Sandstone - the minecraft pack creation library.
 
 <!-- toc -->
 * [Usage](#usage)
-* [Commands](#commands)
 <!-- tocstop -->
 # Usage
 <!-- usage -->
 ```sh-session
-$ npm install -g sandstone-cli
+$ bun i -g sandstone-cli
 $ sand COMMAND
 running command...
-$ sand (--version)
-sandstone-cli/0.6.7 win32-x64 node-v18.15.0
+$ sand -v
+2.1.1
 $ sand --help [COMMAND]
 USAGE
   $ sand COMMAND
 ...
 ```
 <!-- usagestop -->
-# Commands
-<!-- commands -->
-
-<!-- commandsstop -->

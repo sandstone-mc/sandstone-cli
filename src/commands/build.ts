@@ -438,6 +438,22 @@ async function _buildProject(
   // Run beforeSave script
   await scripts?.beforeSave?.()
 
+  // Auto-register pack types if existing resources are present
+  // This ensures handleResources() is called even when no resources are created programmatically
+  const resourcesFolder = path.join(folder, 'resources')
+  if (await fs.pathExists(path.join(resourcesFolder, 'resourcepack'))) {
+    const files = await fs.readdir(path.join(resourcesFolder, 'resourcepack'))
+    if (files.length > 0) {
+      sandstonePack.resourcePack()
+    }
+  }
+  if (await fs.pathExists(path.join(resourcesFolder, 'datapack'))) {
+    const files = await fs.readdir(path.join(resourcesFolder, 'datapack'))
+    if (files.length > 0) {
+      sandstonePack.dataPack()
+    }
+  }
+
   // File exclusion setup
   const excludeOption = resources?.exclude
   const fileExclusions = excludeOption

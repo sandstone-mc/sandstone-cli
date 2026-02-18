@@ -4,6 +4,7 @@
 /dist
 /lib
 /tmp
+/.test-runs
 node_modules
 cli-old
 

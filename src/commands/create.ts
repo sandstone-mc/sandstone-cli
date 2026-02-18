@@ -9,6 +9,7 @@ import { confirm, select, input } from '@inquirer/prompts'
 
 import { CLI_VERSION } from '../version.js'
 import { capitalize, getWorldsList, hasBun, hasPnpm, hasYarn } from '../utils.js'
+import { discoverAllInstances, type MinecraftInstance } from '../launchers/index.js'
 
 type CreateOptions = {
   // Flags
@@ -29,6 +30,92 @@ function toJson(obj: any, pretty = false): string {
     compact: !pretty,
     maxArrayLength: Number(Infinity),
   })
+}
+
+/** Parse Minecraft version from metadata (not from name) */
+function parseVersion(version: string | undefined): number[] | null {
+  if (!version) return null
+  // Match version patterns like 1.21.6, 1.20
+  const match = version.match(/^(\d+)\.(\d+)(?:\.(\d+))?/)
+  if (match) {
+    return [parseInt(match[1]), parseInt(match[2]), parseInt(match[3] || '0')]
+  }
+  // Snapshot format like 24w12a
+  const snapshotMatch = version.match(/^(\d+)w(\d+)/)
+  if (snapshotMatch) {
+    return [1, parseInt(snapshotMatch[1]), parseInt(snapshotMatch[2])]
+  }
+  return null
+}
+
+/** Compare two version arrays (descending - newer first) */
+function compareVersions(a: number[] | null, b: number[] | null): number {
+  if (!a && !b) return 0
+  if (!a) return 1  // null versions go to end
+  if (!b) return -1
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return b[i] - a[i]  // descending
+  }
+  return 0
+}
+
+/** Prompt user to select a Minecraft installation from detected instances */
+async function selectClientInstance(): Promise<string | undefined> {
+  const { instances } = await discoverAllInstances()
+
+  if (instances.length === 0) {
+    return await input({ message: 'No Minecraft installations detected. Enter path to .minecraft folder:' })
+  }
+
+  // Separate vanilla from other instances
+  const vanilla = instances.find(i => i.launcher === 'vanilla')
+  const otherInstances = instances.filter(i => i.launcher !== 'vanilla')
+
+  // Sort by version metadata (newest first), then alphabetically by name
+  otherInstances.sort((a, b) => {
+    const versionCmp = compareVersions(parseVersion(a.version), parseVersion(b.version))
+    if (versionCmp !== 0) return versionCmp
+    return a.name.localeCompare(b.name)
+  })
+
+  type ChoiceValue = MinecraftInstance | 'none' | 'custom'
+  const choices: Array<{ name: string; value: ChoiceValue; short: string }> = []
+
+  // Add Custom and None at top
+  choices.push({ name: 'Custom path...', value: 'custom', short: 'Custom' })
+  choices.push({ name: 'None (configure later)', value: 'none', short: 'None' })
+
+  // Add Vanilla (default)
+  if (vanilla) {
+    choices.push({
+      name: `${vanilla.name} [${vanilla.launcher}]`,
+      value: vanilla,
+      short: vanilla.name,
+    })
+  }
+
+  // Add sorted instances (newest version first)
+  for (const i of otherInstances) {
+    choices.push({
+      name: `${i.name}${i.version ? ` (${i.version})` : ''} [${i.launcher}]`,
+      value: i,
+      short: i.name,
+    })
+  }
+
+  const selected = await select({
+    message: 'Select Minecraft installation:',
+    choices,
+    default: vanilla ?? 'none',  // Vanilla is default, or None if Vanilla not present
+  })
+
+  if (selected === 'none') {
+    return undefined
+  }
+  if (selected === 'custom') {
+    return await input({ message: 'Enter path to .minecraft folder:' })
+  }
+  return selected.minecraftPath
 }
 
 export async function createCommand(_project: string, opts: CreateOptions) {
@@ -125,23 +212,33 @@ export async function createCommand(_project: string, opts: CreateOptions) {
       })
 
       switch (saveChoice) {
-        case 'root':
+        case 'root': {
+          const clientPath = await selectClientInstance()
+          if (clientPath) {
+            saveOptions.clientPath = clientPath
+          }
           saveOptions.root = true
           break
-        case 'world':
+        }
+        case 'world': {
+          const clientPath = await selectClientInstance()
+          if (clientPath) {
+            saveOptions.clientPath = clientPath
+          }
           const world = await select({
             message: 'What world do you want to save the packs in? >',
             choices: getWorldsList(saveOptions.clientPath),
           })
           saveOptions.world = world
           break
-        case 'server-path':
+        }
+        case 'server-path': {
           const serverPath = await input({
             message: 'Where is the server to save the packs in? Relative paths are accepted. >',
           })
-
           saveOptions.serverPath = serverPath
           break
+        }
         case 'none': break
       }
     }

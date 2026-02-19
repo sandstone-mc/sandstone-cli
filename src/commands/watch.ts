@@ -4,13 +4,48 @@ import React from 'react'
 import { render } from 'ink'
 
 import { normalizePath } from '../utils.js'
-import { _buildCommand, type BuildOptions, type BuildContext, enableConsoleCapture, disableConsoleCapture } from './build.js'
+import { _buildCommand, type BuildOptions, type BuildContext } from './build/index.js'
 import { WatchUI, getWatchUIAPI } from '../ui/WatchUI.js'
-import { initLogger, log, logError, setLiveLogCallback } from '../ui/logger.js'
+import { initLogger, log, logInfo, logWarn, logError, logDebug, logTrace, setLiveLogCallback } from '../ui/logger.js'
 import type { TrackedChange, ChangeCategory } from '../ui/types.js'
 import { hot } from '@sandstone-mc/hot-hook'
 import fs from 'fs-extra'
 import { join, relative } from 'node:path'
+
+// Console capture for watch mode - wraps console to redirect output to our log file
+const originalConsole = globalThis.console
+let consoleWrapped = false
+
+function enableConsoleCapture() {
+  if (consoleWrapped) return
+  consoleWrapped = true
+
+  ;(globalThis.console as any).log = (...args: any[]) => log(...args)
+  ;(globalThis.console as any).info = (...args: any[]) => logInfo(...args)
+  ;(globalThis.console as any).warn = (...args: any[]) => logWarn(...args)
+  ;(globalThis.console as any).error = (...args: any[]) => logError(args.join(' '))
+  ;(globalThis.console as any).debug = (...args: any[]) => logDebug(...args)
+
+  ;(globalThis.console as any).trace = (...args: any[]) => {
+    const traceObj = { stack: '' }
+    Error.captureStackTrace(traceObj, globalThis.console.trace)
+    const cleanedStack = traceObj.stack
+      .replace(/^Error\n/, '')
+      .replace(/\?hot-hook=\d+/g, '')
+      .replace(/file:\/\/\/?/g, '')
+    logTrace(...args, '\n' + cleanedStack)
+  }
+}
+
+function disableConsoleCapture() {
+  if (!consoleWrapped) return
+  consoleWrapped = false
+
+  const methodsToRestore = ['log', 'info', 'warn', 'error', 'debug', 'trace'] as const
+  for (const method of methodsToRestore) {
+    ;(globalThis.console as any)[method] = originalConsole[method].bind(originalConsole)
+  }
+}
 
 export interface WatchOptions extends BuildOptions {
   manual?: boolean

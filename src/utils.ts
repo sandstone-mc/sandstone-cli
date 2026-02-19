@@ -1,8 +1,14 @@
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import crypto from 'crypto'
 import { execSync } from 'child_process'
 import chalk from 'chalk-template'
+
+/** Hash a string or buffer using MD5 */
+export function hash(data: string | Buffer): string {
+  return crypto.createHash('md5').update(data).digest('hex')
+}
 
 /** Normalize a path to use forward slashes */
 export const normalizePath = (p: string) => p.replaceAll('\\', '/')

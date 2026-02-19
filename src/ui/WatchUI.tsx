@@ -182,9 +182,17 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
 
     const maxScroll = getMaxScroll()
     if (key.upArrow) {
-      setScrollOffset(prev => Math.min(maxScroll, prev + 1))
+      if (isError) {
+        setScrollOffset(prev => Math.max(0, prev - 1))
+      } else {
+        setScrollOffset(prev => Math.min(maxScroll, prev + 1))
+      }
     } else if (key.downArrow) {
-      setScrollOffset(prev => Math.max(0, prev - 1))
+      if (isError) {
+        setScrollOffset(prev => Math.min(maxScroll, prev + 1))
+      } else {
+        setScrollOffset(prev => Math.max(0, prev - 1))
+      }
     }
 
     if (manual && status === 'pending') {

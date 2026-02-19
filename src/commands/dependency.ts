@@ -1,7 +1,7 @@
 import fs from 'fs-extra'
 import path from 'path'
 import { exec } from 'child_process'
-import { buildCommand } from './build.js'
+import { buildCommand } from './build/index.js'
 import { checkbox } from '@inquirer/prompts'
 
 const _fetch = import('node-fetch')

@@ -1,4 +1,4 @@
-export { buildCommand } from './build.js'
+export { buildCommand } from './build/index.js'
 export { createCommand } from './create.js'
 export { installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand } from './dependency.js'
 export { watchCommand, type WatchOptions } from './watch.js'

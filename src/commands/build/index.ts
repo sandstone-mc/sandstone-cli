@@ -320,7 +320,7 @@ async function _buildProject(
     dry: cliOptions.dry ?? false,
     verbose: cliOptions.verbose ?? false,
 
-    // TODO !: Remove this type cast after beta 2
+    // TODO: Implement `contentSummary` and remove this typecast
     fileHandler: (saveOptions.customFileHandler as ((relativePath: string, content: any) => Promise<void>) | undefined) ??
       (async (relativePath: string, content: any) => {
         let pathPass = true
@@ -426,16 +426,36 @@ async function _buildProject(
 
   // Clean up old files and directories
   if (cliOptions.dry !== true) {
+    const deletedDirs = new Set<string>()
+
     for (const file of Object.keys(oldCache.files)) {
       if (!(file in newCache.files)) {
-        await fs.rm(path.join(outputFolder, file))
+        // Skip files whose parent directory was already deleted
+        const fileDir = path.dirname(file)
+        if (deletedDirs.has(fileDir)) continue
+        let skipFile = false
+        for (const deletedDir of deletedDirs) {
+          if (fileDir.startsWith(deletedDir + path.sep)) {
+            skipFile = true
+            break
+          }
+        }
+        if (skipFile) continue
+
+        try {
+          await fs.rm(path.join(outputFolder, file))
+        } catch (e: any) {
+          if (e.code !== 'ENOENT') throw e
+          log(chalk.yellow('Warning:'), `Cached file not found during cleanup: ${file}`)
+        }
 
         let dir: string | undefined = undefined
-        for (const segment of split(new RegExp(RegExp.escape(path.sep)), path.dirname(file))) {
+        for (const segment of split(new RegExp(RegExp.escape(path.sep)), fileDir)) {
           dir = dir === undefined ? segment : path.join(dir, segment)
 
           if (!newDirs.has(dir)) {
             await fs.rm(path.join(outputFolder, dir), { force: true, recursive: true })
+            deletedDirs.add(dir)
             break
           }
         }

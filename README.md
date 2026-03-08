@@ -24,3 +24,9 @@ USAGE
 ...
 ```
 <!-- usagestop -->
+
+# Development
+```sh-session
+$ bun dev:build
+$ bun link
+```

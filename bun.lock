@@ -37,6 +37,7 @@
     },
   },
   "trustedDependencies": [
+    "node-pty",
     "@parcel/watcher",
   ],
   "packages": {

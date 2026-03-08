@@ -73,6 +73,7 @@
     "typescript": "^5.2.2"
   },
   "trustedDependencies": [
-    "@parcel/watcher"
+    "@parcel/watcher",
+    "node-pty"
   ]
 }

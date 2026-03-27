@@ -173,7 +173,7 @@ export async function loadBuildContext(
     }
   }
 
-  const sandstoneUrl = pathToFileURL(path.join(folder, 'node_modules', 'sandstone', 'dist', 'index.js'))
+  const sandstoneUrl = pathToFileURL(path.join(folder, 'node_modules', 'sandstone', 'dist', 'exports', 'index.js'))
   /* @ts-ignore */
   const { createSandstonePack, resetSandstonePack } = (await import(sandstoneUrl)) as typeof sandstone
 

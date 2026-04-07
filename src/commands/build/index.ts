@@ -7,6 +7,7 @@ import { split } from 'obliterator'
 import type { BuildResult, ResourceCounts } from '../../ui/types.js'
 import { log, initLoggerNoFile, setSilent } from '../../ui/logger.js'
 import { hash } from '../../utils.js'
+import { resolveStackTrace } from '../../utils/source-map.js'
 
 import {
   type SandstoneCache,
@@ -512,7 +513,10 @@ export async function _buildCommand(
     const stackLines = cleanedStack.split('\n')
     const traceStart = stackLines.findIndex(line => line.trimStart().startsWith('at '))
     const stackTrace = traceStart >= 0 ? stackLines.slice(traceStart).join('\n') : ''
-    const formattedError = stackTrace ? `${errorMessage}\n${stackTrace}` : errorMessage
+
+    // Resolve source maps for better error locations
+    const resolvedStackTrace = stackTrace ? await resolveStackTrace(stackTrace) : ''
+    const formattedError = resolvedStackTrace ? `${errorMessage}\n${resolvedStackTrace}` : errorMessage
     return {
       success: false,
       error: formattedError,
@@ -553,7 +557,10 @@ export async function buildCommand(opts: BuildOptions, _folder?: string, silent 
     const stackLines = cleanedStack.split('\n')
     const traceStart = stackLines.findIndex(line => line.trimStart().startsWith('at '))
     const stackTrace = traceStart >= 0 ? stackLines.slice(traceStart).join('\n') : ''
-    const formattedError = stackTrace ? `${errorMessage}\n${stackTrace}` : errorMessage
+
+    // Resolve source maps for better error locations
+    const resolvedStackTrace = stackTrace ? await resolveStackTrace(stackTrace) : ''
+    const formattedError = resolvedStackTrace ? `${errorMessage}\n${resolvedStackTrace}` : errorMessage
     if (!silent) {
       log(chalk.bgRed.white('BuildError') + chalk.gray(':'), formattedError)
       process.exit(1)

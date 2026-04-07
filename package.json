@@ -9,7 +9,7 @@
     "create-sandstone": "./lib/create.js"
   },
   "scripts": {
-    "bundle": "bun scripts/version.ts && bun build src/index.ts --outfile=lib/index.js --target=bun --external=@parcel/watcher --external=figlet --external=@inquirer/prompts && bun build src/create.ts --outfile=lib/create.js --target=bun --external=@parcel/watcher --external=figlet --external=@inquirer/prompts",
+    "bundle": "bun scripts/version.ts && bun build src/index.ts --outdir=lib --sourcemap=external --target=bun --external=@parcel/watcher --external=figlet --external=@inquirer/prompts && bun build src/create.ts --outdir=lib --sourcemap=external --target=bun --external=@parcel/watcher --external=figlet --external=@inquirer/prompts",
     "dev:build": "tsc && bun bundle",
     "test:harness": "npx tsx scripts/test-harness.ts"
   },
@@ -59,7 +59,8 @@
     "node-fetch": "^3.3.2",
     "obliterator": "^2.0.5",
     "react": "^19.2.4",
-    "semver": "^7.5.4"
+    "semver": "^7.5.4",
+    "source-map-js": "^1.2.1"
   },
   "devDependencies": {
     "@types/adm-zip": "^0.5.2",

@@ -101,9 +101,9 @@ export async function createSymlink(
 
   const comment = `# Sandstone Pack: ${packName}\n`
   try {
-    const currentlyAllowed = await fs.readFile(allowedList, 'utf-8')
+    const currentlyAllowed = (await fs.readFile(allowedList, 'utf-8')).replace(/\r/g, '')
 
-    if (!currentlyAllowed.includes(allowPath)) {
+    if (currentlyAllowed.match(new RegExp(`^${allowPath}$`, 'm')) === null) {
       log('[symlink] Adding workspace to allowed_symlinks.txt. If the game is running please restart it.')
       await fs.writeFile(allowedList, `${currentlyAllowed}\n#\n${comment}${allowPath}`)
     } else {

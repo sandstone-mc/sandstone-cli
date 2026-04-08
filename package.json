@@ -1,6 +1,6 @@
 {
   "name": "sandstone-cli",
-  "version": "2.3.2",
+  "version": "2.4.0",
   "description": "The CLI for Sandstone - the minecraft pack creation library.",
   "type": "module",
   "exports": "./lib/index.js",
@@ -70,7 +70,7 @@
     "@types/semver": "^7.5.3",
     "bun-types": "^1.3.9",
     "node-pty": "^1.1.0",
-    "sandstone": "^1.0.0-beta.3",
+    "sandstone": "^1.0.0-beta.4",
     "typescript": "^5.2.2"
   },
   "trustedDependencies": [

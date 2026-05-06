@@ -88,13 +88,14 @@ async function logWorkerMain(level: string | false, ...args: unknown[]) {
   const chunks: (string | Buffer | Uint8Array)[] = []
 
   // Timestamp and level prefix
-  chunks.push(`[${new Date().toISOString()}]${level !== false ? ` [${level}]` : ''} `)
+  const prefix = `[${new Date().toISOString()}]${level !== false ? ` [${level}]` : ''} `
+  chunks.push(prefix)
 
   // Process each argument
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
     if (typeof arg === 'string') {
-      chunks.push(stripVTControlCharacters(arg))
+      chunks.push(stripVTControlCharacters(arg).replaceAll('\n', `\n${' '.repeat(prefix.length)}`))
     } else if (Buffer.isBuffer(arg) || arg instanceof Uint8Array) {
       chunks.push(arg)
     } else if (arg instanceof ArrayBuffer) {
@@ -103,7 +104,7 @@ async function logWorkerMain(level: string | false, ...args: unknown[]) {
       chunks.push(new Uint8Array(await arg.arrayBuffer()))
     } else {
       // Use util.format for objects, numbers, etc.
-      chunks.push(format('%O', arg))
+      chunks.push(stripVTControlCharacters(format('%O', arg)).replaceAll('\n', `\n${' '.repeat(prefix.length)}`))
     }
     // Add space between args (but not after last)
     if (i < args.length - 1) {

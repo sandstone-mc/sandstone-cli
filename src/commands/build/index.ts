@@ -515,7 +515,7 @@ export async function _buildCommand(
     const stackTrace = traceStart >= 0 ? stackLines.slice(traceStart).join('\n') : ''
 
     // Resolve source maps for better error locations
-    const resolvedStackTrace = stackTrace ? await resolveStackTrace(stackTrace) : ''
+    const resolvedStackTrace = stackTrace ? resolveStackTrace(stackTrace) : ''
     const formattedError = resolvedStackTrace ? `${errorMessage}\n${resolvedStackTrace}` : errorMessage
     return {
       success: false,
@@ -559,7 +559,7 @@ export async function buildCommand(opts: BuildOptions, _folder?: string, silent 
     const stackTrace = traceStart >= 0 ? stackLines.slice(traceStart).join('\n') : ''
 
     // Resolve source maps for better error locations
-    const resolvedStackTrace = stackTrace ? await resolveStackTrace(stackTrace) : ''
+    const resolvedStackTrace = stackTrace ? resolveStackTrace(stackTrace) : ''
     const formattedError = resolvedStackTrace ? `${errorMessage}\n${resolvedStackTrace}` : errorMessage
     if (!silent) {
       log(chalk.bgRed.white('BuildError') + chalk.gray(':'), formattedError)

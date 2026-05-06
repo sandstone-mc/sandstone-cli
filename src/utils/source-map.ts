@@ -6,17 +6,17 @@
  */
 
 import { SourceMapConsumer, type RawSourceMap } from 'source-map-js'
-import { readFile } from 'fs/promises'
-import { dirname, join, resolve } from 'path'
+import { readFileSync } from 'fs'
+import { dirname, resolve } from 'path'
 
 // Cache for loaded source map consumers
 const sourceMapCache = new Map<string, SourceMapConsumer | null>()
 
 /**
- * Try to load a source map for a given JS file.
+ * Synchronously load a source map for a given JS file.
  * Returns null if no source map is found or it's invalid.
  */
-async function loadSourceMap(jsFilePath: string): Promise<SourceMapConsumer | null> {
+function loadSourceMapSync(jsFilePath: string): SourceMapConsumer | null {
   // Check cache first
   if (sourceMapCache.has(jsFilePath)) {
     return sourceMapCache.get(jsFilePath) ?? null
@@ -24,7 +24,7 @@ async function loadSourceMap(jsFilePath: string): Promise<SourceMapConsumer | nu
 
   try {
     // Read the JS file to find the sourceMappingURL
-    const jsContent = await readFile(jsFilePath, 'utf8')
+    const jsContent = readFileSync(jsFilePath, 'utf8')
 
     // Look for sourceMappingURL comment
     const match = jsContent.match(/\/\/[#@]\s*sourceMappingURL=(.+)$/m)
@@ -35,6 +35,7 @@ async function loadSourceMap(jsFilePath: string): Promise<SourceMapConsumer | nu
 
     const sourceMappingURL = match[1].trim()
     let mapPath: string
+    let mapContent: string
 
     if (sourceMappingURL.startsWith('data:')) {
       // Inline source map (base64 encoded)
@@ -43,17 +44,13 @@ async function loadSourceMap(jsFilePath: string): Promise<SourceMapConsumer | nu
         sourceMapCache.set(jsFilePath, null)
         return null
       }
-      const mapContent = Buffer.from(base64Match[1], 'base64').toString('utf8')
-      const rawMap: RawSourceMap = JSON.parse(mapContent)
-      const consumer = new SourceMapConsumer(rawMap)
-      sourceMapCache.set(jsFilePath, consumer)
-      return consumer
+      mapContent = Buffer.from(base64Match[1], 'base64').toString('utf8')
     } else {
       // External source map file
       mapPath = resolve(dirname(jsFilePath), sourceMappingURL)
+      mapContent = readFileSync(mapPath, 'utf8')
     }
 
-    const mapContent = await readFile(mapPath, 'utf8')
     const rawMap: RawSourceMap = JSON.parse(mapContent)
     const consumer = new SourceMapConsumer(rawMap)
     sourceMapCache.set(jsFilePath, consumer)
@@ -117,9 +114,9 @@ function parseStackLine(line: string): StackFrame {
 }
 
 /**
- * Resolve a stack frame using source maps.
+ * Resolve a stack frame using source maps (synchronous).
  */
-async function resolveStackFrame(frame: StackFrame): Promise<string> {
+function resolveStackFrame(frame: StackFrame): string {
   if (!frame.filePath || !frame.line || !frame.column) {
     return frame.original
   }
@@ -130,7 +127,7 @@ async function resolveStackFrame(frame: StackFrame): Promise<string> {
   }
 
   try {
-    const consumer = await loadSourceMap(frame.filePath)
+    const consumer = loadSourceMapSync(frame.filePath)
     if (!consumer) {
       return frame.original
     }
@@ -164,10 +161,10 @@ async function resolveStackFrame(frame: StackFrame): Promise<string> {
 }
 
 /**
- * Resolve source maps in a stack trace string.
+ * Resolve source maps in a stack trace string (synchronous).
  * Returns the stack trace with original source locations where possible.
  */
-export async function resolveStackTrace(stack: string): Promise<string> {
+export function resolveStackTrace(stack: string): string {
   const lines = stack.split('\n')
   const resolvedLines: string[] = []
 
@@ -175,7 +172,7 @@ export async function resolveStackTrace(stack: string): Promise<string> {
     // Only process lines that look like stack frames
     if (line.trimStart().startsWith('at ')) {
       const frame = parseStackLine(line)
-      const resolved = await resolveStackFrame(frame)
+      const resolved = resolveStackFrame(frame)
       resolvedLines.push(resolved)
     } else {
       resolvedLines.push(line)

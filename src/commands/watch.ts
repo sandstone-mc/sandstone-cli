@@ -9,6 +9,7 @@ import { WatchUI, getWatchUIAPI } from '../ui/WatchUI.js'
 import { initLogger, log, logInfo, logWarn, logError, logDebug, logTrace, setLiveLogCallback } from '../ui/logger.js'
 import type { TrackedChange, ChangeCategory } from '../ui/types.js'
 import { hot } from '@sandstone-mc/hot-hook'
+import { resolveStackTrace } from '../utils/source-map.js'
 import fs from 'fs-extra'
 import { join, relative } from 'node:path'
 
@@ -33,7 +34,14 @@ function enableConsoleCapture() {
       .replace(/^Error\n/, '')
       .replace(/\?hot-hook=\d+/g, '')
       .replace(/file:\/\/\/?/g, '')
-    logTrace(...args, '\n' + cleanedStack)
+
+    // Resolve source maps for stack frames
+    const stackLines = cleanedStack.split('\n')
+    const traceStart = stackLines.findIndex(line => line.trimStart().startsWith('at '))
+    const stackTrace = traceStart >= 0 ? stackLines.slice(traceStart).join('\n') : ''
+    const resolvedStack = stackTrace ? resolveStackTrace(stackTrace) : cleanedStack
+
+    logTrace(...args, '\n' + resolvedStack)
   }
 }
 

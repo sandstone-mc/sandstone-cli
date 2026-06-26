@@ -102,8 +102,10 @@ export async function createSymlink(
   let rawPath = path.resolve(path.join(folder))
   let sep: string = path.sep
   if (os.platform() === 'win32') {
+    // Minecraft's glob syntax uses `\` as the escape character, so each
+    // separator in the workspace path must be doubled.
     sep = `${path.sep}${path.sep}`
-    rawPath = rawPath.replace(path.sep, sep)
+    rawPath = rawPath.replaceAll(path.sep, sep)
   }
   const allowPath = `[glob]${rawPath}${sep}**${sep}*`
 

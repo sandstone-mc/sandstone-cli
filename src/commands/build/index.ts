@@ -393,6 +393,28 @@ async function _buildProject(
         ? getExportPath(packType, serverPath!, 'server', packName, worldName, saveOptions.exportZips)
         : undefined
 
+      // For per-child symlinking (Smithed dep zips placed individually into
+      // an existing destination directory), record the active child names
+      // per destination path so `preserveSymlink` and `createSymlink` can
+      // look them up directly. Only populated when the destination is itself
+      // an existing directory — otherwise this packType uses folder symlinking
+      // and the per-child list would just be noise.
+      const isDir = (dest: string | undefined) =>
+        !!dest && fs.pathExistsSync(dest) && fs.lstatSync(dest).isDirectory()
+      const clientIsDir = isDir(clientDest)
+      const serverIsDir = isDir(serverDest)
+      if (clientIsDir || serverIsDir) {
+        const packTypePrefix = packType.type + path.sep
+        const entries = Object.keys(newCache.files)
+          .filter((k) => k.startsWith(packTypePrefix))
+          .map((k) => k.slice(packTypePrefix.length))
+        if (entries.length > 0) {
+          newCache.perChildEntries ??= {}
+          if (clientIsDir) newCache.perChildEntries[clientDest!] = entries
+          if (serverIsDir) newCache.perChildEntries[serverDest!] = entries
+        }
+      }
+
       // Preserve existing symlinks (even if no files changed)
       preserveSymlink(clientDest, oldCache, newCache)
       preserveSymlink(serverDest, oldCache, newCache)

@@ -13,6 +13,16 @@ export type SandstoneCache = {
   archives?: string[]
   canUseSymlinks?: boolean
   symlinks?: string[]
+  // For destinations that are themselves existing directories (e.g. the
+  // world's pre-existing `datapacks/` folder into which Smithed dependency
+  // zips are symlinked individually): per destination path, the names of
+  // the children currently generated for that destination by this build.
+  // Used by `preserveSymlink` to know which old per-child symlinks are still
+  // backed by a current entry, and by `createSymlink` to know which children
+  // to (re-)symlink. Keys are absolute/resolved destination paths; values
+  // are child basenames. Populated only for destinations that are themselves
+  // existing directories, so the field is absent for folder-symlink cases.
+  perChildEntries?: Record<string, string[]>
 }
 
 // Module-level symlink availability cache
@@ -114,7 +124,8 @@ export async function createSymlink(
     await fs.writeFile(allowedList, `${comment}${allowPath}`)
   }
 
-  // Check if symlink already exists
+  // Inspect what (if anything) exists at linkPath
+  let isExistingDirectory = false
   let skip = false
   let errored = false
   try {
@@ -122,6 +133,8 @@ export async function createSymlink(
     if (stats.isSymbolicLink() && await fs.readlink(linkPath) === path.resolve(targetPath)) {
       log('[symlink] Symlink already created, skipping...')
       skip = true
+    } else if (stats.isDirectory()) {
+      isExistingDirectory = true
     } else {
       errored = true
     }
@@ -129,6 +142,54 @@ export async function createSymlink(
 
   if (errored) {
     throw new Error(`Tried to add a symlink at "${linkPath}",\n encountered an existing FS entry.`)
+  }
+
+  // If linkPath already exists as a directory, symlink each active child
+  // (per `newCache.perChildEntries[packTypeName]`) into it individually,
+  // instead of replacing the directory with a symlink to targetPath.
+  if (isExistingDirectory) {
+    log(`[symlink] ${linkPath} already exists as a directory; symlinking its children individually.`)
+    // Iterate `newCache.perChildEntries[linkPath]` (populated by the build
+    // loop from `newCache.files`) rather than readdir(targetPath). The output
+    // folder on disk can still hold stale files from previous installs that
+    // haven't been garbage-collected yet; perChildEntries is the authoritative
+    // list of children the current build wants to expose.
+    const perChildEntries = newCache.perChildEntries?.[linkPath]
+
+    if (!perChildEntries || perChildEntries.length === 0) {
+      log(`[symlink] No active per-child entries for ${linkPath}; leaving existing directory untouched.`)
+      return
+    }
+
+    for (const childName of perChildEntries) {
+      const childTarget = path.join(targetPath, childName)
+      const childLink = path.join(linkPath, childName)
+
+      let childSkip = false
+      let childErrored = false
+      try {
+        const childStats = await fs.lstat(childLink)
+        if (childStats.isSymbolicLink() && await fs.readlink(childLink) === path.resolve(childTarget)) {
+          childSkip = true
+        } else {
+          childErrored = true
+        }
+      } catch {}
+
+      if (childErrored) {
+        throw new Error(`Tried to add a symlink at "${childLink}",\n encountered an existing FS entry.`)
+      }
+
+      if (!childSkip) {
+        await fs.symlink(path.resolve(childTarget), childLink)
+      }
+
+      newCache.symlinks ??= []
+      if (!newCache.symlinks.includes(childLink)) {
+        newCache.symlinks.push(childLink)
+      }
+    }
+    return
   }
 
   // Create symlink
@@ -201,7 +262,35 @@ export function preserveSymlink(
   newCache: SandstoneCache
 ) {
   if (!getSymlinksAvailable() || !symlinkPath) return
-  if (!oldCache.symlinks?.includes(symlinkPath)) return
+  if (!oldCache.symlinks) return
+
+  // Per-child case: symlinkPath is an existing directory in the destination
+  // (e.g. the world's `datapacks/` folder) and previous builds placed
+  // individual child symlinks inside it (e.g. `datapacks/player_motion.zip`).
+  // Preserve the children that are still active in this build; orphaned
+  // entries (uninstalled deps whose output files are about to be cleaned
+  // up) are left for `cleanupOldSymlinks` to unlink.
+  //
+  // Use lstatSync (not statSync) so a symlink-to-a-directory at symlinkPath
+  // is not misidentified as a directory itself; the fallback branch below
+  // handles that case (the symlink itself is in oldCache.symlinks).
+  const perChildEntries = newCache.perChildEntries?.[symlinkPath]
+  if (perChildEntries && fs.pathExistsSync(symlinkPath) && fs.lstatSync(symlinkPath).isDirectory()) {
+    const sep = path.sep
+    for (const oldSymlink of oldCache.symlinks) {
+      if (!oldSymlink.startsWith(symlinkPath + sep)) continue
+      const childName = oldSymlink.slice(symlinkPath.length + 1)
+      if (childName.includes(sep)) continue
+      if (!perChildEntries.includes(childName)) continue
+      newCache.symlinks ??= []
+      if (!newCache.symlinks.includes(oldSymlink)) {
+        newCache.symlinks.push(oldSymlink)
+      }
+    }
+    return
+  }
+
+  if (!oldCache.symlinks.includes(symlinkPath)) return
 
   newCache.symlinks ??= []
   if (!newCache.symlinks.includes(symlinkPath)) {

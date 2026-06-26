@@ -98,24 +98,45 @@ export async function processExternalResources(
       }
 
       const hashValue = hash(content + relativePath)
-      newCache.files[relativePath] = hashValue
 
-      // Track directories
-      for (let dir = path.dirname(relativePath); dir && dir !== '.'; dir = path.dirname(dir)) {
-        if (newDirs.has(dir)) {
-          break
-        } else {
-          newDirs.add(dir)
+      // If sandstonePack.save() already wrote a file at this path (e.g., a Tag generated it),
+      // the cache already holds the generated hash — leave the generated file untouched and
+      // don't overwrite it with the resources file content.
+      const generatedByPack = relativePath in newCache.files && newCache.files[relativePath] !== hashValue
+
+      if (!generatedByPack) {
+        newCache.files[relativePath] = hashValue
+
+        // Track directories
+        for (let dir = path.dirname(relativePath); dir && dir !== '.'; dir = path.dirname(dir)) {
+          if (newDirs.has(dir)) {
+            break
+          } else {
+            newDirs.add(dir)
+          }
         }
-      }
 
-      // Write if changed
-      if (oldCache.files[relativePath] !== hashValue) {
-        changedPackTypes.add(packType)
-
+        // Write if changed, or if the output file's size differs from the resources file's size.
+        // The cache alone can miss stale output when sandstonePack.save() previously wrote merged
+        // content to disk but processExternalResources then overwrote the cache entry.
         const realPath = path.join(outputFolder, relativePath)
-        await fs.ensureDir(path.dirname(realPath))
-        await fs.writeFile(realPath, content)
+        let sizeDiffers = false
+        try {
+          const existingStat = await fs.stat(realPath)
+          if (existingStat.size !== content.length) {
+            sizeDiffers = true
+          }
+        } catch {
+          // Output file doesn't exist — treat as needing a write
+          sizeDiffers = true
+        }
+
+        if (oldCache.files[relativePath] !== hashValue || sizeDiffers) {
+          changedPackTypes.add(packType)
+
+          await fs.ensureDir(path.dirname(realPath))
+          await fs.writeFile(realPath, content)
+        }
       }
     } catch {}
   }

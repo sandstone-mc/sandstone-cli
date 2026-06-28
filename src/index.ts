@@ -3,7 +3,7 @@ import { Argument, Command } from 'commander'
 import figlet from 'figlet'
 
 import { CLI_VERSION } from './version.js'
-import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand } from './commands/index.js'
+import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand, cleanCommand } from './commands/index.js'
 import { BuildOptions } from './shared.js'
 
 const commander = new Command()
@@ -47,6 +47,24 @@ CLI
   .addOption(BuildOptions.get('manual'))
   .addOption(BuildOptions.get('ignore'))
   .action(watchCommand)
+
+CLI
+  .command('clean')
+  .description('Delete all external file/symlink locations sourced from saveOptions. Needed before upgrading a world, because Mojang refuses to upgrade worlds that contain symlinks. 🧹')
+  .addHelpText('after', `
+Removes the symlinks, copied folders, and exported .zip archives that
+sandstone build placed outside of the project (e.g. inside a world's
+datapacks/ folder, in .minecraft/resourcepacks, or in a server folder).
+The next \`sand build\` will recreate them.
+
+This is necessary before upgrading a Minecraft world to a newer version:
+Mojang's world upgrade refuses to proceed while any symlink is present
+inside the world's folder, even ones pointing at the pack on disk.`)
+  .addOption(BuildOptions.get('path'))
+  .addOption(BuildOptions.get('world'))
+  .addOption(BuildOptions.get('clientPath'))
+  .addOption(BuildOptions.get('serverPath'))
+  .action(cleanCommand)
 
 CLI
   .command('create')

@@ -1,20 +1,18 @@
-import path from 'node:path'
+import path from 'path'
 import fs from 'fs-extra'
 
 import { DataPackDependencies, ResourcePackDependencies, type PackType } from 'sandstone/pack'
 
 import type { SandstoneCache } from './export.js'
 import { hash } from '../../utils.js'
+import { SandstoneConfig } from 'sandstone';
 
 export type FileExclusions = {
   generated: RegExp[] | undefined
   existing: RegExp[] | undefined
 } | false
 
-export type FileHandler = {
-  path: RegExp
-  callback: (contents: string | Buffer | Promise<Buffer>) => Promise<Buffer>
-}
+export type FileHandler = NonNullable<NonNullable<SandstoneConfig['resources']>['handle']>[number]
 
 async function walk(dir: string): Promise<string[]> {
   const files: string[] = []
@@ -108,13 +106,13 @@ export async function processExternalResources(
     if (!pathPass) continue
 
     try {
-      let content = await fs.readFile(file)
+      let content: Buffer | ArrayBuffer = await fs.readFile(file)
 
       // Apply file handlers
       if (fileHandlers) {
         for (const handler of fileHandlers) {
           if (handler.path.test(relativePath)) {
-            content = (await handler.callback(content)) as Buffer<ArrayBuffer>
+            content = (await handler.callback(content))
           }
         }
       }

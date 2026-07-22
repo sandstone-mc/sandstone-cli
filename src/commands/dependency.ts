@@ -4,8 +4,6 @@ import { exec } from 'child_process'
 import { buildCommand } from './build/index.js'
 import { checkbox } from '@inquirer/prompts'
 
-const _fetch = import('node-fetch')
-
 type LibraryManifest = {
   libraries: {
     name: string,
@@ -17,8 +15,6 @@ export async function installNativeCommand(_libraries: string[]) {
   let libraries: [string, boolean][] = _libraries.map((lib) => [lib, false])
 
   let count = libraries.length || 0
-
-  const fetch = (await _fetch).default
 
   const manifest = await (await fetch('https://raw.githubusercontent.com/sandstone-mc/sandstone-libraries/main/manifest.json')).json() as LibraryManifest
   
@@ -110,7 +106,6 @@ export async function installVanillaCommand(_libraries: string[]) {
     manifest = JSON.parse(await fs.readFile(path.resolve('./resources/smithed.json'), 'utf-8'))
   } catch (e) {}
 
-  const fetch = (await _fetch).default
   const base = 'https://api.smithed.dev/v2'
 
   const search = async (term?: string) => {

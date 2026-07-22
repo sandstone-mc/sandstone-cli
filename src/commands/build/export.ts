@@ -168,19 +168,17 @@ export async function createSymlink(
       const childLink = path.join(linkPath, childName)
 
       let childSkip = false
-      let childErrored = false
       try {
         const childStats = await fs.lstat(childLink)
         if (childStats.isSymbolicLink() && await fs.readlink(childLink) === path.resolve(childTarget)) {
           childSkip = true
         } else {
-          childErrored = true
+          // Existing entry (e.g. real file from a previous non-symlink copy)
+          // blocks the per-child symlink. Remove it before symlinking.
+          log(`[symlink] Removing existing entry at ${childLink} before symlinking.`)
+          await fs.remove(childLink)
         }
       } catch {}
-
-      if (childErrored) {
-        throw new Error(`Tried to add a symlink at "${childLink}",\n encountered an existing FS entry.`)
-      }
 
       if (!childSkip) {
         await fs.symlink(path.resolve(childTarget), childLink)
@@ -313,6 +311,12 @@ export async function exportPack(
   oldCache: SandstoneCache,
   newCache: SandstoneCache
 ) {
+  // Ensure the destination's parent directory exists. Fresh or lightly-used
+  // .minecraft installs may not yet have a global `datapacks/` or
+  // `resourcepacks/` folder, which would otherwise cause the copy/symlink
+  // below to fail with ENOENT.
+  await fs.ensureDir(path.dirname(destPath))
+
   if (packType.archiveOutput && archivedOutput && exportZips) {
     // Copy archive
     const archivePath = path.join(outputFolder, 'archives', `${packName}_${packType.type}.zip`)

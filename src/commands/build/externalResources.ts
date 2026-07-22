@@ -1,6 +1,8 @@
 import path from 'node:path'
 import fs from 'fs-extra'
 
+import { DataPackDependencies, ResourcePackDependencies, type PackType } from 'sandstone/pack'
+
 import type { SandstoneCache } from './export.js'
 import { hash } from '../../utils.js'
 
@@ -33,7 +35,7 @@ async function walk(dir: string): Promise<string[]> {
  */
 export async function autoRegisterPackTypes(
   folder: string,
-  sandstonePack: { resourcePack: () => void; dataPack: () => void }
+  sandstonePack: { packTypes: Map<string, PackType>; resourcePack: () => void; dataPack: () => void }
 ) {
   const resourcesFolder = path.join(folder, 'resources')
 
@@ -48,6 +50,26 @@ export async function autoRegisterPackTypes(
     const files = await fs.readdir(path.join(resourcesFolder, 'datapack'))
     if (files.length > 0) {
       sandstonePack.dataPack()
+    }
+  }
+
+  // Register datapack_dependencies / resourcepack_dependencies pack types when
+  // any zips or folders are present under resources/<type>_dependencies/.
+  // These pack types export Smithed-style dependency archives alongside the
+  // generated pack output.
+  const datapackDepsPath = path.join(resourcesFolder, 'datapack_dependencies')
+  if (await fs.pathExists(datapackDepsPath)) {
+    const entries = await fs.readdir(datapackDepsPath)
+    if (entries.length > 0) {
+      sandstonePack.packTypes.set('datapack_dependencies', new DataPackDependencies())
+    }
+  }
+
+  const resourcepackDepsPath = path.join(resourcesFolder, 'resourcepack_dependencies')
+  if (await fs.pathExists(resourcepackDepsPath)) {
+    const entries = await fs.readdir(resourcepackDepsPath)
+    if (entries.length > 0) {
+      sandstonePack.packTypes.set('resourcepack_dependencies', new ResourcePackDependencies())
     }
   }
 }

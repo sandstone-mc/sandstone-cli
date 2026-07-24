@@ -5,7 +5,7 @@ import { DataPackDependencies, ResourcePackDependencies, type PackType } from 's
 
 import type { SandstoneCache } from './export.js'
 import { hash } from '../../utils.js'
-import { SandstoneConfig } from 'sandstone';
+import { SandstoneConfig } from 'sandstone'
 
 export type FileExclusions = {
   generated: RegExp[] | undefined
@@ -88,6 +88,8 @@ export async function processExternalResources(
 ) {
   const working = path.join(folder, 'resources', packType)
 
+  const encoder = new TextEncoder()
+
   if (!(await fs.pathExists(working))) {
     return
   }
@@ -112,7 +114,8 @@ export async function processExternalResources(
       if (fileHandlers) {
         for (const handler of fileHandlers) {
           if (handler.path.test(relativePath)) {
-            content = (await handler.callback(content))
+            const possiblyString = await handler.callback(content)
+            content = typeof possiblyString === 'string' ? encoder.encode(possiblyString).buffer : content
           }
         }
       }
@@ -143,7 +146,7 @@ export async function processExternalResources(
         let sizeDiffers = false
         try {
           const existingStat = await fs.stat(realPath)
-          if (existingStat.size !== content.length) {
+          if (existingStat.size !== content.byteLength) {
             sizeDiffers = true
           }
         } catch {
@@ -155,7 +158,7 @@ export async function processExternalResources(
           changedPackTypes.add(packType)
 
           await fs.ensureDir(path.dirname(realPath))
-          await fs.writeFile(realPath, content)
+          await fs.writeFile(realPath, content instanceof ArrayBuffer ? Buffer.from(content) : content)
         }
       }
     } catch {}

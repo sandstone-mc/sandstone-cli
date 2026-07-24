@@ -34,7 +34,7 @@ const options = {
   // Values
   path: opt('-h,--path <path>', 'Path of the folder containing your sandstone workspace.', { default: './' }),
   name: opt('-n, --name <name>', 'Name of the datapack. Override the value specified in the configuration file.'),
-  namespace: opt('-ns, --namespace <namespace>', 'The default namespace. Override the value specified in the configuration file.'),
+  namespace: opt('-N, --namespace <namespace>', 'The default namespace. Override the value specified in the configuration file.'),
   world: opt('-w, --world <name>', 'The name of the world to save the packs in. Override the value specified in the configuration file.'),
   clientPath: opt('-c, --client-path <path>', 'Path of the client folder. Override the value specified in the configuration file.'),
   serverPath: opt('--server-path <path>', 'Path of the server folder. Override the value specified in the configuration file.'),

@@ -8,6 +8,7 @@ import type { BuildResult, ResourceCounts } from '../../ui/types.js'
 import { log, initLoggerNoFile, setSilent } from '../../ui/logger.js'
 import { hash } from '../../utils.js'
 import { resolveStackTrace } from '../../utils/source-map.js'
+import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../../updateCheck.js'
 
 import {
   type SandstoneCache,
@@ -556,8 +557,22 @@ export async function buildCommand(opts: BuildOptions, _folder?: string, silent 
   initLoggerNoFile()
   setSilent(silent)
 
+  // MC header + update checks run in parallel — neither blocks the build.
+  // MC header is short (single readFile) — await it up front so the line
+  // prints at the START of build output rather than after.
+  const headerPromise = getMCHeaderAsync(folder)
+  const checkPromise = runAllUpdateChecks(folder)
+  const mcHeader = await headerPromise
+  if (mcHeader) log(mcHeader)
+
   try {
     const result = await _buildProject(opts, folder, silent)
+    const agg = await checkPromise
+    const lines = aggregateToLines(agg)
+    if (lines.length > 0) {
+      log(chalk.yellow('⚠ Updates available — run:'))
+      for (const line of lines) log(`  ${chalk.green('$')} ${line}`)
+    }
     if (silent) {
       return {
         success: true,
@@ -575,14 +590,20 @@ export async function buildCommand(opts: BuildOptions, _folder?: string, silent 
       .replace(/\?hot-hook=\d+/g, '')
       .replace(/file:\/\/\//g, '')
       .replace(/file:\/\//g, '')
-    // Stack includes message at top - extract only the trace lines to avoid duplication
     const stackLines = cleanedStack.split('\n')
     const traceStart = stackLines.findIndex(line => line.trimStart().startsWith('at '))
     const stackTrace = traceStart >= 0 ? stackLines.slice(traceStart).join('\n') : ''
 
-    // Resolve source maps for better error locations
     const resolvedStackTrace = stackTrace ? resolveStackTrace(stackTrace) : ''
     const formattedError = resolvedStackTrace ? `${errorMessage}\n${resolvedStackTrace}` : errorMessage
+    // Update notifications always print, even when silent (programmatic
+    // callers should still see them).
+    const agg = await checkPromise
+    const lines = aggregateToLines(agg)
+    if (lines.length > 0) {
+      log(chalk.yellow('⚠ Updates available — run:'))
+      for (const line of lines) log(`  ${chalk.green('$')} ${line}`)
+    }
     if (!silent) {
       log(chalk.bgRed.white('BuildError') + chalk.gray(':'), formattedError)
       process.exit(1)

@@ -38,6 +38,15 @@ export function hasBun(): boolean {
   }
 }
 
+export function hasGh(): boolean {
+  try {
+    execSync('gh --version')
+    return true
+  } catch {
+    return false
+  }
+}
+
 export const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
 
 /**

@@ -8,7 +8,8 @@ import { nanoid } from 'nanoid'
 import { confirm, select, input } from '@inquirer/prompts'
 
 import { CLI_VERSION } from '../version.js'
-import { capitalize, getWorldsList, hasBun, hasPnpm, hasYarn } from '../utils.js'
+import { getWorldsList, hasBun, hasPnpm, hasYarn } from '../utils.js'
+import { getAvailableSandstoneVersions } from './versionDiscovery.js'
 import { discoverAllInstances, type MinecraftInstance } from '../launchers/index.js'
 
 type CreateOptions = {
@@ -130,25 +131,19 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   const sv = (v: string) => new SemVer(v)
 
-  const versions = [[sv('1.1.0'), sv(CLI_VERSION)], [sv('1.0.0'), sv(CLI_VERSION)]] as const
+  const available = await getAvailableSandstoneVersions()
+  const versionChoices = available.map(
+    (info): [SemVer, SemVer] => [sv(`${info.major}.${info.minor}.0`), sv(CLI_VERSION)]
+  )
 
   const version = await select({
-    message: 'Which version of Sandstone do you want to use? These are the only supported versions for new projects.',
-    choices: versions.map((v) => {
-      const { prerelease, major, minor } = v[0]
-
-      const release = `${major}.${minor}`
-
-      // TODO: Add titles for Release Versions
-      return {
-        name: prerelease.length === 0 ?
-          `Release Version ${release}` :
-          `${capitalize(prerelease[0] as string)} Version ${prerelease[1]} for release ${release}`,
-        value: v,
-        short: v[0].toString(),
-      }
-    }),
-    default: versions[0],
+    message: 'Which version of Sandstone do you want to use?',
+    choices: available.map((info, i) => ({
+      name: `Release Version ${info.major}.${info.minor} (MC ${info.mcVersion})`,
+      value: versionChoices[i]!,
+      short: `${info.major}.${info.minor}.0`,
+    })),
+    default: versionChoices[0],
   })
 
   let packName = projectName
@@ -259,7 +254,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
     if (bun)  choices.unshift('bun')
 
     packageManager = (await select({
-      message: 'What package manager do you want to use? (For now you have to use Bun) >',
+      message: 'Pick your package manager',
       choices: choices
     }))
   }

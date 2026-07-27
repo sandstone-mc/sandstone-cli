@@ -4,13 +4,22 @@ import Spinner from 'ink-spinner'
 import { format } from 'util'
 import type { WatchStatus, TrackedChange, BuildResult, WatchUIAPI, ChangeCategory } from './types.js'
 import { drainLiveLogBuffer } from './logger.js'
+import { UpdateCheckIndicator, type IndicatorState } from './UpdateCheckIndicator.jsx'
+import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../updateCheck.js'
 
-const CONTENT_LINES = 8
+const MAX_CONTENT_LINES = 8
 
 interface WatchUIProps {
   manual: boolean
   onManualRebuild?: () => void
   exit?: () => void
+  cwd?: string
+  /**
+   * Called when the user presses `u` while update commands are available.
+   * The parent (watch.ts) is responsible for cancelling the watcher,
+   * spawning the commands, then exiting.
+   */
+  onRunUpdates?: (commands: string[]) => void
 }
 
 function formatChangedFiles(files: TrackedChange[]): string {
@@ -49,9 +58,12 @@ interface ContentDisplayProps {
   errorText: string | null
   changes: TrackedChange[]
   scrollOffset: number
+  /** Effective number of lines this display may occupy. May be < MAX when
+   *  the parent reserves space for an MC header + update commands. */
+  maxLines: number
 }
 
-function ContentDisplay({ mode, logLines, errorText, changes, scrollOffset }: ContentDisplayProps) {
+function ContentDisplay({ mode, logLines, errorText, changes, scrollOffset, maxLines }: ContentDisplayProps) {
   let contentData: { text: string; color?: string }[] = []
 
   if (mode === 'error' && errorText) {
@@ -74,30 +86,31 @@ function ContentDisplay({ mode, logLines, errorText, changes, scrollOffset }: Co
   }
 
   const totalLines = contentData.length
-  const hasMore = totalLines > CONTENT_LINES
+  const height = Math.max(1, maxLines)
+  const hasMore = totalLines > height
 
   let visibleLines: { text: string; color?: string }[]
   let scrollInfo = ''
 
   if (mode === 'logs') {
-    const start = Math.max(0, totalLines - scrollOffset - CONTENT_LINES)
+    const start = Math.max(0, totalLines - scrollOffset - height)
     const end = Math.max(0, totalLines - scrollOffset)
     visibleLines = contentData.slice(start, end)
     if (hasMore) {
-      const canUp = scrollOffset < totalLines - CONTENT_LINES
+      const canUp = scrollOffset < totalLines - height
       const canDown = scrollOffset > 0
       scrollInfo = `${canUp ? '▲' : ''}${canDown ? '▼' : ''} (${start + 1}-${end}/${totalLines})`
     }
   } else {
-    visibleLines = contentData.slice(scrollOffset, scrollOffset + CONTENT_LINES)
+    visibleLines = contentData.slice(scrollOffset, scrollOffset + height)
     if (hasMore) {
       const canUp = scrollOffset > 0
-      const canDown = scrollOffset + CONTENT_LINES < totalLines
+      const canDown = scrollOffset + height < totalLines
       scrollInfo = `${canUp ? '▲' : ''}${canDown ? '▼' : ''} (${scrollOffset + 1}-${scrollOffset + visibleLines.length}/${totalLines})`
     }
   }
 
-  const padding = CONTENT_LINES - visibleLines.length
+  const padding = height - visibleLines.length
   const paddingBefore = mode === 'logs' ? padding : 0
   const paddingAfter = mode === 'logs' ? 0 : padding
 
@@ -117,13 +130,15 @@ function ContentDisplay({ mode, logLines, errorText, changes, scrollOffset }: Co
   )
 }
 
-export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
+export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: WatchUIProps) {
   const [status, setStatusState] = useState<WatchStatus>(manual ? 'pending' : 'watching')
   const [reason, setReason] = useState<string>()
   const [changedFiles, setChangedFilesState] = useState<TrackedChange[]>([])
   const [buildResult, setBuildResultState] = useState<BuildResult | null>(null)
   const [logLines, setLogLinesState] = useState<string[]>([])
   const [scrollOffset, setScrollOffset] = useState(0)
+  const [mcHeader, setMcHeader] = useState<string | null>(null)
+  const [updateCheckState, setUpdateCheckState] = useState<IndicatorState>({ kind: 'silent' })
 
   const isError = status === 'error' && buildResult?.error
   const isManualPending = manual && status === 'pending' && changedFiles.length > 0
@@ -132,6 +147,25 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
   useEffect(() => {
     setScrollOffset(0)
   }, [contentMode, buildResult?.error])
+
+  // Kick off MC header + update check once at mount; results awaited asynchronously.
+  useEffect(() => {
+    if (!cwd) return
+    let cancelled = false
+    void getMCHeaderAsync(cwd).then((h) => {
+      if (!cancelled) setMcHeader(h)
+    })
+    void runAllUpdateChecks(cwd).then((agg) => {
+      if (cancelled) return
+      const lines = aggregateToLines(agg)
+      setUpdateCheckState(lines.length > 0 ? { kind: 'commands', lines } : { kind: 'silent' })
+    }).catch(() => {
+      if (!cancelled) setUpdateCheckState({ kind: 'silent' })
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [cwd])
 
   const setStatus = useCallback((newStatus: WatchStatus, newReason?: string) => {
     setStatusState(newStatus)
@@ -165,19 +199,33 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
     })
   }, [])
 
+  // Reserve space for elements above the content area to keep total line
+  // count stable when an MC header or update-commands appear or disappear.
+  const extraReservedLines =
+    (mcHeader ? 1 : 0) +
+    (updateCheckState.kind === 'commands' ? 1 + updateCheckState.lines.length : 0)
+  const effectiveContentLines = Math.max(2, MAX_CONTENT_LINES - extraReservedLines)
+
   const getMaxScroll = useCallback(() => {
     if (isError && buildResult?.error) {
-      return Math.max(0, buildResult.error.split('\n').length - CONTENT_LINES)
+      return Math.max(0, buildResult.error.split('\n').length - effectiveContentLines)
     } else if (isManualPending) {
       return 0
     } else {
-      return Math.max(0, logLines.length - CONTENT_LINES)
+      return Math.max(0, logLines.length - effectiveContentLines)
     }
-  }, [isError, isManualPending, buildResult?.error, logLines.length])
+  }, [isError, isManualPending, buildResult?.error, logLines.length, effectiveContentLines])
 
   useInput((input, key) => {
     if (input === 'q' || (key.ctrl && input === 'c')) {
       exit!()
+    }
+
+    // [u] — run the pending update commands. Parent cancels the watcher,
+    // spawns each command, then exits. No-op when no updates are available.
+    if (input === 'u' && updateCheckState.kind === 'commands') {
+      const lines = updateCheckState.lines
+      onRunUpdates?.(lines)
     }
 
     const maxScroll = getMaxScroll()
@@ -228,9 +276,10 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
 
   const footerParts: string[] = []
   if (manual) footerParts.push('R/Enter: rebuild')
-  if (logLines.length > CONTENT_LINES || (isError && buildResult?.error && buildResult.error.split('\n').length > CONTENT_LINES)) {
+  if (logLines.length > effectiveContentLines || (isError && buildResult?.error && buildResult.error.split('\n').length > effectiveContentLines)) {
     footerParts.push('↑↓: scroll')
   }
+  footerParts.push('U: update+exit')
   footerParts.push('Q: exit')
 
   return (
@@ -238,6 +287,9 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
       <Text bold color="yellow">
         Watch Mode{manual ? <Text color="cyan"> (Manual)</Text> : ''}
       </Text>
+
+      {mcHeader && <Text color="gray">{mcHeader}</Text>}
+      <UpdateCheckIndicator state={updateCheckState} />
 
       <Text>
         {showSpinner && <><Text color="cyan"><Spinner type="dots" /></Text><Text> </Text></>}
@@ -253,6 +305,7 @@ export function WatchUI({ manual, onManualRebuild, exit }: WatchUIProps) {
         errorText={buildResult?.error ?? null}
         changes={changedFiles}
         scrollOffset={scrollOffset}
+        maxLines={effectiveContentLines}
       />
 
       <Text> </Text>

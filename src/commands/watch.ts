@@ -96,8 +96,40 @@ export async function watchCommand(opts: WatchOptions) {
     React.createElement(WatchUI, {
       manual: opts.manual ?? false,
       onManualRebuild: handleManualRebuild,
+      cwd: opts.path,
       // Since this isn't SIGINT, its fine that we don't await this
-      exit: () => exit(subscription, unmountInk)
+      exit: () => exit(subscription, unmountInk),
+      // Cancels the watcher + unmounts the UI, runs the update commands,
+      // then exits the process.
+      onRunUpdates: async (commands) => {
+        // Fully stop the FS watcher + ink BEFORE running commands — file
+        // system changes from the update commands shouldn't re-trigger a
+        // rebuild or cause the UI to flicker.
+        await cleanup(subscription, unmountInk)
+        // Pick a shell that runs the user's command natively per platform.
+        // POSIX: `sh -c <cmd>`; Windows: `cmd /c <cmd>`.
+        const shellCmd = process.platform === 'win32' ? 'cmd' : 'sh'
+        const shellArg = process.platform === 'win32' ? '/c' : '-c'
+        // Run each command sequentially. Best-effort — failures are logged
+        // but don't block subsequent commands. Uses Node-standard child_process
+        // so the CLI has no hard bun-runtime dependency.
+        for (const cmd of commands) {
+          try {
+            console.log(`$ ${cmd}`)
+            const child = spawn(shellCmd, [shellArg, cmd], {
+              stdio: ['ignore', 'inherit', 'inherit'],
+              env: process.env,
+            })
+            await new Promise<void>((resolve) => {
+              child.on('close', () => resolve())
+              child.on('error', () => resolve())
+            })
+          } catch (err) {
+            console.error(`Update command failed: ${cmd}\n${(err as Error).message ?? err}`)
+          }
+        }
+        process.exit(0)
+      },
     }),
     { patchConsole: false, exitOnCtrlC: false }
   )
@@ -372,10 +404,17 @@ export async function watchCommand(opts: WatchOptions) {
   process.on('SIGINT', async () => await exit(subscription, unmountInk))
 }
 
-async function exit(subscription: ParcelWatcher.AsyncSubscription, unmountInk?: () => void) {
-  log('Watch stopped')
+async function cleanup(subscription: ParcelWatcher.AsyncSubscription, unmountInk?: () => void) {
+  // Stops the parcel FS watcher + unmounts ink. Does NOT exit the process —
+  // callers that want to run more code (e.g. update commands) should chain
+  // their own logic before exiting.
   unmountInk?.()
   await subscription.unsubscribe()
+}
+
+async function exit(subscription: ParcelWatcher.AsyncSubscription, unmountInk?: () => void) {
+  log('Watch stopped')
+  await cleanup(subscription, unmountInk)
   process.exit(0)
 }
 

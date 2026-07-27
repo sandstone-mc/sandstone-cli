@@ -25,7 +25,7 @@ const execFileAsync = promisify(execFile)
 
 export interface SandstoneUpdateInfo {
 	installed: string
-	channel: 'latest' | string // 'latest' or 'v1.0' etc.
+	channel: 'latest' | string // 'latest' or '<pkg>-X-Y' (e.g. 'sandstone-1-0')
 	available: string
 	command: string // PM-adjusted command for the user's project
 	mcInstalled: string
@@ -172,11 +172,22 @@ function globalAddCommand(pm: GlobalPM, spec: string): string {
 
 // ---------- channel resolution ----------
 
-function resolveChannel(distTags: Record<string, string>, installed: string): 'latest' | string | null {
+/**
+ * Resolve which npm dist-tag to consult for an installed package version.
+ *
+ * npm rejects any dist-tag that looks like a SemVer range, so the
+ * per-minor channel is `<pkg-name>-<major>-<minor>` (e.g. `sandstone-1-0`),
+ * not `v1.0`. We prefer the explicit per-minor tag when present (so a
+ * `v1.0.x` install only sees `sandstone-1-0`-tagged releases) and fall
+ * back to `latest` when the installed version is in master's minor.
+ */
+function resolveChannel(distTags: Record<string, string>, installed: string, packageName: string): 'latest' | string | null {
 	const m = installed.match(/^(\d+)\.(\d+)\./)
 	if (!m) return null
 	const [, maj, min] = m
-	const explicitKey = `v${maj}.${min}`
+	// strip the npm scope so `@sandstone-mc/<pkg>` becomes `<pkg>` for the tag key
+	const unscoped = packageName.replace(/^@[^/]+\//, '')
+	const explicitKey = `${unscoped}-${maj}-${min}`
 	if (distTags[explicitKey]) return explicitKey
 	if (distTags.latest) {
 		const lm = distTags.latest.match(/^(\d+)\.(\d+)\./)
@@ -196,7 +207,7 @@ export async function runUpdateCheck(projectDir: string): Promise<SandstoneUpdat
 	const data = await fetchNpmPackage('sandstone')
 	if (!data) return null
 
-	const channel = resolveChannel(data['dist-tags'], installed)
+	const channel = resolveChannel(data['dist-tags'], installed, 'sandstone')
 	if (channel == null) return null
 
 	const available = data['dist-tags'][channel]

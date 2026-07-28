@@ -34,9 +34,16 @@ export interface SandstoneUpdateInfo {
 export interface CLIUpdateInfo {
 	installed: string
 	available: string
-	command: string // PM-adjusted global install command
-	source: 'global' | 'workspace'
+	command: string // PM-adjusted install command for wherever this CLI lives
+	source: CLIInstance
 }
+
+/**
+ * Where a `sand` binary lives:
+ *   - `project` — a dependency in the user's project `node_modules`
+ *   - `global`  — a global PM install (`bun add -g`, `npm i -g`, …)
+ */
+export type CLIInstance = 'project' | 'global' | 'unknown'
 
 export type UpdateCheckResult =
 	| { kind: 'sandstone'; info: SandstoneUpdateInfo }
@@ -114,15 +121,38 @@ async function fileExists(p: string): Promise<boolean> {
 	}
 }
 
-function localAddCommand(pm: LocalPM, spec: string): string {
+function localAddCommand(pm: LocalPM, spec: string, dev = false): string {
 	switch (pm) {
 		case 'bun':
+			return `bun add ${dev ? '--dev ' : ''}${spec}`
 		case 'pnpm':
-			return `${pm} add ${spec}`
+			return `pnpm add ${dev ? '--save-dev ' : ''}${spec}`
 		case 'yarn':
-			return `yarn add ${spec}`
+			return `yarn add ${dev ? '--dev ' : ''}${spec}`
 		case 'npm':
-			return `npm install ${spec}`
+			return `npm install ${dev ? '--save-dev ' : ''}${spec}`
+	}
+}
+
+/**
+ * Whether a package sits in the project's `devDependencies`.
+ *
+ * Drives the `--dev` flag on the suggested add command, so the suggestion
+ * doesn't silently move the dep between sections. `sandstone-cli` is always a
+ * devDependency; `sandstone` is a devDependency in the library template but a
+ * regular dependency in the pack template — read it rather than assume.
+ */
+async function isDevDependency(projectDir: string, packageName: string): Promise<boolean> {
+	try {
+		const raw = await fs.readFile(path.join(projectDir, 'package.json'), 'utf8')
+		const pkg = JSON.parse(raw) as {
+			dependencies?: Record<string, string>
+			devDependencies?: Record<string, string>
+		}
+		if (pkg.dependencies?.[packageName]) return false
+		return Boolean(pkg.devDependencies?.[packageName])
+	} catch {
+		return false
 	}
 }
 
@@ -134,29 +164,64 @@ function isWindows(): boolean {
 	return process.platform === 'win32'
 }
 
-async function findSandBinaryPath(): Promise<string | null> {
+function normalizeSlashes(p: string): string {
+	return p.replaceAll('\\', '/')
+}
+
+function isInsideLocalBin(p: string): boolean {
+	return normalizeSlashes(p).toLowerCase().includes('node_modules/.bin')
+}
+
+/**
+ * Env whose PATH has every `node_modules/.bin` entry stripped.
+ *
+ * Package-manager run scripts (`bun run`, `npm run`, …) prepend the project's
+ * `node_modules/.bin` to PATH. A bare `which sand` / `sand --version` from
+ * inside a run script therefore resolves to the *project-local* CLI — the one
+ * already executing — instead of the global install we're trying to inspect.
+ * Strip those entries so global lookups really do look at the global install.
+ */
+function globalLookupEnv(): NodeJS.ProcessEnv {
+	const sep = isWindows() ? ';' : ':'
+	// Windows env keys are case-insensitive; find whichever casing is present.
+	const pathKey = Object.keys(process.env).find(k => k.toUpperCase() === 'PATH') ?? 'PATH'
+	const cleaned = (process.env[pathKey] ?? '')
+		.split(sep)
+		.filter(entry => entry.length > 0 && !isInsideLocalBin(entry))
+		.join(sep)
+	return { ...process.env, [pathKey]: cleaned }
+}
+
+async function findGlobalSandBinaryPath(): Promise<string | null> {
 	const cmd = isWindows() ? 'where' : 'which'
 	try {
-		const { stdout } = await execFileAsync(cmd, ['sand'])
-		const out = stdout.trim()
-		if (!out) return null
-		return out.split('\n')[0]!.trim()
+		const { stdout } = await execFileAsync(cmd, ['sand'], { env: globalLookupEnv() })
+		const hit = stdout
+			.split('\n')
+			.map(line => line.trim())
+			.find(line => line.length > 0 && !isInsideLocalBin(line))
+		return hit ?? null
 	} catch {
 		return null
 	}
 }
 
 function classifyGlobalSandPath(p: string): GlobalPM {
-	const lower = p.toLowerCase()
-	if (lower.includes('.bun/') || lower.includes('/bun/') || lower.endsWith('\\bun\\')) return 'bun'
-	if (lower.includes('pnpm') || lower.includes('/.local/share/pnpm')) return 'pnpm'
-	if (lower.includes('yarn') || lower.includes('yarn/')) return 'yarn'
-	if (lower.includes('node_modules') || lower.includes('\\node_modules\\') || lower.endsWith('npm')) return 'npm'
+	const lower = normalizeSlashes(p).toLowerCase()
+	if (lower.includes('.bun/') || lower.includes('/bun/')) return 'bun'
+	if (lower.includes('pnpm')) return 'pnpm'
+	if (lower.includes('yarn')) return 'yarn'
+	if (lower.includes('node_modules') || lower.includes('/npm/')) return 'npm'
 	return 'unknown'
 }
 
-function globalAddCommand(pm: GlobalPM, spec: string): string {
-	switch (pm) {
+/**
+ * `fallback` is the PM detected for the user's project — a far better guess
+ * than hardcoding npm when the global binary's path is unrecognizable.
+ */
+function globalAddCommand(pm: GlobalPM, spec: string, fallback: LocalPM = 'npm'): string {
+	const resolved: LocalPM = pm === 'unknown' ? fallback : pm
+	switch (resolved) {
 		case 'bun':
 			return `bun add -g ${spec}`
 		case 'pnpm':
@@ -164,8 +229,6 @@ function globalAddCommand(pm: GlobalPM, spec: string): string {
 		case 'yarn':
 			return `yarn global add ${spec}`
 		case 'npm':
-			return `npm install -g ${spec}`
-		case 'unknown':
 			return `npm install -g ${spec}`
 	}
 }
@@ -214,7 +277,11 @@ export async function runUpdateCheck(projectDir: string): Promise<SandstoneUpdat
 	if (!available || available === installed) return null
 
 	const pm = await detectLocalPM(projectDir)
-	const command = localAddCommand(pm, `sandstone@^${available}`)
+	const command = localAddCommand(
+		pm,
+		`sandstone@^${available}`,
+		await isDevDependency(projectDir, 'sandstone'),
+	)
 
 	const minorMatch = installed.match(/^(\d+)\.(\d+)/)
 	const mcInstalled = minorMatch ? sandstoneMinorToMCString(parseInt(minorMatch[2]!, 10)) : 'unknown'
@@ -233,50 +300,63 @@ export async function runUpdateCheck(projectDir: string): Promise<SandstoneUpdat
 import { CLI_VERSION } from './version.js'
 
 interface CLIRuntimeContext {
-	instance: 'workspace' | 'global' | 'unknown'
+	instance: CLIInstance
 	entryPath: string | null
 }
 
-async function detectCLIRuntime(): Promise<CLIRuntimeContext> {
-	let entryPath: string | null = null
+function currentEntryPath(): string | null {
 	try {
 		const metaAny = import.meta as unknown as { path?: string; url?: string }
-		entryPath = metaAny.path ?? (metaAny.url ? new URL(metaAny.url).pathname : null) ?? null
+		return metaAny.path
+			?? (metaAny.url ? new URL(metaAny.url).pathname : null)
+			?? process.argv[1]
+			?? null
 	} catch {
-		entryPath = process.argv[1] ?? null
+		return process.argv[1] ?? null
 	}
-	if (!entryPath) return { instance: 'unknown', entryPath: null }
-
-	let dir = path.dirname(entryPath)
-	for (let i = 0; i < 8; i++) {
-		const candidate = path.join(dir, 'package.json')
-		if (await fileExists(candidate)) {
-			try {
-				const raw = await fs.readFile(candidate, 'utf8')
-				const pkg = JSON.parse(raw) as { name?: string }
-				if (pkg.name === 'sandstone-cli') {
-					return { instance: 'workspace', entryPath: candidate }
-				}
-			} catch {
-				// ignore
-			}
-		}
-		const parent = path.dirname(dir)
-		if (parent === dir) break
-		dir = parent
-	}
-	return { instance: 'global', entryPath }
 }
 
-async function findSandstoneWorkspaceFromCwd(): Promise<string | null> {
-	let dir = process.cwd()
-	for (let i = 0; i < 8; i++) {
-		if (await fileExists(path.join(dir, 'sandstone.code-workspace'))) return dir
-		const parent = path.dirname(dir)
-		if (parent === dir) break
-		dir = parent
+async function realpathOrSelf(p: string): Promise<string> {
+	try {
+		return await fs.realpath(p)
+	} catch {
+		return p
 	}
-	return null
+}
+
+function isInside(child: string, parent: string): boolean {
+	const rel = path.relative(parent, child)
+	return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+/**
+ * Classify which copy of the CLI is executing.
+ *
+ * The previous implementation walked up to the nearest `package.json` named
+ * `sandstone-cli` and treated any hit as a dev checkout — but an ordinary
+ * `node_modules/sandstone-cli` install satisfies that too, so a plain project
+ * devDependency was misclassified.
+ *
+ * Decide by location instead: is the entry path under the project's
+ * `node_modules`? Checked both as-given and realpath'd, so a symlinked install
+ * still resolves to `project`.
+ */
+async function detectCLIRuntime(projectDir: string): Promise<CLIRuntimeContext> {
+	const entryPath = currentEntryPath()
+	if (!entryPath) return { instance: 'unknown', entryPath: null }
+
+	const projectModules = path.join(projectDir, 'node_modules')
+	const realProjectModules = path.join(await realpathOrSelf(projectDir), 'node_modules')
+	const realEntry = await realpathOrSelf(entryPath)
+
+	if (
+		isInside(entryPath, projectModules)
+		|| isInside(realEntry, realProjectModules)
+	) {
+		return { instance: 'project', entryPath: realEntry }
+	}
+
+	return { instance: 'global', entryPath: realEntry }
 }
 
 async function readCLIVersionFromDir(dir: string): Promise<string | null> {
@@ -289,79 +369,94 @@ async function readCLIVersionFromDir(dir: string): Promise<string | null> {
 	}
 }
 
-async function shellescapeSandVersion(): Promise<string | null> {
+/**
+ * Version of the *global* `sand`, via a PATH with `node_modules/.bin` stripped
+ * so we don't just re-read the project-local CLI that's already running.
+ */
+async function readGlobalSandVersion(): Promise<string | null> {
 	try {
-		const { stdout } = await execFileAsync('sand', ['--version'])
-		const out = stdout.trim()
-		const m = out.match(/(\d+\.\d+\.\d+)/)
+		const { stdout } = await execFileAsync('sand', ['--version'], { env: globalLookupEnv() })
+		const m = stdout.trim().match(/(\d+\.\d+\.\d+)/)
 		return m ? m[1]! : null
 	} catch {
 		return null
 	}
 }
 
-export async function runSelfUpdateCheck(): Promise<CLIUpdateInfo | null> {
-	const ctx = await detectCLIRuntime()
-	const selfVersion = CLI_VERSION
-	const selfSource: 'global' | 'workspace' = ctx.instance === 'workspace' ? 'workspace' : 'global'
+/** Suggested command to bring the global `sand` up to `version`. */
+async function globalUpdateCommand(version: string, fallback: LocalPM): Promise<string> {
+	const sandPath = await findGlobalSandBinaryPath()
+	const pm: GlobalPM = sandPath ? classifyGlobalSandPath(sandPath) : 'unknown'
+	return globalAddCommand(pm, `sandstone-cli@^${version}`, fallback)
+}
+
+/** Suggested command to bring the project's `sandstone-cli` up to `version`. */
+async function projectCLIUpdateCommand(projectDir: string, version: string): Promise<string> {
+	const pm = await detectLocalPM(projectDir)
+	return localAddCommand(
+		pm,
+		`sandstone-cli@^${version}`,
+		await isDevDependency(projectDir, 'sandstone-cli'),
+	)
+}
+
+export async function runSelfUpdateCheck(projectDir: string): Promise<CLIUpdateInfo | null> {
+	const ctx = await detectCLIRuntime(projectDir)
 
 	const npm = await fetchNpmPackage('sandstone-cli')
 	if (!npm) return null
 	const latest = npm['dist-tags']?.latest
-	if (!latest || latest === selfVersion) return null
+	if (!latest || latest === CLI_VERSION) return null
 
-	const sandPath = await findSandBinaryPath()
-	const globalPM: GlobalPM = sandPath ? classifyGlobalSandPath(sandPath) : 'unknown'
-	const command = globalAddCommand(globalPM, `sandstone-cli@^${latest}`)
+	const command = ctx.instance === 'project'
+		? await projectCLIUpdateCommand(projectDir, latest)
+		: await globalUpdateCommand(latest, await detectLocalPM(projectDir))
 
 	return {
-		installed: selfVersion,
+		installed: CLI_VERSION,
 		available: latest,
 		command,
-		source: selfSource,
+		source: ctx.instance === 'project' ? 'project' : 'global',
 	}
 }
 
 /**
- * Cross-instance check: workspace CLI checks global, global CLI checks workspace.
+ * Cross-instance check: the running CLI reports on the *other* install, so a
+ * stale global doesn't hide behind an up-to-date project copy (or vice versa).
  */
 export interface CrossInstanceUpdateInfo extends CLIUpdateInfo {
-	targetInstance: 'global' | 'workspace'
-	hint?: string
+	targetInstance: 'global' | 'project'
 }
 
-export async function runCrossInstanceUpdateCheck(): Promise<CrossInstanceUpdateInfo | null> {
-	const ctx = await detectCLIRuntime()
+export async function runCrossInstanceUpdateCheck(projectDir: string): Promise<CrossInstanceUpdateInfo | null> {
+	const ctx = await detectCLIRuntime(projectDir)
+	if (ctx.instance === 'unknown') return null
+
 	const npm = await fetchNpmPackage('sandstone-cli')
 	if (!npm) return null
 	const latest = npm['dist-tags']?.latest
 	if (!latest) return null
 
-	if (ctx.instance === 'workspace') {
-		const globalVer = await shellescapeSandVersion()
-		if (!globalVer || globalVer === latest) return null
-		const sandPath = await findSandBinaryPath()
-		const globalPM = sandPath ? classifyGlobalSandPath(sandPath) : 'unknown'
+	if (ctx.instance === 'global') {
+		const projectVer = await readCLIVersionFromDir(path.join(projectDir, 'node_modules', 'sandstone-cli'))
+		if (!projectVer || projectVer === latest) return null
 		return {
-			installed: globalVer,
+			installed: projectVer,
 			available: latest,
-			command: globalAddCommand(globalPM, `sandstone-cli@^${latest}`),
-			source: 'global',
-			targetInstance: 'global',
+			command: await projectCLIUpdateCommand(projectDir, latest),
+			source: 'project',
+			targetInstance: 'project',
 		}
-	} else {
-		const workspace = await findSandstoneWorkspaceFromCwd()
-		if (!workspace) return null
-		const workspaceCLIVersion = await readCLIVersionFromDir(path.join(workspace, 'sandstone-cli'))
-		if (!workspaceCLIVersion || workspaceCLIVersion === latest) return null
-		return {
-			installed: workspaceCLIVersion,
-			available: latest,
-			command: `bun dev:build:cli && bun dev:link (run from ${workspace})`,
-			source: 'workspace',
-			targetInstance: 'workspace',
-			hint: `The workspace CLI build is behind. Rebuild with \`bun dev:build:cli\` in ${workspace}/sandstone-work and re-link.`,
-		}
+	}
+
+	const globalVer = await readGlobalSandVersion()
+	if (!globalVer || globalVer === latest) return null
+	return {
+		installed: globalVer,
+		available: latest,
+		command: await globalUpdateCommand(latest, await detectLocalPM(projectDir)),
+		source: 'global',
+		targetInstance: 'global',
 	}
 }
 
@@ -398,8 +493,8 @@ export interface AggregatedCheck {
 export async function runAllUpdateChecks(projectDir: string): Promise<AggregatedCheck> {
 	const [sandstone, cli, cross] = await Promise.all([
 		runUpdateCheck(projectDir),
-		runSelfUpdateCheck(),
-		runCrossInstanceUpdateCheck(),
+		runSelfUpdateCheck(projectDir),
+		runCrossInstanceUpdateCheck(projectDir),
 	])
 	return { sandstone, cli, cross }
 }
@@ -407,11 +502,15 @@ export async function runAllUpdateChecks(projectDir: string): Promise<Aggregated
 /**
  * Pure helper: convert an AggregatedCheck into the lines to print, or []
  * when there's nothing to show.
+ *
+ * Deduplicated: the self and cross checks can legitimately land on the same
+ * command (e.g. both installs are behind and share a package manager), and
+ * printing it twice just looks broken.
  */
 export function aggregateToLines(agg: AggregatedCheck): string[] {
 	const out: string[] = []
 	if (agg.sandstone) out.push(agg.sandstone.command)
 	if (agg.cli) out.push(agg.cli.command)
 	if (agg.cross) out.push(agg.cross.command)
-	return out
+	return [...new Set(out)]
 }

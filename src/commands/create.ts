@@ -259,16 +259,24 @@ export async function createCommand(_project: string, opts: CreateOptions) {
     }))
   }
 
-  fs.mkdirSync(projectPath)
+  fs.mkdirSync(projectPath, { recursive: true })
 
   // Create project & install dependencies
   console.log(chalk`Installing {rgb(229, 193, 0) sandstone@${version[0]}}, {rgb(229, 193, 0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`)
 
   const exec = (cmd: string) => child.execSync(cmd, { cwd: projectPath })
 
-  exec('git clone https://github.com/sandstone-mc/sandstone-template.git .')
+  // git clone refuses to populate an existing non-empty dir, so clone into a
+  // tmp sibling and move the contents into projectPath.
+  const tmpClone = path.join(projectPath, `.sandstone-template-${Date.now()}`)
+  exec(`git clone https://github.com/sandstone-mc/sandstone-template.git ${tmpClone}`)
 
-  exec(`git checkout ${projectType}-${version[0]}`)
+  exec(`git -C ${tmpClone} checkout ${projectType}-${version[0]}`)
+
+  for (const entry of fs.readdirSync(tmpClone)) {
+    await fs.move(path.join(tmpClone, entry), path.join(projectPath, entry), { overwrite: true })
+  }
+  await fs.rm(tmpClone, { force: true, recursive: true })
 
   await fs.rm(path.join(projectPath, '.git'), { force: true, recursive: true })
 

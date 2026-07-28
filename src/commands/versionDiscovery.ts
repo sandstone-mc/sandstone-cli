@@ -16,6 +16,10 @@
 import { hasGh } from '../utils.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import fs from 'fs'
+import path from 'path'
+import { fileURLToPath } from 'url'
+import { SemVer } from 'semver'
 import { sandstoneMinorToMCString } from '../utils/sandstoneToMC.js'
 
 const execFileAsync = promisify(execFile)
@@ -74,6 +78,29 @@ const FALLBACK: DiscoveredVersion[] = [
 	{ major: 1, minor: 0, mcVersion: sandstoneMinorToMCString(0), source: 'fallback' },
 ]
 
+/**
+ * Latest sandstone minor bundled with this CLI (read from the installed
+ * `sandstone` package). Used to cap the version list: minors above this are
+ * not yet released and must not be offered.
+ */
+function getBundledSandstoneMinor(): number | null {
+	let dir = path.dirname(fileURLToPath(import.meta.url))
+	for (let i = 0; i < 8; i++) {
+		try {
+			const pkg = JSON.parse(
+				fs.readFileSync(path.join(dir, 'node_modules', 'sandstone', 'package.json'), 'utf8')
+			) as { version?: string }
+			if (pkg.version) return new SemVer(pkg.version).minor
+		} catch {
+			// not found at this level — walk up
+		}
+		const parent = path.dirname(dir)
+		if (parent === dir) break
+		dir = parent
+	}
+	return null
+}
+
 function dedupeAndDecorate(
 	tags: string[],
 	source: DiscoveredVersion['source']
@@ -100,21 +127,24 @@ function dedupeAndDecorate(
 }
 
 export async function getAvailableSandstoneVersions(): Promise<DiscoveredVersion[]> {
+	const cap = getBundledSandstoneMinor()
+	const filter = (list: DiscoveredVersion[]) =>
+		cap === null ? list : list.filter((v) => v.minor <= cap)
 	const gh = await fetchViaGh()
 	if (gh) {
-		const decorated = dedupeAndDecorate(gh, 'gh')
+		const decorated = filter(dedupeAndDecorate(gh, 'gh'))
 		if (decorated.length > 0) return decorated
 	}
 	const api = await fetchViaGithubApi()
 	if (api) {
-		const decorated = dedupeAndDecorate(api, 'fetch-github')
+		const decorated = filter(dedupeAndDecorate(api, 'fetch-github'))
 		if (decorated.length > 0) return decorated
 	}
 	const npm = await fetchViaNpmRegistry()
 	if (npm) {
-		const decorated = dedupeAndDecorate(npm, 'fetch-npm')
+		const decorated = filter(dedupeAndDecorate(npm, 'fetch-npm'))
 		if (decorated.length > 0) return decorated
 	}
 	console.warn('Could not list Sandstone versions — using cached list')
-	return FALLBACK
+	return filter(FALLBACK)
 }

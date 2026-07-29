@@ -105,6 +105,12 @@ async function readInstalledSandstoneVersion(projectDir: string): Promise<string
 type LocalPM = 'bun' | 'pnpm' | 'yarn' | 'npm'
 
 export async function detectLocalPM(projectDir: string): Promise<LocalPM> {
+	// Runtime check: if we're executing under Bun, treat it as the user's PM
+	// regardless of which lockfile happens to be in the directory. A user's
+	// project can contain a stale `package-lock.json` from a one-off `npm i`
+	// while they normally run everything through `bun` — the runtime is the
+	// ground truth, the lockfile is a hint.
+	if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') return 'bun'
 	if (await fileExists(path.join(projectDir, 'bun.lock')) || await fileExists(path.join(projectDir, 'bun.lockb'))) return 'bun'
 	if (await fileExists(path.join(projectDir, 'pnpm-lock.yaml'))) return 'pnpm'
 	if (await fileExists(path.join(projectDir, 'yarn.lock'))) return 'yarn'
@@ -207,6 +213,11 @@ async function findGlobalSandBinaryPath(): Promise<string | null> {
 }
 
 function classifyGlobalSandPath(p: string): GlobalPM {
+	// Same ground-truth rule as detectLocalPM: if this process is running under
+	// Bun, the user's global install was almost certainly `bun add -g …` even
+	// if the binary path doesn't carry a `.bun/` segment (PATH-style installs
+	// or unusual prefixes won't match the substring test below).
+	if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') return 'bun'
 	const lower = normalizeSlashes(p).toLowerCase()
 	if (lower.includes('.bun/') || lower.includes('/bun/')) return 'bun'
 	if (lower.includes('pnpm')) return 'pnpm'

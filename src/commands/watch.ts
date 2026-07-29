@@ -155,9 +155,32 @@ export async function watchCommand(opts: WatchOptions) {
     api?.setChangedFiles(changes)
     log('Building...', changes.map(c => './' + relative(opts.path, c.path).replace(/\\/g, '/')).join(', '))
 
-    const libChanges = opts.library && Object.hasOwn(globalThis, 'Bun') ? changes.filter((change) => !change.path.includes('test/')) : []
+    const packageJSON = JSON.parse(await fs.readFile(join(folder, 'package.json'), 'utf-8'))
 
-    if (libChanges.length !== 0) {
+    const libChanges = Object.hasOwn(globalThis, 'Bun') ? changes.filter((change) => !change.path.includes('test/')) : []
+
+    const libFolder = join(opts.path, 'lib')
+
+    if (
+      (!opts.library && (
+        !packageJSON['module']?.endsWith('.ts')
+        || !(await fs.exists(join(opts.path, 'sandstone.config.ts')))
+      ))
+    ) {
+      if (api !== undefined && api.exit !== undefined) {
+        api.exit()
+      }
+      throw new Error('Not a Sandstone project! Did you mean to run `sand watch --library`?')
+    }
+
+    if (
+      opts.library && (
+        libChanges.length !== 0 ||
+        !(await fs.pathExists(libFolder)) ||
+        !(await fs.pathExists(join(libFolder, 'index.js'))) ||
+        !(await fs.pathExists(join(libFolder, 'index.d.ts')))
+      )
+    ) {
       /* @ts-ignore */
       const CLI = Bun.spawn(['bun', 'dev:build'], {
         windowsHide: true,
@@ -172,7 +195,7 @@ export async function watchCommand(opts: WatchOptions) {
     // Initialize hot-hook only once on the first build
     if (!hotInitialized) {
       await hot.init({
-        root: join(folder, JSON.parse(await fs.readFile(join(folder, 'package.json'), 'utf-8'))['module']),
+        root: join(folder, packageJSON['module']),
         // Ensure sandstone remains a singleton so CLI and user code share the same pack instance
         globalSingletons: ['**/node_modules/sandstone/**', '**/sandstone/dist/**'],
         // Disable hot-hook's internal watcher - we use parcel watcher and notify hot-hook
@@ -312,7 +335,7 @@ export async function watchCommand(opts: WatchOptions) {
       const inResources = eventPath.includes('resources/')
       const endsJs = eventPath.endsWith('.js')
       const endsJson = eventPath.endsWith('.json')
-      const endsTs = eventPath.endsWith('.ts')
+      const endsTs = eventPath.endsWith('.ts') && !eventPath.endsWith('.test.ts')
 
       if (inSrc || inResources || endsJs || endsJson || endsTs) {
         trackedChanges.push({

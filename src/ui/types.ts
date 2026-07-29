@@ -29,4 +29,5 @@ export interface WatchUIAPI {
   setChangedFiles: (files: TrackedChange[]) => void
   setBuildResult: (result: BuildResult) => void
   setLiveLog: (level: string | false, args: unknown[]) => void
+  exit: (() => void) | undefined
 }

@@ -256,6 +256,7 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: Wa
       setChangedFiles,
       setBuildResult,
       setLiveLog,
+      exit: () => exit!(),
     }
     ;(globalThis as Record<string, unknown>).__watchUIAPI = api
     drainLiveLogBuffer()

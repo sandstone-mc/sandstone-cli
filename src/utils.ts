@@ -10,6 +10,21 @@ export function hash(data: string | Buffer): string {
   return crypto.createHash('md5').update(data).digest('hex')
 }
 
+/** SHA-256 a file's bytes and return hex digest */
+export async function sha256File(p: string): Promise<string> {
+  const buf = await fs.promises.readFile(p)
+  return crypto.createHash('sha256').update(buf).digest('hex')
+}
+
+/** Detect the package manager used in a project directory via lockfile */
+export async function detectPackageManager(dir: string): Promise<'bun' | 'pnpm' | 'yarn' | 'npm' | null> {
+  if (fs.existsSync(path.join(dir, 'bun.lock')) || fs.existsSync(path.join(dir, 'bun.lockb'))) return 'bun'
+  if (fs.existsSync(path.join(dir, 'pnpm-lock.yaml'))) return 'pnpm'
+  if (fs.existsSync(path.join(dir, 'yarn.lock'))) return 'yarn'
+  if (fs.existsSync(path.join(dir, 'package-lock.json'))) return 'npm'
+  return null
+}
+
 /** Normalize a path to use forward slashes */
 export const normalizePath = (p: string) => p.replaceAll('\\', '/')
 

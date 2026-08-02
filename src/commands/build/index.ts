@@ -8,6 +8,7 @@ import type { BuildResult, ResourceCounts } from '../../ui/types.js'
 import { log, initLoggerNoFile, setSilent } from '../../ui/logger.js'
 import { hash } from '../../utils.js'
 import { resolveStackTrace } from '../../utils/source-map.js'
+import { syncLinkedLibraries } from '../link.js'
 import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../../updateCheck.js'
 
 import {
@@ -514,6 +515,14 @@ export async function _buildCommand(
   watching = false
 ): Promise<BuildResult> {
   const folder = _folder ?? opts.path
+
+  // Sync any linked libraries before the build. `_buildCommand` is the
+  // internal entry point used by `sand watch`, which calls it on every
+  // rebuild tick — including the ones triggered by a linked library's
+  // `link_version` mtime change. The sync must run here (not just in the
+  // user-facing `buildCommand`) so the watch loop actually picks up the
+  // new tarball on each tick.
+  await syncLinkedLibraries(folder)
 
   try {
     const result = await _buildProject(opts, folder, true, existingContext, watching)

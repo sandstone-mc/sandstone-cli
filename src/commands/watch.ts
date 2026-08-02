@@ -5,6 +5,7 @@ import { render } from 'ink'
 
 import { normalizePath } from '../utils.js'
 import { _buildCommand, type BuildOptions, type BuildContext } from './build/index.js'
+import { repackIfLinked } from './link.js'
 import { WatchUI, getWatchUIAPI } from '../ui/WatchUI.js'
 import { initLogger, log, logInfo, logWarn, logError, logDebug, logTrace, setLiveLogCallback } from '../ui/logger.js'
 import type { TrackedChange, ChangeCategory } from '../ui/types.js'
@@ -16,6 +17,10 @@ import { join, relative } from 'node:path'
 // Console capture for watch mode - wraps console to redirect output to our log file
 const originalConsole = globalThis.console
 let consoleWrapped = false
+
+// Tracked by watchCommand so cleanup() can stop the per-library
+// fs.watchFile watchers on exit.
+let linkVersionWatchers: { file: string }[] = []
 
 function enableConsoleCapture() {
   if (consoleWrapped) return
@@ -190,6 +195,11 @@ export async function watchCommand(opts: WatchOptions) {
       })
 
       await CLI.exited
+
+      // If the user opted into linking this library (via `sand link` in this
+      // directory), repack the tarball and refresh .sandstone/link_version
+      // so consuming projects can pick up the change on their next build.
+      await repackIfLinked(opts.path)
     }
 
     // Initialize hot-hook only once on the first build
@@ -405,6 +415,27 @@ export async function watchCommand(opts: WatchOptions) {
   // Initial build
   await onFilesChange([])
 
+  // Also watch each linked library's `.sandstone/link_version` file via
+  // fs.watchFile (parcel's subscribe only takes a single root). When the
+  // library is re-packed, that file's mtime changes; the watch picks it
+  // up and runs a rebuild, which calls syncLinkedLibraries and pulls in
+  // the new tarball. We only watch link_version (not the whole .sandstone
+  // dir) so the tarball write itself doesn't re-trigger.
+  const linksFilePath = join(opts.path, '.sandstone', 'links.json')
+  linkVersionWatchers = []
+  try {
+    const linksData = JSON.parse(await fs.readFile(linksFilePath, 'utf-8')) as { links?: Record<string, { libraryPath: string }> }
+    for (const entry of Object.values(linksData.links ?? {})) {
+      const lv = join(entry.libraryPath, '.sandstone', 'link_version')
+      if (!(await fs.pathExists(lv))) continue
+      const onChange = () => onFilesChange([{ path: lv, category: 'dependencies' }])
+      fs.watchFile(lv, { interval: 500 }, (curr, prev) => {
+        if (curr.mtimeMs !== prev.mtimeMs) onChange()
+      })
+      linkVersionWatchers.push({ file: lv })
+    }
+  } catch {}
+
   const defaultIgnore = ['**/.git/**/*', '**/.sandstone/**/*', '**/resources/cache/**/*', '**/*tmp*', '**/*.swp', 'lib/**/*']
   const cliIgnore = (opts.ignore ?? []).flatMap(p => p.split(',').filter(Boolean))
   const ignorePatterns = [...defaultIgnore, ...cliIgnore]
@@ -433,6 +464,8 @@ async function cleanup(subscription: ParcelWatcher.AsyncSubscription, unmountInk
   // their own logic before exiting.
   unmountInk?.()
   await subscription.unsubscribe()
+  // Stop the fs.watchFile watchers for linked libraries' link_version files.
+  for (const w of linkVersionWatchers) fs.unwatchFile(w.file)
 }
 
 async function exit(subscription: ParcelWatcher.AsyncSubscription, unmountInk?: () => void) {

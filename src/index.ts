@@ -3,7 +3,7 @@ import { Argument, Command } from 'commander'
 import figlet from 'figlet'
 
 import { CLI_VERSION } from './version.js'
-import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand, cleanCommand } from './commands/index.js'
+import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand, cleanCommand, linkCommand, unlinkCommand } from './commands/index.js'
 import { BuildOptions } from './shared.js'
 
 const commander = new Command()
@@ -105,6 +105,20 @@ CLI
   .command('refresh')
   .description('Clear & update cached Smithed libraries. ⛏')
   .action(refreshCommand)
+
+CLI
+  .command('link')
+  .description('Pack the current library (no args) or link a local library into this project. ⛏')
+  .addOption(BuildOptions.get('path'))
+  .action((libraryPath: string | undefined, opts: { path: string }) => linkCommand({ path: opts.path, libraryPath }))
+  .addArgument(new Argument('[libraryPath]', 'Path to the library to link into this project. Omit to pack the current library.'))
+
+CLI
+  .command('unlink')
+  .description('Unlink a library. With a target, removes the link from this project (restoring the previous version). Without a target, unpacks the current library. ⛏')
+  .addOption(BuildOptions.get('path'))
+  .action((target: string | undefined, opts: { path: string }) => unlinkCommand({ path: opts.path, target }))
+  .addArgument(new Argument('[target]', 'Name or libraryPath to unlink from this project. Omit to unlink the current library.'))
 
 
 CLI.parse(process.argv)

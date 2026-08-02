@@ -150,7 +150,30 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   let namespace = projectName.replace(RegExp(/ /g), '_')
 
-  if (projectType === 'pack') {
+  // For libraries, the package name (and the linked dep in the test
+  // workspace) needs to be unique so the library can be installed into
+  // other projects by name. Suggest a scoped npm name by default — the
+  // user can override with any valid npm package name.
+  let libraryPackageName: string | undefined
+  if (projectType === 'library') {
+    const sanitized = projectName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '')
+    const suggested = `@my-scope/${sanitized || 'my-library'}`
+    libraryPackageName = await input({
+      message: 'NPM package name for this library (scoped like @your-username/your-library is recommended, unscoped works too) >',
+      default: suggested,
+      validate: (v) => {
+        if (!v) return 'Package name is required'
+        if (v.length > 214) return 'Package name too long (max 214 chars)'
+        // Same rules as npm: lowercase, no spaces, may have @scope/
+        if (!/^@?[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)?$/.test(v)) {
+          return 'Invalid npm package name (lowercase, may be @scope/name)'
+        }
+        return true
+      },
+    })
+    packName += '-testing'
+    namespace += '_test'
+  } else {
     packName = (await input({
       message: 'Name of your output pack(s) (can be changed later) >',
       default: projectName,
@@ -160,9 +183,6 @@ export async function createCommand(_project: string, opts: CreateOptions) {
       message: 'Default namespace (can be changed later) >',
       default: namespace,
     }))
-  } else {
-    packName += '-testing'
-    namespace += '_test'
   }
 
   // Find the save directory
@@ -279,6 +299,32 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   await fs.rm(tmpClone, { force: true, recursive: true })
 
   await fs.rm(path.join(projectPath, '.git'), { force: true, recursive: true })
+
+  // For libraries, rewrite the package.json files BEFORE installing so
+  // the install picks up the new names. The template ships with
+  // `name: "sandstone-template"` and a test workspace that links to it
+  // via `link:sandstone-template`; both need to follow the user's
+  // chosen package name or the workspace link will break.
+  if (projectType === 'library' && libraryPackageName) {
+    const rootPkgPath = path.join(projectPath, 'package.json')
+    const rootPkg = JSON.parse(await fs.readFile(rootPkgPath, 'utf-8'))
+    const oldRootName = rootPkg.name
+    rootPkg.name = libraryPackageName
+    await fs.writeFile(rootPkgPath, JSON.stringify(rootPkg, null, 2) + '\n')
+
+    const testPkgPath = path.join(projectPath, 'test', 'package.json')
+    if (await fs.pathExists(testPkgPath)) {
+      const testPkg = JSON.parse(await fs.readFile(testPkgPath, 'utf-8'))
+      testPkg.name = `${libraryPackageName}-test`
+      // The test workspace links to the root via the package name; update
+      // the dep spec so the link resolves to our renamed library.
+      if (testPkg.dependencies?.[oldRootName]) {
+        testPkg.dependencies[libraryPackageName] = testPkg.dependencies[oldRootName]
+        delete testPkg.dependencies[oldRootName]
+      }
+      await fs.writeFile(testPkgPath, JSON.stringify(testPkg, null, 2) + '\n')
+    }
+  }
 
   exec(`${packageManager} install`)
 

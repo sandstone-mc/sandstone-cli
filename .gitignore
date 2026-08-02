@@ -6,6 +6,7 @@
 /tmp
 /.test-runs
 node_modules
+/.temp
 cli-old
 
 

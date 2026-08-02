@@ -155,34 +155,144 @@ async function runWithPty(
     let outputBuffer = ''
     let fullOutput = ''
     let exited = false
+    let pendingWrite = false
+    // After we send a response, we expect the current prompt to close
+    // (signalled by `\x1B[?25h` cursor-show) before the next prompt's
+    // cursor-hide `\x1B[?25l` should trigger us again. The version select
+    // re-renders the same `\x1B[?25l` for every keypress, so without this
+    // gate the harness fires repeatedly and sends responses to the wrong
+    // prompt.
+    let awaitingPromptClose = false
+    let isFirstPrompt = true
+    const DEBUG = process.env.HARNESS_DEBUG === '1'
+
+    if (DEBUG) {
+      console.error(`[harness] runWithPty: ${fullCommand} (cwd=${cwd})`)
+      console.error(`[harness] responses: ${JSON.stringify(responses)}`)
+    }
 
     proc.onExit(({ exitCode }) => {
+      if (DEBUG) console.error(`[harness] onExit: code=${exitCode}, responsesSent=${responseIndex}`)
       exited = true
       resolve({ output: fullOutput, exitCode })
     })
 
     proc.onData((data) => {
       fullOutput += data
+
+      // Detect cursor-show (prompt closed). The cursor-show is emitted by
+      // inquirer when a prompt is submitted; it legitimately happens while
+      // our sendResponse chain is still finishing, so we don't gate this
+      // on pendingWrite. The pendingWrite gate below is what prevents
+      // overlapping triggers — not this one.
+      if (outputBuffer.includes('\x1B[?25h') || data.toString('binary').includes('\x1B[?25h')) {
+        if (DEBUG && awaitingPromptClose) console.error(`[harness] saw cursor-show (prompt closed)`)
+        awaitingPromptClose = false
+        isFirstPrompt = false
+      }
+
       outputBuffer += data
 
-      if (!exited && responseIndex < responses.length && outputBuffer.includes('?')) {
+      if (DEBUG) {
+        const raw = data.toString('binary').replace(/[^\x20-\x7E]/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
+        const bufRaw = outputBuffer.toString('binary').replace(/[^\x20-\x7E]/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`)
+        console.error(`[harness] DATA ${data.length}B: ${JSON.stringify(raw.slice(-200))}`)
+        console.error(`[harness] BUF ${outputBuffer.length}B: ${JSON.stringify(bufRaw.slice(-400))}`)
+      }
+
+      // Decide whether to fire. "Ready" means the prompt is fully rendered
+      // and waiting for input. Three signal shapes:
+      //   - `\x1B[?25l` (cursor-hide): select prompts entering raw mode.
+      //   - `(y/N)`: confirm prompt hint that only appears once the
+      //     confirm prompt body is fully rendered.
+      //   - `\x1B[\d+G` (cursor position escape) at end of buffer: any
+      //     prompt (including input) ends its render by positioning the
+      //     cursor at a specific column.
+      // The `awaitingPromptClose` gate ensures we only fire once per
+      // prompt — we need to have seen `\x1B[?25h` (cursor-show, sent when
+      // inquirer closes a prompt) since the last fire.
+      const hasRaw = outputBuffer.includes('\x1B[?25l')
+      const hasConfirmHint = /\(y\/N\)/.test(outputBuffer)
+      const hasPos = /\x1B\[\d+G$/.test(outputBuffer)
+      const ready = isFirstPrompt
+        ? hasConfirmHint || hasRaw || hasPos
+        : (hasRaw || hasPos) && !awaitingPromptClose
+
+      if (DEBUG) {
+        console.error(`[harness] CHECK idx=${responseIndex} pending=${pendingWrite} awaitingClose=${awaitingPromptClose} first=${isFirstPrompt} ready=${ready} (rawMode=${hasRaw} confirmHint=${hasConfirmHint} pos=${hasPos})`)
+      }
+
+      if (!exited && !pendingWrite && responseIndex < responses.length && ready) {
+        const target = responses[responseIndex]
+        if (DEBUG) console.error(`[harness] TRIGGER firing response ${responseIndex}: ${JSON.stringify(target)}`)
         outputBuffer = ''
+        awaitingPromptClose = true
+        pendingWrite = true   // stays true until sendResponse fully completes
         setTimeout(() => {
-          if (!exited && responseIndex < responses.length) {
-            const response = responses[responseIndex]
-            const bytes = response.map(keystrokeToBytes).join('')
-            try {
-              proc.write(bytes)
-            } catch {
-              exited = true
-              resolve({ output: fullOutput, exitCode: null })
-              return
-            }
-            responseIndex++
-          }
-        }, 100)
+          sendResponse(responseIndex)
+        }, 200)
       }
     })
+
+    const sendResponse = (i: number) => {
+      if (exited) return
+      const target = responses[i]
+      if (!target) {
+        pendingWrite = false
+        scheduleTriggerCheck()
+        return
+      }
+      let j = 0
+      const sendOne = () => {
+        if (exited || j >= target.length) {
+          if (!exited) {
+            responseIndex = i + 1
+            if (DEBUG) console.error(`[harness] responseIndex now ${responseIndex}`)
+            pendingWrite = false
+            // Re-check trigger: the new prompt's data may have arrived
+            // while this sendResponse was still running, and we'd have
+            // skipped firing because pendingWrite was true.
+            scheduleTriggerCheck()
+          }
+          return
+        }
+        const key = target[j]
+        const bytes = keystrokeToBytes(key)
+        j++
+        if (DEBUG) console.error(`[harness] WRITE key=${JSON.stringify(key)} bytes=${JSON.stringify(bytes)} (${j}/${target.length} of response ${i})`)
+        try { proc.write(bytes) } catch (e) {
+          if (DEBUG) console.error(`[harness] write error: ${e}`)
+          exited = true
+          resolve({ output: fullOutput, exitCode: null })
+          return
+        }
+        setTimeout(sendOne, 30)
+      }
+      sendOne()
+    }
+
+    // Re-run the trigger check on a short timer so we catch prompts that
+    // finished rendering while a previous sendResponse was still in flight.
+    const scheduleTriggerCheck = () => {
+      setTimeout(() => {
+        if (exited || pendingWrite) return
+        const hasRaw = outputBuffer.includes('\x1B[?25l')
+        const hasConfirmHint = /\(y\/N\)/.test(outputBuffer)
+        const hasPos = /\x1B\[\d+G$/.test(outputBuffer)
+        const ready = isFirstPrompt
+          ? hasConfirmHint || hasRaw || hasPos
+          : (hasRaw || hasPos) && !awaitingPromptClose
+        if (DEBUG) console.error(`[harness] RECHECK idx=${responseIndex} ready=${ready} (rawMode=${hasRaw} confirmHint=${hasConfirmHint} pos=${hasPos})`)
+        if (!exited && !pendingWrite && responseIndex < responses.length && ready) {
+          const target = responses[responseIndex]
+          if (DEBUG) console.error(`[harness] TRIGGER firing response ${responseIndex}: ${JSON.stringify(target)}`)
+          outputBuffer = ''
+          awaitingPromptClose = true
+          pendingWrite = true
+          setTimeout(() => sendResponse(responseIndex), 200)
+        }
+      }, 50)
+    }
 
     setTimeout(() => {
       if (!exited) {

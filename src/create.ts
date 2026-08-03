@@ -4,7 +4,7 @@ import figlet from 'figlet'
 
 import { CLI_VERSION } from './version.js'
 import { createCommand } from './commands/create.js'
-import { BuildOptions } from './shared.js'
+import { BuildOptions } from './utils/commander.js'
 
 const commander = new Command()
 

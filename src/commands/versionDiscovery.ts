@@ -13,7 +13,7 @@
  * PM-agnostic: never shells out to `npm`/`bun`/etc.
  */
 
-import { hasGh } from '../utils.js'
+import { hasGh } from '../utils/index.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import fs from 'fs'

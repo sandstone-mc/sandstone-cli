@@ -6,10 +6,10 @@ import { split } from 'obliterator'
 
 import type { BuildResult, ResourceCounts } from '../../ui/types.js'
 import { log, initLoggerNoFile, setSilent } from '../../ui/logger.js'
-import { hash } from '../../utils.js'
+import { hash } from '../../utils/index.js'
 import { resolveStackTrace } from '../../utils/source-map.js'
 import { syncLinkedLibraries } from '../link.js'
-import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../../updateCheck.js'
+import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../../utils/updateCheck.js'
 
 import {
   type SandstoneCache,

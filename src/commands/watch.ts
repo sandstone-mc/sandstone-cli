@@ -3,7 +3,7 @@ import ParcelWatcher, { subscribe, type Event } from '@parcel/watcher'
 import React from 'react'
 import { render } from 'ink'
 
-import { normalizePath } from '../utils.js'
+import { normalizePath } from '../utils/index.js'
 import { _buildCommand, type BuildOptions, type BuildContext } from './build/index.js'
 import { repackIfLinked } from './link.js'
 import { WatchUI, getWatchUIAPI } from '../ui/WatchUI.js'
@@ -18,9 +18,10 @@ import { join, relative } from 'node:path'
 const originalConsole = globalThis.console
 let consoleWrapped = false
 
-// Tracked by watchCommand so cleanup() can stop the per-library
-// fs.watchFile watchers on exit.
-let linkVersionWatchers: { file: string }[] = []
+// linkVersionWatchers is intentionally local to each watchCommand invocation
+// (see below) — keeping it module-level used to leak fs.watchFile listeners
+// across re-entrant runs because reassigning the array never unwatched the
+// previous entries.
 
 function enableConsoleCapture() {
   if (consoleWrapped) return
@@ -78,8 +79,12 @@ export async function watchCommand(opts: WatchOptions) {
 
   let subscription: Awaited<ReturnType<typeof subscribe>>
 
-  // Initialize logger
-  initLogger(folder)
+  // Initialize logger and keep the cleanup function so we can flush +
+  // close the underlying WriteStream (and drain pending writes) on exit.
+  // Discarding the return value previously left the .sandstone/watch.log
+  // FD open and let pendingWrites grow unbounded for the lifetime of the
+  // watch session.
+  const closeLogger = initLogger(folder)
 
   // Set up live log callback to send to UI
   setLiveLogCallback((level, args) => {
@@ -103,14 +108,14 @@ export async function watchCommand(opts: WatchOptions) {
       onManualRebuild: handleManualRebuild,
       cwd: opts.path,
       // Since this isn't SIGINT, its fine that we don't await this
-      exit: () => exit(subscription, unmountInk),
+      exit: () => exit(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers),
       // Cancels the watcher + unmounts the UI, runs the update commands,
       // then exits the process.
       onRunUpdates: async (commands) => {
         // Fully stop the FS watcher + ink BEFORE running commands — file
         // system changes from the update commands shouldn't re-trigger a
         // rebuild or cause the UI to flicker.
-        await cleanup(subscription, unmountInk)
+        await cleanup(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers)
         // Pick a shell that runs the user's command natively per platform.
         // POSIX: `sh -c <cmd>`; Windows: `cmd /c <cmd>`.
         const shellCmd = process.platform === 'win32' ? 'cmd' : 'sh'
@@ -422,7 +427,7 @@ export async function watchCommand(opts: WatchOptions) {
   // the new tarball. We only watch link_version (not the whole .sandstone
   // dir) so the tarball write itself doesn't re-trigger.
   const linksFilePath = join(opts.path, '.sandstone', 'links.json')
-  linkVersionWatchers = []
+  const linkVersionWatchers: { file: string }[] = []
   try {
     const linksData = JSON.parse(await fs.readFile(linksFilePath, 'utf-8')) as { links?: Record<string, { libraryPath: string }> }
     for (const entry of Object.values(linksData.links ?? {})) {
@@ -454,23 +459,40 @@ export async function watchCommand(opts: WatchOptions) {
     }
   )
 
-  // Handle cleanup on exit
-  process.on('SIGINT', async () => await exit(subscription, unmountInk))
+  // Handle cleanup on exit — hold the handler reference so cleanup() can
+  // process.off() it. Previously every watchCommand invocation stacked a
+  // new SIGINT listener that never got removed; on SIGINT they all fired
+  // against the wrong subscription.
+  const sigintHandler = async () => await exit(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers)
+  process.on('SIGINT', sigintHandler)
 }
 
-async function cleanup(subscription: ParcelWatcher.AsyncSubscription, unmountInk?: () => void) {
+async function cleanup(subscription: ParcelWatcher.AsyncSubscription, unmountInk?: () => void, closeLogger?: () => Promise<void>, sigintHandler?: () => Promise<void>, linkVersionWatchers?: { file: string }[]) {
   // Stops the parcel FS watcher + unmounts ink. Does NOT exit the process —
   // callers that want to run more code (e.g. update commands) should chain
   // their own logic before exiting.
   unmountInk?.()
   await subscription.unsubscribe()
   // Stop the fs.watchFile watchers for linked libraries' link_version files.
-  for (const w of linkVersionWatchers) fs.unwatchFile(w.file)
+  if (linkVersionWatchers) {
+    for (const w of linkVersionWatchers) fs.unwatchFile(w.file)
+  }
+  // Detach our SIGINT handler so a stale watch can't intercept the next
+  // process's Ctrl+C.
+  if (sigintHandler) process.off('SIGINT', sigintHandler)
+  // Flush + close the logger's WriteStream; release any pending writes.
+  await closeLogger?.()
 }
 
-async function exit(subscription: ParcelWatcher.AsyncSubscription, unmountInk?: () => void) {
+async function exit(
+  subscription: ParcelWatcher.AsyncSubscription,
+  unmountInk?: () => void,
+  closeLogger?: () => Promise<void>,
+  sigintHandler?: () => Promise<void>,
+  linkVersionWatchers?: { file: string }[],
+) {
   log('Watch stopped')
-  await cleanup(subscription, unmountInk)
+  await cleanup(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers)
   process.exit(0)
 }
 

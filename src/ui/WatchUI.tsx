@@ -5,7 +5,7 @@ import { format } from 'util'
 import type { WatchStatus, TrackedChange, BuildResult, WatchUIAPI, ChangeCategory } from './types.js'
 import { drainLiveLogBuffer } from './logger.js'
 import { UpdateCheckIndicator, type IndicatorState } from './UpdateCheckIndicator.jsx'
-import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../updateCheck.js'
+import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../utils/updateCheck.js'
 
 const MAX_CONTENT_LINES = 8
 

@@ -2,6 +2,7 @@ import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
+import { Worker } from 'node:worker_threads'
 import { execSync } from 'child_process'
 import chalk from 'chalk-template'
 
@@ -10,10 +11,77 @@ export function hash(data: string | Buffer): string {
   return crypto.createHash('md5').update(data).digest('hex')
 }
 
-/** SHA-256 a file's bytes and return hex digest */
+/**
+ * Worker source for the SHA-256 hash. Inlined as a string and loaded with
+ * `new Worker(code, { eval: true })` so the bundle ships as a single file
+ * (Bun's bundler doesn't extract `new URL(..., import.meta.url)` workers
+ * for this CLI's single-entry `--outdir=lib` build, so a sibling .js file
+ * would 404 at runtime).
+ *
+ * The worker streams chunks (peak memory O(chunkSize), not O(fileSize)),
+ * destroys its read stream in `finally`, and posts a single hex digest
+ * (or `{ __error }`) before exiting.
+ */
+const HASH_WORKER_SOURCE = `
+import { parentPort, workerData } from 'node:worker_threads'
+import { createReadStream } from 'node:fs'
+import { createHash } from 'node:crypto'
+
+const { filePath } = workerData
+;(async () => {
+  const hasher = createHash('sha256')
+  const stream = createReadStream(filePath)
+  try {
+    for await (const chunk of stream) {
+      hasher.update(chunk)
+    }
+    parentPort.postMessage(hasher.digest('hex'))
+  } catch (err) {
+    parentPort.postMessage({ __error: err.message })
+  } finally {
+    stream.destroy()
+  }
+})()
+`
+
+/**
+ * SHA-256 a file's bytes and return the hex digest.
+ *
+ * Runs in a dedicated worker thread so the file read + hashing never
+ * touches the main thread's heap. The parent terminates the worker once
+ * the digest is in hand — leaving no live FD, no lingering thread, and no
+ * closure keeping the worker reachable after the promise resolves.
+ */
 export async function sha256File(p: string): Promise<string> {
-  const buf = await fs.promises.readFile(p)
-  return crypto.createHash('sha256').update(buf).digest('hex')
+  return await new Promise<string>((resolve, reject) => {
+    let settled = false
+    const worker = new Worker(HASH_WORKER_SOURCE, {
+      eval: true,
+      workerData: { filePath: p },
+    })
+    const finish = (fn: () => void) => {
+      if (settled) return
+      settled = true
+      // Detach all listeners before terminate so an in-flight `exit` event
+      // can't fire the rejection path again on a thread we already tore down.
+      worker.removeAllListeners()
+      worker.terminate().catch(() => { /* already gone */ })
+      fn()
+    }
+    worker.once('message', (msg: unknown) => {
+      if (msg && typeof msg === 'object' && '__error' in (msg as object)) {
+        finish(() => reject(new Error((msg as { __error: string }).__error)))
+      } else {
+        finish(() => resolve(msg as string))
+      }
+    })
+    worker.once('error', (err) => {
+      finish(() => reject(err))
+    })
+    worker.once('exit', (code) => {
+      finish(() => reject(new Error(`sha256 worker exited with code ${code}`)))
+    })
+  })
 }
 
 /** Detect the package manager used in a project directory via lockfile */

@@ -8,7 +8,7 @@ import { nanoid } from 'nanoid'
 import { confirm, select, input } from '@inquirer/prompts'
 
 import { CLI_VERSION } from '../version.js'
-import { getWorldsList, hasBun, hasPnpm, hasYarn } from '../utils.js'
+import { getWorldsList, hasBun, hasPnpm, hasYarn } from '../utils/index.js'
 import { getAvailableSandstoneVersions } from './versionDiscovery.js'
 import { discoverAllInstances, type MinecraftInstance } from '../launchers/index.js'
 
@@ -131,18 +131,41 @@ export async function createCommand(_project: string, opts: CreateOptions) {
 
   const sv = (v: string) => new SemVer(v)
 
+  // Per-minor release identifier. `version` is the concrete `${X}.{Y}.0`
+  // SemVer used for installs + the `git checkout pack-X.Y.0` command
+  // (SemVer ctor rejects `1.1.x`, and the template's branch tags are
+  // always `pack-X.Y.0`). `short` is the display label (npm dist-tag
+  // style: `1.1.x`).
+  const minorTag = (info: typeof available[number]) => {
+    const version = `${info.major}.${info.minor}.0`
+    return { version, short: `${info.major}.${info.minor}.x` }
+  }
+
   const available = await getAvailableSandstoneVersions()
+  // npm dist-tag specifier per minor. The highest minor in the discovered
+  // list is the current master and resolves to `latest`; any older minor
+  // has been archived and ships its own `sandstone-{X}-{Y}` tag (e.g.
+  // `sandstone-1-1`). When 1.3.x is released, 1.2.x gets archived and
+  // automatically picks up `sandstone-1-2` — no CLI change needed.
+  const currentMasterMinor = available[0]?.minor
+  const sandstoneDistTag = (info: { major: number; minor: number }): string =>
+    info.minor === currentMasterMinor
+      ? 'latest'
+      : `sandstone-${info.major}-${info.minor}`
   const versionChoices = available.map(
-    (info): [SemVer, SemVer] => [sv(`${info.major}.${info.minor}.0`), sv(CLI_VERSION)]
+    (info): [SemVer, SemVer] => [sv(minorTag(info).version), sv(CLI_VERSION)]
   )
 
   const version = await select({
     message: 'Which version of Sandstone do you want to use?',
-    choices: available.map((info, i) => ({
-      name: `Release Version ${info.major}.${info.minor} (MC ${info.mcVersion})`,
-      value: versionChoices[i]!,
-      short: `${info.major}.${info.minor}.0`,
-    })),
+    choices: available.map((info, i) => {
+      const tag = minorTag(info)
+      return {
+        name: `Release Version ${info.major}.${info.minor} (MC ${info.mcVersion})`,
+        value: versionChoices[i]!,
+        short: tag.short,
+      }
+    }),
     default: versionChoices[0],
   })
 
@@ -282,7 +305,20 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   fs.mkdirSync(projectPath, { recursive: true })
 
   // Create project & install dependencies
-  console.log(chalk`Installing {rgb(229, 193, 0) sandstone@${version[0]}}, {rgb(229, 193, 0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`)
+  // `version[0]` is the concrete SemVer (used by `git checkout pack-X.Y.0`
+  // below) but the displayed install specifier is the npm dist-tag —
+  // `latest` for the current master minor, `sandstone-{X}-{Y}` for an
+  // archived branch. Same version either way; the tag is just more stable.
+  const sandstoneTag = version[0].minor === currentMasterMinor
+    ? 'latest'
+    : `sandstone-${version[0].major}-${version[0].minor}`
+  // MC version for the selected minor (e.g. `26.2`). Found by matching the
+  // picked SemVer back into the discovered list; majors are unique per
+  // minor so a `(major, minor)` lookup is unambiguous.
+  const selectedMcVersion = available.find(
+    (v) => v.major === version[0].major && v.minor === version[0].minor,
+  )?.mcVersion
+  console.log(chalk`Installing {rgb(229, 193, 0) sandstone@${sandstoneTag}} for {green Minecraft ${selectedMcVersion}}, {rgb(229, 193, 0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`)
 
   const exec = (cmd: string) => child.execSync(cmd, { cwd: projectPath })
 

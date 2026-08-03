@@ -272,7 +272,7 @@ function resolveChannel(distTags: Record<string, string>, installed: string, pac
 
 // ---------- sandstone update check ----------
 
-import { sandstoneMinorToMCString } from './utils/sandstoneToMC.js'
+import { sandstoneMinorToMCString } from './sandstoneToMC.js'
 
 export async function runUpdateCheck(projectDir: string): Promise<SandstoneUpdateInfo | null> {
 	const installed = await readInstalledSandstoneVersion(projectDir)
@@ -312,7 +312,7 @@ export async function runUpdateCheck(projectDir: string): Promise<SandstoneUpdat
 
 // ---------- CLI version + cross-instance detection ----------
 
-import { CLI_VERSION } from './version.js'
+import { CLI_VERSION } from '../version.js'
 
 interface CLIRuntimeContext {
 	instance: CLIInstance

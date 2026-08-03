@@ -4,7 +4,7 @@ import fs from 'fs-extra'
 import AdmZip from 'adm-zip'
 
 import { log } from '../../ui/logger.js'
-import { canUseSymlinks } from '../../utils.js'
+import { canUseSymlinks } from '../../utils/index.js'
 
 import type { handlerReadFile, PackType } from 'sandstone/pack'
 

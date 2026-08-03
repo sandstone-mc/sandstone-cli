@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import fs from 'fs-extra'
 
-import { detectPackageManager, sha256File } from '../utils.js'
+import { detectPackageManager, sha256File } from '../utils/index.js'
 import { initLoggerNoFile, log, logWarn, logError } from '../ui/logger.js'
 
 const execFileAsync = promisify(execFile)
@@ -185,6 +185,17 @@ async function linkConsumer(projectPath: string, libraryPath: string): Promise<v
   const packageName = (typeof pkg.name === 'string' && pkg.name.length > 0) ? pkg.name : path.basename(libAbs)
   const existing = data.links[packageName]
 
+  // Garbage-collect any orphan entries pointing at the same library under
+  // an older name. Happens when the library renames itself in package.json
+  // between links (repo rename, scope change, etc.) — without this, the old
+  // key survives forever and `sand unlink` can only find it by path.
+  for (const [oldName, oldEntry] of Object.entries(data.links)) {
+    if (oldName === packageName) continue
+    if (oldEntry.libraryPath === libAbs) {
+      delete data.links[oldName]
+    }
+  }
+
   // Idempotency: hash matches and lib is installed → no-op
   if (existing && existing.currentHash === currentHash && (await isInstalled(projectAbs, packageName))) {
     log(`[link] ${packageName} is already linked and up to date.`)
@@ -238,13 +249,19 @@ export async function syncLinkedLibraries(projectPath: string): Promise<number> 
 
   const data = await readLinksFile(abs)
   let updated = 0
+  let dropped = 0
 
   for (const [name, entry] of Object.entries(data.links)) {
     const versionFile = path.join(entry.libraryPath, '.sandstone', LINK_VERSION_FILENAME)
     const tarballPath = entry.tarballPath
 
     if (!(await fs.pathExists(versionFile)) || !(await fs.pathExists(tarballPath))) {
-      logWarn(`[link] Library "${name}" at ${entry.libraryPath} is missing its tarball or link_version. Skipping.`)
+      // Library moved or was `sand unlink`-ed from its own directory — the
+      // entry points at a tarball/version file that no longer exists. Drop
+      // it so we don't warn-skip the same ghost on every rebuild.
+      logWarn(`[link] Library "${name}" at ${entry.libraryPath} is missing its tarball or link_version. Dropping stale entry.`)
+      delete data.links[name]
+      dropped++
       continue
     }
 
@@ -272,7 +289,7 @@ export async function syncLinkedLibraries(projectPath: string): Promise<number> 
     updated++
   }
 
-  if (updated > 0) {
+  if (updated > 0 || dropped > 0) {
     await writeLinksFile(abs, data)
   }
   return updated

@@ -4,7 +4,7 @@ import fs from 'fs-extra'
 import { DataPackDependencies, ResourcePackDependencies, type PackType } from 'sandstone/pack'
 
 import type { SandstoneCache } from './export.js'
-import { hash } from '../../utils.js'
+import { hash } from '../../utils/index.js'
 import { SandstoneConfig } from 'sandstone'
 
 export type FileExclusions = {

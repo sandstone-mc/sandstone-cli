@@ -115,13 +115,18 @@ export async function createSymlink(
   try {
     const currentlyAllowed = (await fs.readFile(allowedList, 'utf-8')).replace(/\r/g, '')
 
-    if (currentlyAllowed.match(new RegExp(`^${allowPath}$`, 'm')) === null) {
-      log('[symlink] Adding workspace to allowed_symlinks.txt. If the game is running please restart it.')
-      await fs.writeFile(allowedList, `${currentlyAllowed}\n#\n${comment}${allowPath}`)
-    } else {
+    // Do not build a RegExp from Minecraft's glob syntax: `**` is invalid
+    // regex syntax and would make the catch block overwrite the allowlist.
+    if (currentlyAllowed.split('\n').includes(allowPath)) {
       log('[symlink] Workspace already in allowed_symlinks.txt, skipping...')
+    } else {
+      log('[symlink] Adding workspace to allowed_symlinks.txt. If the game is running please restart it.')
+      const separator = currentlyAllowed.length > 0 && !currentlyAllowed.endsWith('\n') ? '\n' : ''
+      await fs.appendFile(allowedList, `${separator}#\n${comment}${allowPath}`)
     }
-  } catch (e) {
+  } catch (e: any) {
+    if (e.code !== 'ENOENT') throw e
+
     log('[symlink] Creating allowed_symlinks.txt. If the game is running please restart it.')
     await fs.writeFile(allowedList, `${comment}${allowPath}`)
   }

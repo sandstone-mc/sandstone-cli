@@ -327,7 +327,7 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   const tmpClone = path.join(projectPath, `.sandstone-template-${Date.now()}`)
   exec(`git clone https://github.com/sandstone-mc/sandstone-template.git ${tmpClone}`)
 
-  exec(`git -C ${tmpClone} checkout ${projectType}-${version[0]}`)
+  exec(`git -C ${tmpClone} checkout ${projectType === 'library' ? 'b151f33' : `${projectType}-${version[0]}`}`)
 
   for (const entry of fs.readdirSync(tmpClone)) {
     await fs.move(path.join(tmpClone, entry), path.join(projectPath, entry), { overwrite: true })

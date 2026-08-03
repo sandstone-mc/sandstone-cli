@@ -3,26 +3,45 @@ name: Notify Discord on Release
 on:
   release:
     types: [published]
-  # Manual trigger for testing the Discord embed without publishing a real release.
+  # Manual trigger for previewing the Discord embed without publishing a real release.
   workflow_dispatch:
     inputs:
-      release_name:
-        description: "Release title shown in the embed"
-        required: true
-        default: "v0.0.0-test"
-      release_body:
-        description: "Release notes body (Markdown)"
-        required: true
-        default: "**Test release** — manual trigger from workflow_dispatch."
-      release_html_url:
-        description: "URL the embed title links to"
+      tag:
+        description: "Release tag to fetch (only used for workflow_dispatch)"
         required: false
-        default: "https://github.com/sandstone-mc/sandstone-cli/releases"
+        default: "v2.5.10"
 
 jobs:
   notify:
     runs-on: ubuntu-latest
     steps:
+      # For workflow_dispatch runs, fetch the release payload from the GitHub
+      # API so the action sees the same raw body / name / url that a real
+      # `release: published` event would carry. The action does its own
+      # formatting downstream (whitespace, head reduction, mention links),
+      # so feeding it the identical raw input guarantees identical output.
+      - name: Fetch release for manual test
+        if: github.event_name == 'workflow_dispatch'
+        id: manual
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${{ inputs.tag }}" \
+            --repo sandstone-mc/sandstone-cli \
+            --json name,body,url > release.json
+
+          {
+            echo "name<<EOF_NAME"
+            jq -r .name release.json
+            echo "EOF_NAME"
+            echo "body<<EOF_BODY"
+            jq -r .body release.json
+            echo "EOF_BODY"
+            echo "url<<EOF_URL"
+            jq -r .url release.json
+            echo "EOF_URL"
+          } >> "$GITHUB_OUTPUT"
+
       - name: GitHub Releases to Discord
         uses: SethCohen/github-releases-to-discord@v1
         with:
@@ -33,9 +52,8 @@ jobs:
           footer_title: Changelog
           reduce_headings: true
           footer_timestamp: true
-          # When triggered via `release: published`, the action pulls these
-          # from `github.event.release` automatically. When triggered via
-          # `workflow_dispatch`, fall back to the inputs above.
-          release_name: ${{ github.event.release.name || inputs.release_name }}
-          release_body: ${{ github.event.release.body || inputs.release_body }}
-          release_html_url: ${{ github.event.release.html_url || inputs.release_html_url }}
+          # Real release: read from `github.event.release`. Manual run: read
+          # from the step outputs above. Identical formatting either way.
+          release_name: ${{ github.event.release.name || steps.manual.outputs.name }}
+          release_body: ${{ github.event.release.body || steps.manual.outputs.body }}
+          release_html_url: ${{ github.event.release.html_url || steps.manual.outputs.url }}

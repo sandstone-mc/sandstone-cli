@@ -319,14 +319,34 @@ export async function createCommand(_project: string, opts: CreateOptions) {
       // The test workspace links to the root via the package name; update
       // the dep spec so the link resolves to our renamed library.
       if (testPkg.dependencies?.[oldRootName]) {
-        testPkg.dependencies[libraryPackageName] = testPkg.dependencies[oldRootName]
+        // The template ships with `link:sandstone-template`, which bun
+        // resolves by the linked package's name. After renaming the
+        // library, rewrite the link target to match so install succeeds.
+        const oldSpec = testPkg.dependencies[oldRootName] as string
+        const newSpec = oldSpec.replace(oldRootName, libraryPackageName)
+        testPkg.dependencies[libraryPackageName] = newSpec
         delete testPkg.dependencies[oldRootName]
       }
       await fs.writeFile(testPkgPath, JSON.stringify(testPkg, null, 2) + '\n')
     }
+
+    // Rename in bun.lock too. The template ships a lockfile with the
+    // old `sandstone-template` names baked into `workspaces` and
+    // `packages` entries. Bun reads the lockfile to short-circuit
+    // resolution; without rewriting it, the workspace `link:<name>`
+    // entry would still point at the old name and the install would
+    // fail to resolve the link for scoped packages (bun's auto-link-
+    // during-install only works for unscoped names). A straight string
+    // replace on the lockfile is sufficient because both occurrences
+    // refer to the same template-supplied name.
+    const lockPath = path.join(projectPath, 'bun.lock')
+    if (await fs.pathExists(lockPath)) {
+      const lockContent = await fs.readFile(lockPath, 'utf-8')
+      await fs.writeFile(lockPath, lockContent.split(oldRootName).join(libraryPackageName))
+    }
   }
 
-  exec(`${packageManager} install`)
+  exec(`${packageManager} run setup`)
 
   const configPath = path.join(projectPath, `${projectType === 'library' ? 'test/' : ''}sandstone.config.ts`)
 

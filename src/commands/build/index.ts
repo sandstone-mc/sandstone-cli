@@ -208,6 +208,12 @@ async function _buildProject(
   existingContext?: BuildContext,
   watching = false
 ): Promise<BuildProjectResult | undefined> {
+  // Sync any linked libraries before the build. `_buildCommand` runs
+  // this on every watch tick (including the ones triggered by a linked
+  // library's `link_version` mtime change), so doing it once here keeps
+  // both `sand build` and `sand watch` consistent.
+  await syncLinkedLibraries(folder)
+
   // Read project package.json to get entrypoint
   const packageJsonPath = path.join(folder, 'package.json')
   const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'))
@@ -515,14 +521,6 @@ export async function _buildCommand(
   watching = false
 ): Promise<BuildResult> {
   const folder = _folder ?? opts.path
-
-  // Sync any linked libraries before the build. `_buildCommand` is the
-  // internal entry point used by `sand watch`, which calls it on every
-  // rebuild tick — including the ones triggered by a linked library's
-  // `link_version` mtime change. The sync must run here (not just in the
-  // user-facing `buildCommand`) so the watch loop actually picks up the
-  // new tarball on each tick.
-  await syncLinkedLibraries(folder)
 
   try {
     const result = await _buildProject(opts, folder, true, existingContext, watching)

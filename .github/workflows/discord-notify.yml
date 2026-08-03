@@ -1,0 +1,41 @@
+name: Notify Discord on Release
+
+on:
+  release:
+    types: [published]
+  # Manual trigger for testing the Discord embed without publishing a real release.
+  workflow_dispatch:
+    inputs:
+      release_name:
+        description: "Release title shown in the embed"
+        required: true
+        default: "v0.0.0-test"
+      release_body:
+        description: "Release notes body (Markdown)"
+        required: true
+        default: "**Test release** — manual trigger from workflow_dispatch."
+      release_html_url:
+        description: "URL the embed title links to"
+        required: false
+        default: "https://github.com/sandstone-mc/sandstone-cli/releases"
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: GitHub Releases to Discord
+        uses: SethCohen/github-releases-to-discord@v1
+        with:
+          webhook_url: ${{ secrets.WEBHOOK_URL }}
+          # Sandstone tan — `0xC2A878` = 12757112. Tweak to taste.
+          color: 12757112
+          username: "Sandstone CLI"
+          footer_title: Changelog
+          reduce_headings: true
+          footer_timestamp: true
+          # When triggered via `release: published`, the action pulls these
+          # from `github.event.release` automatically. When triggered via
+          # `workflow_dispatch`, fall back to the inputs above.
+          release_name: ${{ github.event.release.name || inputs.release_name }}
+          release_body: ${{ github.event.release.body || inputs.release_body }}
+          release_html_url: ${{ github.event.release.html_url || inputs.release_html_url }}

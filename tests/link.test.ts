@@ -61,8 +61,15 @@ describe('create', () => {
       stderr: 'pipe',
       env: { ...process.env, FORCE_COLOR: '0' },
     })
-    const exitCode = await proc.exited
-    expect(exitCode).toBe(0)
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+    expect(
+      exitCode,
+      `bun install failed\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+    ).toBe(0)
     expect(existsSync(join(testDir, 'node_modules', libName))).toBe(true)
   }, 30_000)
 

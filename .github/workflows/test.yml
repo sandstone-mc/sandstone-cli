@@ -20,7 +20,7 @@ jobs:
     - name: Install dependencies
       run: bun i
 
-    - name: Build Library
+    - name: Build CLI
       run: bun dev:build
 
     - name: Run tests

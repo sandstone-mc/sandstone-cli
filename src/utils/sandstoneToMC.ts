@@ -10,18 +10,18 @@
  */
 
 export interface MCVersion {
-	mcMajor: number
-	mcMinor: number
+  mcMajor: number
+  mcMinor: number
 }
 
 export function sandstoneMinorToMC(minor: number): MCVersion {
-	return {
-		mcMajor: 26 + Math.floor(minor / 4),
-		mcMinor: (minor % 4) + 1,
-	}
+  return {
+    mcMajor: 26 + Math.floor(minor / 4),
+    mcMinor: (minor % 4) + 1,
+  }
 }
 
 export function sandstoneMinorToMCString(minor: number): string {
-	const { mcMajor, mcMinor } = sandstoneMinorToMC(minor)
-	return `${mcMajor}.${mcMinor}`
+  const { mcMajor, mcMinor } = sandstoneMinorToMC(minor)
+  return `${mcMajor}.${mcMinor}`
 }

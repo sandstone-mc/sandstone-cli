@@ -24,18 +24,18 @@ const execFileAsync = promisify(execFile)
 // ---------- Types ----------
 
 export interface SandstoneUpdateInfo {
-	installed: string
-	channel: 'latest' | string // 'latest' or '<pkg>-X-Y' (e.g. 'sandstone-1-0')
-	available: string
-	command: string // PM-adjusted command for the user's project
-	mcInstalled: string
+  installed: string
+  channel: 'latest' | string // 'latest' or '<pkg>-X-Y' (e.g. 'sandstone-1-0')
+  available: string
+  command: string // PM-adjusted command for the user's project
+  mcInstalled: string
 }
 
 export interface CLIUpdateInfo {
-	installed: string
-	available: string
-	command: string // PM-adjusted install command for wherever this CLI lives
-	source: CLIInstance
+  installed: string
+  available: string
+  command: string // PM-adjusted install command for wherever this CLI lives
+  source: CLIInstance
 }
 
 /**
@@ -46,58 +46,58 @@ export interface CLIUpdateInfo {
 export type CLIInstance = 'project' | 'global' | 'unknown'
 
 export type UpdateCheckResult =
-	| { kind: 'sandstone'; info: SandstoneUpdateInfo }
-	| { kind: 'cli'; info: CLIUpdateInfo }
-	| { kind: 'none' }
+  | { kind: 'sandstone'; info: SandstoneUpdateInfo }
+  | { kind: 'cli'; info: CLIUpdateInfo }
+  | { kind: 'none' }
 
 // ---------- Cache ----------
 
 interface CacheEntry<T> {
-	value: T
-	timestamp: number
+  value: T
+  timestamp: number
 }
 const CACHE_TTL_MS = 30 * 60 * 1000 // 30 minutes
 const cache = new Map<string, CacheEntry<unknown>>()
 
 async function cached<T>(key: string, fn: () => Promise<T>): Promise<T> {
-	const entry = cache.get(key) as CacheEntry<T> | undefined
-	if (entry && Date.now() - entry.timestamp < CACHE_TTL_MS) {
-		return entry.value
-	}
-	const value = await fn()
-	cache.set(key, { value, timestamp: Date.now() })
-	return value
+  const entry = cache.get(key) as CacheEntry<T> | undefined
+  if (entry && Date.now() - entry.timestamp < CACHE_TTL_MS) {
+    return entry.value
+  }
+  const value = await fn()
+  cache.set(key, { value, timestamp: Date.now() })
+  return value
 }
 
 // ---------- npm registry fetch ----------
 
 interface NpmPackageData {
-	'dist-tags': Record<string, string>
+  'dist-tags': Record<string, string>
 }
 
 async function fetchNpmPackage(packageName: string): Promise<NpmPackageData | null> {
-	return cached(`npm:${packageName}`, async () => {
-		try {
-			const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}`)
-			if (!res.ok) return null
-			return (await res.json()) as NpmPackageData
-		} catch {
-			return null
-		}
-	})
+  return cached(`npm:${packageName}`, async () => {
+    try {
+      const res = await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}`)
+      if (!res.ok) return null
+      return (await res.json()) as NpmPackageData
+    } catch {
+      return null
+    }
+  })
 }
 
 // ---------- sandstone installed version ----------
 
 async function readInstalledSandstoneVersion(projectDir: string): Promise<string | null> {
-	const pkgPath = path.join(projectDir, 'node_modules', 'sandstone', 'package.json')
-	try {
-		const raw = await fs.readFile(pkgPath, 'utf8')
-		const pkg = JSON.parse(raw) as { version?: string }
-		return pkg.version ?? null
-	} catch {
-		return null
-	}
+  const pkgPath = path.join(projectDir, 'node_modules', 'sandstone', 'package.json')
+  try {
+    const raw = await fs.readFile(pkgPath, 'utf8')
+    const pkg = JSON.parse(raw) as { version?: string }
+    return pkg.version ?? null
+  } catch {
+    return null
+  }
 }
 
 // ---------- PM detection (project level) ----------
@@ -105,39 +105,39 @@ async function readInstalledSandstoneVersion(projectDir: string): Promise<string
 type LocalPM = 'bun' | 'pnpm' | 'yarn' | 'npm'
 
 export async function detectLocalPM(projectDir: string): Promise<LocalPM> {
-	// Runtime check: if we're executing under Bun, treat it as the user's PM
-	// regardless of which lockfile happens to be in the directory. A user's
-	// project can contain a stale `package-lock.json` from a one-off `npm i`
-	// while they normally run everything through `bun` — the runtime is the
-	// ground truth, the lockfile is a hint.
-	if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') return 'bun'
-	if (await fileExists(path.join(projectDir, 'bun.lock')) || await fileExists(path.join(projectDir, 'bun.lockb'))) return 'bun'
-	if (await fileExists(path.join(projectDir, 'pnpm-lock.yaml'))) return 'pnpm'
-	if (await fileExists(path.join(projectDir, 'yarn.lock'))) return 'yarn'
-	if (await fileExists(path.join(projectDir, 'package-lock.json'))) return 'npm'
-	return 'npm'
+  // Runtime check: if we're executing under Bun, treat it as the user's PM
+  // regardless of which lockfile happens to be in the directory. A user's
+  // project can contain a stale `package-lock.json` from a one-off `npm i`
+  // while they normally run everything through `bun` — the runtime is the
+  // ground truth, the lockfile is a hint.
+  if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') return 'bun'
+  if (await fileExists(path.join(projectDir, 'bun.lock')) || await fileExists(path.join(projectDir, 'bun.lockb'))) return 'bun'
+  if (await fileExists(path.join(projectDir, 'pnpm-lock.yaml'))) return 'pnpm'
+  if (await fileExists(path.join(projectDir, 'yarn.lock'))) return 'yarn'
+  if (await fileExists(path.join(projectDir, 'package-lock.json'))) return 'npm'
+  return 'npm'
 }
 
 async function fileExists(p: string): Promise<boolean> {
-	try {
-		await fs.access(p)
-		return true
-	} catch {
-		return false
-	}
+  try {
+    await fs.access(p)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function localAddCommand(pm: LocalPM, spec: string, dev = false): string {
-	switch (pm) {
-		case 'bun':
-			return `bun add ${dev ? '--dev ' : ''}${spec}`
-		case 'pnpm':
-			return `pnpm add ${dev ? '--save-dev ' : ''}${spec}`
-		case 'yarn':
-			return `yarn add ${dev ? '--dev ' : ''}${spec}`
-		case 'npm':
-			return `npm install ${dev ? '--save-dev ' : ''}${spec}`
-	}
+  switch (pm) {
+    case 'bun':
+      return `bun add ${dev ? '--dev ' : ''}${spec}`
+    case 'pnpm':
+      return `pnpm add ${dev ? '--save-dev ' : ''}${spec}`
+    case 'yarn':
+      return `yarn add ${dev ? '--dev ' : ''}${spec}`
+    case 'npm':
+      return `npm install ${dev ? '--save-dev ' : ''}${spec}`
+  }
 }
 
 /**
@@ -149,17 +149,17 @@ function localAddCommand(pm: LocalPM, spec: string, dev = false): string {
  * regular dependency in the pack template — read it rather than assume.
  */
 async function isDevDependency(projectDir: string, packageName: string): Promise<boolean> {
-	try {
-		const raw = await fs.readFile(path.join(projectDir, 'package.json'), 'utf8')
-		const pkg = JSON.parse(raw) as {
-			dependencies?: Record<string, string>
-			devDependencies?: Record<string, string>
-		}
-		if (pkg.dependencies?.[packageName]) return false
-		return Boolean(pkg.devDependencies?.[packageName])
-	} catch {
-		return false
-	}
+  try {
+    const raw = await fs.readFile(path.join(projectDir, 'package.json'), 'utf8')
+    const pkg = JSON.parse(raw) as {
+      dependencies?: Record<string, string>
+      devDependencies?: Record<string, string>
+    }
+    if (pkg.dependencies?.[packageName]) return false
+    return Boolean(pkg.devDependencies?.[packageName])
+  } catch {
+    return false
+  }
 }
 
 // ---------- PM detection (global level, via `which sand`/`where sand`) ----------
@@ -167,15 +167,15 @@ async function isDevDependency(projectDir: string, packageName: string): Promise
 type GlobalPM = 'bun' | 'pnpm' | 'yarn' | 'npm' | 'unknown'
 
 function isWindows(): boolean {
-	return process.platform === 'win32'
+  return process.platform === 'win32'
 }
 
 function normalizeSlashes(p: string): string {
-	return p.replaceAll('\\', '/')
+  return p.replaceAll('\\', '/')
 }
 
 function isInsideLocalBin(p: string): boolean {
-	return normalizeSlashes(p).toLowerCase().includes('node_modules/.bin')
+  return normalizeSlashes(p).toLowerCase().includes('node_modules/.bin')
 }
 
 /**
@@ -188,42 +188,42 @@ function isInsideLocalBin(p: string): boolean {
  * Strip those entries so global lookups really do look at the global install.
  */
 function globalLookupEnv(): NodeJS.ProcessEnv {
-	const sep = isWindows() ? ';' : ':'
-	// Windows env keys are case-insensitive; find whichever casing is present.
-	const pathKey = Object.keys(process.env).find(k => k.toUpperCase() === 'PATH') ?? 'PATH'
-	const cleaned = (process.env[pathKey] ?? '')
-		.split(sep)
-		.filter(entry => entry.length > 0 && !isInsideLocalBin(entry))
-		.join(sep)
-	return { ...process.env, [pathKey]: cleaned }
+  const sep = isWindows() ? ';' : ':'
+  // Windows env keys are case-insensitive; find whichever casing is present.
+  const pathKey = Object.keys(process.env).find(k => k.toUpperCase() === 'PATH') ?? 'PATH'
+  const cleaned = (process.env[pathKey] ?? '')
+    .split(sep)
+    .filter(entry => entry.length > 0 && !isInsideLocalBin(entry))
+    .join(sep)
+  return { ...process.env, [pathKey]: cleaned }
 }
 
 async function findGlobalSandBinaryPath(): Promise<string | null> {
-	const cmd = isWindows() ? 'where' : 'which'
-	try {
-		const { stdout } = await execFileAsync(cmd, ['sand'], { env: globalLookupEnv() })
-		const hit = stdout
-			.split('\n')
-			.map(line => line.trim())
-			.find(line => line.length > 0 && !isInsideLocalBin(line))
-		return hit ?? null
-	} catch {
-		return null
-	}
+  const cmd = isWindows() ? 'where' : 'which'
+  try {
+    const { stdout } = await execFileAsync(cmd, ['sand'], { env: globalLookupEnv() })
+    const hit = stdout
+      .split('\n')
+      .map(line => line.trim())
+      .find(line => line.length > 0 && !isInsideLocalBin(line))
+    return hit ?? null
+  } catch {
+    return null
+  }
 }
 
 function classifyGlobalSandPath(p: string): GlobalPM {
-	// Same ground-truth rule as detectLocalPM: if this process is running under
-	// Bun, the user's global install was almost certainly `bun add -g …` even
-	// if the binary path doesn't carry a `.bun/` segment (PATH-style installs
-	// or unusual prefixes won't match the substring test below).
-	if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') return 'bun'
-	const lower = normalizeSlashes(p).toLowerCase()
-	if (lower.includes('.bun/') || lower.includes('/bun/')) return 'bun'
-	if (lower.includes('pnpm')) return 'pnpm'
-	if (lower.includes('yarn')) return 'yarn'
-	if (lower.includes('node_modules') || lower.includes('/npm/')) return 'npm'
-	return 'unknown'
+  // Same ground-truth rule as detectLocalPM: if this process is running under
+  // Bun, the user's global install was almost certainly `bun add -g …` even
+  // if the binary path doesn't carry a `.bun/` segment (PATH-style installs
+  // or unusual prefixes won't match the substring test below).
+  if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') return 'bun'
+  const lower = normalizeSlashes(p).toLowerCase()
+  if (lower.includes('.bun/') || lower.includes('/bun/')) return 'bun'
+  if (lower.includes('pnpm')) return 'pnpm'
+  if (lower.includes('yarn')) return 'yarn'
+  if (lower.includes('node_modules') || lower.includes('/npm/')) return 'npm'
+  return 'unknown'
 }
 
 /**
@@ -231,17 +231,17 @@ function classifyGlobalSandPath(p: string): GlobalPM {
  * than hardcoding npm when the global binary's path is unrecognizable.
  */
 function globalAddCommand(pm: GlobalPM, spec: string, fallback: LocalPM = 'npm'): string {
-	const resolved: LocalPM = pm === 'unknown' ? fallback : pm
-	switch (resolved) {
-		case 'bun':
-			return `bun add -g ${spec}`
-		case 'pnpm':
-			return `pnpm add -g ${spec}`
-		case 'yarn':
-			return `yarn global add ${spec}`
-		case 'npm':
-			return `npm install -g ${spec}`
-	}
+  const resolved: LocalPM = pm === 'unknown' ? fallback : pm
+  switch (resolved) {
+    case 'bun':
+      return `bun add -g ${spec}`
+    case 'pnpm':
+      return `pnpm add -g ${spec}`
+    case 'yarn':
+      return `yarn global add ${spec}`
+    case 'npm':
+      return `npm install -g ${spec}`
+  }
 }
 
 // ---------- channel resolution ----------
@@ -256,18 +256,18 @@ function globalAddCommand(pm: GlobalPM, spec: string, fallback: LocalPM = 'npm')
  * back to `latest` when the installed version is in master's minor.
  */
 function resolveChannel(distTags: Record<string, string>, installed: string, packageName: string): 'latest' | string | null {
-	const m = installed.match(/^(\d+)\.(\d+)\./)
-	if (!m) return null
-	const [, maj, min] = m
-	// strip the npm scope so `@sandstone-mc/<pkg>` becomes `<pkg>` for the tag key
-	const unscoped = packageName.replace(/^@[^/]+\//, '')
-	const explicitKey = `${unscoped}-${maj}-${min}`
-	if (distTags[explicitKey]) return explicitKey
-	if (distTags.latest) {
-		const lm = distTags.latest.match(/^(\d+)\.(\d+)\./)
-		if (lm && lm[1] === maj && lm[2] === min) return 'latest'
-	}
-	return null
+  const m = installed.match(/^(\d+)\.(\d+)\./)
+  if (!m) return null
+  const [, maj, min] = m
+  // strip the npm scope so `@sandstone-mc/<pkg>` becomes `<pkg>` for the tag key
+  const unscoped = packageName.replace(/^@[^/]+\//, '')
+  const explicitKey = `${unscoped}-${maj}-${min}`
+  if (distTags[explicitKey]) return explicitKey
+  if (distTags.latest) {
+    const lm = distTags.latest.match(/^(\d+)\.(\d+)\./)
+    if (lm && lm[1] === maj && lm[2] === min) return 'latest'
+  }
+  return null
 }
 
 // ---------- sandstone update check ----------
@@ -275,39 +275,39 @@ function resolveChannel(distTags: Record<string, string>, installed: string, pac
 import { sandstoneMinorToMCString } from './sandstoneToMC.js'
 
 export async function runUpdateCheck(projectDir: string): Promise<SandstoneUpdateInfo | null> {
-	const installed = await readInstalledSandstoneVersion(projectDir)
-	if (!installed) return null
+  const installed = await readInstalledSandstoneVersion(projectDir)
+  if (!installed) return null
 
-	const data = await fetchNpmPackage('sandstone')
-	if (!data) return null
+  const data = await fetchNpmPackage('sandstone')
+  if (!data) return null
 
-	const channel = resolveChannel(data['dist-tags'], installed, 'sandstone')
-	if (channel == null) return null
+  const channel = resolveChannel(data['dist-tags'], installed, 'sandstone')
+  if (channel == null) return null
 
-	const available = data['dist-tags'][channel]
-	if (!available || available === installed) return null
+  const available = data['dist-tags'][channel]
+  if (!available || available === installed) return null
 
-	const pm = await detectLocalPM(projectDir)
-	// For non-latest channels, pin to the per-minor dist-tag (e.g.
-	// `sandstone-1-0`) so a v1.0.x install stays in v1.0.x. `^1.0.5` would
-	// otherwise resolve to anything >=1.0.5 <2.0.0 — including 1.1.x.
-	const spec = channel === 'latest' ? `sandstone@^${available}` : `sandstone@${channel}`
-	const command = localAddCommand(
-		pm,
-		spec,
-		await isDevDependency(projectDir, 'sandstone'),
-	)
+  const pm = await detectLocalPM(projectDir)
+  // For non-latest channels, pin to the per-minor dist-tag (e.g.
+  // `sandstone-1-0`) so a v1.0.x install stays in v1.0.x. `^1.0.5` would
+  // otherwise resolve to anything >=1.0.5 <2.0.0 — including 1.1.x.
+  const spec = channel === 'latest' ? `sandstone@^${available}` : `sandstone@${channel}`
+  const command = localAddCommand(
+    pm,
+    spec,
+    await isDevDependency(projectDir, 'sandstone'),
+  )
 
-	const minorMatch = installed.match(/^(\d+)\.(\d+)/)
-	const mcInstalled = minorMatch ? sandstoneMinorToMCString(parseInt(minorMatch[2]!, 10)) : 'unknown'
+  const minorMatch = installed.match(/^(\d+)\.(\d+)/)
+  const mcInstalled = minorMatch ? sandstoneMinorToMCString(parseInt(minorMatch[2]!, 10)) : 'unknown'
 
-	return {
-		installed,
-		channel,
-		available,
-		command,
-		mcInstalled,
-	}
+  return {
+    installed,
+    channel,
+    available,
+    command,
+    mcInstalled,
+  }
 }
 
 // ---------- CLI version + cross-instance detection ----------
@@ -315,33 +315,33 @@ export async function runUpdateCheck(projectDir: string): Promise<SandstoneUpdat
 import { CLI_VERSION } from '../version.js'
 
 interface CLIRuntimeContext {
-	instance: CLIInstance
-	entryPath: string | null
+  instance: CLIInstance
+  entryPath: string | null
 }
 
 function currentEntryPath(): string | null {
-	try {
-		const metaAny = import.meta as unknown as { path?: string; url?: string }
-		return metaAny.path
-			?? (metaAny.url ? new URL(metaAny.url).pathname : null)
-			?? process.argv[1]
-			?? null
-	} catch {
-		return process.argv[1] ?? null
-	}
+  try {
+    const metaAny = import.meta as unknown as { path?: string; url?: string }
+    return metaAny.path
+      ?? (metaAny.url ? new URL(metaAny.url).pathname : null)
+      ?? process.argv[1]
+      ?? null
+  } catch {
+    return process.argv[1] ?? null
+  }
 }
 
 async function realpathOrSelf(p: string): Promise<string> {
-	try {
-		return await fs.realpath(p)
-	} catch {
-		return p
-	}
+  try {
+    return await fs.realpath(p)
+  } catch {
+    return p
+  }
 }
 
 function isInside(child: string, parent: string): boolean {
-	const rel = path.relative(parent, child)
-	return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+  const rel = path.relative(parent, child)
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
 }
 
 /**
@@ -357,31 +357,31 @@ function isInside(child: string, parent: string): boolean {
  * still resolves to `project`.
  */
 async function detectCLIRuntime(projectDir: string): Promise<CLIRuntimeContext> {
-	const entryPath = currentEntryPath()
-	if (!entryPath) return { instance: 'unknown', entryPath: null }
+  const entryPath = currentEntryPath()
+  if (!entryPath) return { instance: 'unknown', entryPath: null }
 
-	const projectModules = path.join(projectDir, 'node_modules')
-	const realProjectModules = path.join(await realpathOrSelf(projectDir), 'node_modules')
-	const realEntry = await realpathOrSelf(entryPath)
+  const projectModules = path.join(projectDir, 'node_modules')
+  const realProjectModules = path.join(await realpathOrSelf(projectDir), 'node_modules')
+  const realEntry = await realpathOrSelf(entryPath)
 
-	if (
-		isInside(entryPath, projectModules)
-		|| isInside(realEntry, realProjectModules)
-	) {
-		return { instance: 'project', entryPath: realEntry }
-	}
+  if (
+    isInside(entryPath, projectModules)
+    || isInside(realEntry, realProjectModules)
+  ) {
+    return { instance: 'project', entryPath: realEntry }
+  }
 
-	return { instance: 'global', entryPath: realEntry }
+  return { instance: 'global', entryPath: realEntry }
 }
 
 async function readCLIVersionFromDir(dir: string): Promise<string | null> {
-	try {
-		const raw = await fs.readFile(path.join(dir, 'package.json'), 'utf8')
-		const pkg = JSON.parse(raw) as { version?: string }
-		return pkg.version ?? null
-	} catch {
-		return null
-	}
+  try {
+    const raw = await fs.readFile(path.join(dir, 'package.json'), 'utf8')
+    const pkg = JSON.parse(raw) as { version?: string }
+    return pkg.version ?? null
+  } catch {
+    return null
+  }
 }
 
 /**
@@ -389,50 +389,50 @@ async function readCLIVersionFromDir(dir: string): Promise<string | null> {
  * so we don't just re-read the project-local CLI that's already running.
  */
 async function readGlobalSandVersion(): Promise<string | null> {
-	try {
-		const { stdout } = await execFileAsync('sand', ['--version'], { env: globalLookupEnv() })
-		const m = stdout.trim().match(/(\d+\.\d+\.\d+)/)
-		return m ? m[1]! : null
-	} catch {
-		return null
-	}
+  try {
+    const { stdout } = await execFileAsync('sand', ['--version'], { env: globalLookupEnv() })
+    const m = stdout.trim().match(/(\d+\.\d+\.\d+)/)
+    return m ? m[1]! : null
+  } catch {
+    return null
+  }
 }
 
 /** Suggested command to bring the global `sand` up to `version`. */
 async function globalUpdateCommand(version: string, fallback: LocalPM): Promise<string> {
-	const sandPath = await findGlobalSandBinaryPath()
-	const pm: GlobalPM = sandPath ? classifyGlobalSandPath(sandPath) : 'unknown'
-	return globalAddCommand(pm, `sandstone-cli@^${version}`, fallback)
+  const sandPath = await findGlobalSandBinaryPath()
+  const pm: GlobalPM = sandPath ? classifyGlobalSandPath(sandPath) : 'unknown'
+  return globalAddCommand(pm, `sandstone-cli@^${version}`, fallback)
 }
 
 /** Suggested command to bring the project's `sandstone-cli` up to `version`. */
 async function projectCLIUpdateCommand(projectDir: string, version: string): Promise<string> {
-	const pm = await detectLocalPM(projectDir)
-	return localAddCommand(
-		pm,
-		`sandstone-cli@^${version}`,
-		await isDevDependency(projectDir, 'sandstone-cli'),
-	)
+  const pm = await detectLocalPM(projectDir)
+  return localAddCommand(
+    pm,
+    `sandstone-cli@^${version}`,
+    await isDevDependency(projectDir, 'sandstone-cli'),
+  )
 }
 
 export async function runSelfUpdateCheck(projectDir: string): Promise<CLIUpdateInfo | null> {
-	const ctx = await detectCLIRuntime(projectDir)
+  const ctx = await detectCLIRuntime(projectDir)
 
-	const npm = await fetchNpmPackage('sandstone-cli')
-	if (!npm) return null
-	const latest = npm['dist-tags']?.latest
-	if (!latest || latest === CLI_VERSION) return null
+  const npm = await fetchNpmPackage('sandstone-cli')
+  if (!npm) return null
+  const latest = npm['dist-tags']?.latest
+  if (!latest || latest === CLI_VERSION) return null
 
-	const command = ctx.instance === 'project'
-		? await projectCLIUpdateCommand(projectDir, latest)
-		: await globalUpdateCommand(latest, await detectLocalPM(projectDir))
+  const command = ctx.instance === 'project'
+    ? await projectCLIUpdateCommand(projectDir, latest)
+    : await globalUpdateCommand(latest, await detectLocalPM(projectDir))
 
-	return {
-		installed: CLI_VERSION,
-		available: latest,
-		command,
-		source: ctx.instance === 'project' ? 'project' : 'global',
-	}
+  return {
+    installed: CLI_VERSION,
+    available: latest,
+    command,
+    source: ctx.instance === 'project' ? 'project' : 'global',
+  }
 }
 
 /**
@@ -440,39 +440,39 @@ export async function runSelfUpdateCheck(projectDir: string): Promise<CLIUpdateI
  * stale global doesn't hide behind an up-to-date project copy (or vice versa).
  */
 export interface CrossInstanceUpdateInfo extends CLIUpdateInfo {
-	targetInstance: 'global' | 'project'
+  targetInstance: 'global' | 'project'
 }
 
 export async function runCrossInstanceUpdateCheck(projectDir: string): Promise<CrossInstanceUpdateInfo | null> {
-	const ctx = await detectCLIRuntime(projectDir)
-	if (ctx.instance === 'unknown') return null
+  const ctx = await detectCLIRuntime(projectDir)
+  if (ctx.instance === 'unknown') return null
 
-	const npm = await fetchNpmPackage('sandstone-cli')
-	if (!npm) return null
-	const latest = npm['dist-tags']?.latest
-	if (!latest) return null
+  const npm = await fetchNpmPackage('sandstone-cli')
+  if (!npm) return null
+  const latest = npm['dist-tags']?.latest
+  if (!latest) return null
 
-	if (ctx.instance === 'global') {
-		const projectVer = await readCLIVersionFromDir(path.join(projectDir, 'node_modules', 'sandstone-cli'))
-		if (!projectVer || projectVer === latest) return null
-		return {
-			installed: projectVer,
-			available: latest,
-			command: await projectCLIUpdateCommand(projectDir, latest),
-			source: 'project',
-			targetInstance: 'project',
-		}
-	}
+  if (ctx.instance === 'global') {
+    const projectVer = await readCLIVersionFromDir(path.join(projectDir, 'node_modules', 'sandstone-cli'))
+    if (!projectVer || projectVer === latest) return null
+    return {
+      installed: projectVer,
+      available: latest,
+      command: await projectCLIUpdateCommand(projectDir, latest),
+      source: 'project',
+      targetInstance: 'project',
+    }
+  }
 
-	const globalVer = await readGlobalSandVersion()
-	if (!globalVer || globalVer === latest) return null
-	return {
-		installed: globalVer,
-		available: latest,
-		command: await globalUpdateCommand(latest, await detectLocalPM(projectDir)),
-		source: 'global',
-		targetInstance: 'global',
-	}
+  const globalVer = await readGlobalSandVersion()
+  if (!globalVer || globalVer === latest) return null
+  return {
+    installed: globalVer,
+    available: latest,
+    command: await globalUpdateCommand(latest, await detectLocalPM(projectDir)),
+    source: 'global',
+    targetInstance: 'global',
+  }
 }
 
 // ---------- MC header (async; reads installed version) ----------
@@ -480,38 +480,38 @@ export async function runCrossInstanceUpdateCheck(projectDir: string): Promise<C
 import { readFile as readFileAsync } from 'fs/promises'
 
 export async function getMCHeaderAsync(projectDir: string): Promise<string | null> {
-	let installed: string
-	try {
-		const raw = await readFileAsync(
-			path.join(projectDir, 'node_modules', 'sandstone', 'package.json'),
-			'utf8'
-		)
-		installed = (JSON.parse(raw) as { version: string }).version
-	} catch {
-		return null
-	}
-	const m = installed.match(/^(\d+)\.(\d+)/)
-	if (!m) return null
-	const minor = parseInt(m[2]!, 10)
-	const mc = sandstoneMinorToMCString(minor)
-	return `[sand] Building for Minecraft ${mc} (sandstone ${installed})`
+  let installed: string
+  try {
+    const raw = await readFileAsync(
+      path.join(projectDir, 'node_modules', 'sandstone', 'package.json'),
+      'utf8'
+    )
+    installed = (JSON.parse(raw) as { version: string }).version
+  } catch {
+    return null
+  }
+  const m = installed.match(/^(\d+)\.(\d+)/)
+  if (!m) return null
+  const minor = parseInt(m[2]!, 10)
+  const mc = sandstoneMinorToMCString(minor)
+  return `[sand] Building for Minecraft ${mc} (sandstone ${installed})`
 }
 
 // ---------- Combine ----------
 
 export interface AggregatedCheck {
-	sandstone: SandstoneUpdateInfo | null
-	cli: CLIUpdateInfo | null
-	cross: CrossInstanceUpdateInfo | null
+  sandstone: SandstoneUpdateInfo | null
+  cli: CLIUpdateInfo | null
+  cross: CrossInstanceUpdateInfo | null
 }
 
 export async function runAllUpdateChecks(projectDir: string): Promise<AggregatedCheck> {
-	const [sandstone, cli, cross] = await Promise.all([
-		runUpdateCheck(projectDir),
-		runSelfUpdateCheck(projectDir),
-		runCrossInstanceUpdateCheck(projectDir),
-	])
-	return { sandstone, cli, cross }
+  const [sandstone, cli, cross] = await Promise.all([
+    runUpdateCheck(projectDir),
+    runSelfUpdateCheck(projectDir),
+    runCrossInstanceUpdateCheck(projectDir),
+  ])
+  return { sandstone, cli, cross }
 }
 
 /**
@@ -523,9 +523,9 @@ export async function runAllUpdateChecks(projectDir: string): Promise<Aggregated
  * printing it twice just looks broken.
  */
 export function aggregateToLines(agg: AggregatedCheck): string[] {
-	const out: string[] = []
-	if (agg.sandstone) out.push(agg.sandstone.command)
-	if (agg.cli) out.push(agg.cli.command)
-	if (agg.cross) out.push(agg.cross.command)
-	return [...new Set(out)]
+  const out: string[] = []
+  if (agg.sandstone) out.push(agg.sandstone.command)
+  if (agg.cli) out.push(agg.cli.command)
+  if (agg.cross) out.push(agg.cross.command)
+  return [...new Set(out)]
 }

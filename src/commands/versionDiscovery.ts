@@ -5,7 +5,7 @@
  *   1. `gh api repos/sandstone-mc/sandstone/tags --paginate`
  *   2. Raw fetch to https://api.github.com/repos/sandstone-mc/sandstone/tags
  *   3. fetch(https://registry.npmjs.org/sandstone) → dist-tags field
- *   4. Hardcoded `[1.1.0, 1.0.0]` last-resort list
+ *   4. Hardcoded `[1.2.0, 1.1.0, 1.0.0]` last-resort list
  *
  * Each entry includes an MC version (major.minor only) derived from the
  * shared `sandstoneMinorToMC` helper — no file lookup, no network call.
@@ -16,10 +16,6 @@
 import { hasGh } from '../utils/index.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import fs from 'fs'
-import path from 'path'
-import { fileURLToPath } from 'url'
-import { SemVer } from 'semver'
 import { sandstoneMinorToMCString } from '../utils/sandstoneToMC.js'
 
 const execFileAsync = promisify(execFile)
@@ -33,6 +29,20 @@ export interface DiscoveredVersion {
 
 const TAG_RE = /^v(\d+)\.(\d+)\.(\d+)$/
 
+/**
+ * Drop tags that don't follow the format established since 1.0.0:
+ *   - regex shape `v{X}.{Y}.{Z}` (already enforced by TAG_RE)
+ *   - major must be >= 1 — pre-1.0 `0.x.y` tags are historical, not maintained
+ *   - no prereleases (beta/alpha/rc) — already enforced by TAG_RE
+ */
+function filterMaintainedTags(tags: string[]): string[] {
+  return tags.filter((t) => {
+    const m = t.match(TAG_RE)
+    if (!m) return false
+    return parseInt(m[1]!, 10) >= 1
+  })
+}
+
 async function fetchViaGh(): Promise<string[] | null> {
   if (!hasGh()) return null
   try {
@@ -43,7 +53,7 @@ async function fetchViaGh(): Promise<string[] | null> {
       '--jq',
       '.[].name',
     ])
-    return stdout.split('\n').map((s: string) => s.trim()).filter(Boolean)
+    return filterMaintainedTags(stdout.split('\n').map((s: string) => s.trim()).filter(Boolean))
   } catch {
     return null
   }
@@ -54,7 +64,7 @@ async function fetchViaGithubApi(): Promise<string[] | null> {
     const res = await fetch('https://api.github.com/repos/sandstone-mc/sandstone/tags?per_page=100')
     if (!res.ok) return null
     const data = await res.json() as Array<{ name: string }>
-    return data.map((t) => t.name)
+    return filterMaintainedTags(data.map((t) => t.name))
   } catch {
     return null
   }
@@ -66,42 +76,24 @@ async function fetchViaNpmRegistry(): Promise<string[] | null> {
     if (!res.ok) return null
     const data = await res.json() as { 'dist-tags'?: Record<string, string> }
     if (!data['dist-tags']) return null
-    // Each value is a version like "1.1.0" — return as tag-like names (with v prefix).
-    return Object.values(data['dist-tags']).map((v) => `v${v}`)
+    // Only keep maintained-channel dist-tags: `latest` plus `sandstone-{major}-{minor}`.
+    // Drop everything else (`next`, `beta`, legacy tags, etc.).
+    const versions = Object.entries(data['dist-tags'])
+      .filter(([key]) => key === 'latest' || /^sandstone-\d+-\d+$/.test(key))
+      .map(([, v]) => `v${v}`)
+    return filterMaintainedTags(versions)
   } catch {
     return null
   }
 }
 
 const FALLBACK: DiscoveredVersion[] = [
+  { major: 1, minor: 2, mcVersion: sandstoneMinorToMCString(2), source: 'fallback' },
   { major: 1, minor: 1, mcVersion: sandstoneMinorToMCString(1), source: 'fallback' },
   { major: 1, minor: 0, mcVersion: sandstoneMinorToMCString(0), source: 'fallback' },
 ]
 
-/**
- * Latest sandstone minor bundled with this CLI (read from the installed
- * `sandstone` package). Used to cap the version list: minors above this are
- * not yet released and must not be offered.
- */
-function getBundledSandstoneMinor(): number | null {
-  let dir = path.dirname(fileURLToPath(import.meta.url))
-  for (let i = 0; i < 8; i++) {
-    try {
-      const pkg = JSON.parse(
-        fs.readFileSync(path.join(dir, 'node_modules', 'sandstone', 'package.json'), 'utf8')
-      ) as { version?: string }
-      if (pkg.version) return new SemVer(pkg.version).minor
-    } catch {
-      // not found at this level — walk up
-    }
-    const parent = path.dirname(dir)
-    if (parent === dir) break
-    dir = parent
-  }
-  return null
-}
-
-function dedupeAndDecorate(
+export function dedupeAndDecorate(
   tags: string[],
   source: DiscoveredVersion['source']
 ): DiscoveredVersion[] {
@@ -127,24 +119,21 @@ function dedupeAndDecorate(
 }
 
 export async function getAvailableSandstoneVersions(): Promise<DiscoveredVersion[]> {
-  const cap = getBundledSandstoneMinor()
-  const filter = (list: DiscoveredVersion[]) =>
-    cap === null ? list : list.filter((v) => v.minor <= cap)
   const gh = await fetchViaGh()
   if (gh) {
-    const decorated = filter(dedupeAndDecorate(gh, 'gh'))
+    const decorated = dedupeAndDecorate(gh, 'gh')
     if (decorated.length > 0) return decorated
   }
   const api = await fetchViaGithubApi()
   if (api) {
-    const decorated = filter(dedupeAndDecorate(api, 'fetch-github'))
+    const decorated = dedupeAndDecorate(api, 'fetch-github')
     if (decorated.length > 0) return decorated
   }
   const npm = await fetchViaNpmRegistry()
   if (npm) {
-    const decorated = filter(dedupeAndDecorate(npm, 'fetch-npm'))
+    const decorated = dedupeAndDecorate(npm, 'fetch-npm')
     if (decorated.length > 0) return decorated
   }
   console.warn('Could not list Sandstone versions — using cached list')
-  return filter(FALLBACK)
+  return FALLBACK
 }

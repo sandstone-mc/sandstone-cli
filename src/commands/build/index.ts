@@ -151,7 +151,7 @@ async function processPackTypeOutput(
         } else {
           await fs.writeFile(
             path.join(outputPath, relativePath),
-            contents
+            contents instanceof ArrayBuffer ? Buffer.from(contents) : contents
           )
         }
       },
@@ -366,7 +366,7 @@ async function _buildProject(
 
           const realPath = path.join(outputFolder, relativePath)
           await fs.ensureDir(path.dirname(realPath))
-          return await fs.writeFile(realPath, content)
+          return await fs.writeFile(realPath, content instanceof ArrayBuffer ? Buffer.from(content) : content)
         }
       }),
   })

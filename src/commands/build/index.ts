@@ -161,8 +161,10 @@ async function processPackTypeOutput(
 
 export async function loadBuildContext(
   cliOptions: BuildOptions,
-  folder: string,
+  _folder: string,
 ): Promise<BuildContext> {
+  const folder = path.resolve(_folder)
+
   const configPath = path.join(folder, 'sandstone.config.ts')
   const configUrl = pathToFileURL(configPath).toString()
   const sandstoneConfig = (await import(configUrl)).default

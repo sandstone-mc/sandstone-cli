@@ -9,7 +9,7 @@ function getPrismCandidatePaths(): string[] {
 
   switch (os.platform()) {
     case 'win32':
-      paths.push(path.join(os.homedir(), 'AppData/Roaming/PrismLauncher'))
+      paths.push(path.join(home, 'AppData/Roaming/PrismLauncher'))
       break
     case 'darwin':
       paths.push(path.join(home, 'Library/Application Support/PrismLauncher'))

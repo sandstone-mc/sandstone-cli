@@ -10,7 +10,7 @@ function getModrinthCandidatePaths(): string[] {
 
   switch (os.platform()) {
     case 'win32':
-      paths.push(path.join(os.homedir(), 'AppData/Roaming/ModrinthApp'))
+      paths.push(path.join(home, 'AppData/Roaming/ModrinthApp'))
       break
     case 'darwin':
       paths.push(path.join(home, 'Library/Application Support/ModrinthApp'))

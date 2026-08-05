@@ -124,6 +124,30 @@ export async function createCommand(_project: string, opts: CreateOptions) {
   const projectPath = path.resolve(_project)
   const projectName = path.basename(projectPath)
 
+  try {
+    return await createCommandInner(_project, opts, projectPath, projectName)
+  } catch (err) {
+    // Match on `name` instead of `instanceof`: when the CLI is bundled,
+    // `create.js` has its own copy of @inquirer/core's error classes,
+    // so `instanceof ExitPromptError` returns false even when inquirer
+    // itself threw one. See SBoudrias/Inquirer.js#1475 — the maintainer
+    // recommends this exact pattern.
+    if (err && typeof err === 'object' && (err as { name?: string }).name === 'ExitPromptError') {
+      // User force-closed a prompt (SIGINT, Ctrl+C). Bail with a clean
+      // message instead of dumping the inquirer stack trace.
+      console.log('\nCancelled.')
+      process.exit(130)
+    }
+    throw err
+  }
+}
+
+async function createCommandInner(
+  _project: string,
+  opts: CreateOptions,
+  projectPath: string,
+  projectName: string,
+) {
   const projectType = (await confirm({
     message: 'Whether your project will be a library for use in other Sandstone projects >',
     default: false,

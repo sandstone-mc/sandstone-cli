@@ -9,7 +9,9 @@ import { registerProvider } from './registry.js'
 import { vanillaProvider } from './providers/vanilla.js'
 import { prismProvider } from './providers/prism.js'
 import { modrinthProvider } from './providers/modrinth.js'
+import { nitroProvider } from './providers/nitro.js'
 
 registerProvider(vanillaProvider)
 registerProvider(prismProvider)
 registerProvider(modrinthProvider)
+registerProvider(nitroProvider)

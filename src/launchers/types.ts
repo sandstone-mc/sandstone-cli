@@ -1,4 +1,4 @@
-export type LauncherType = 'vanilla' | 'prism' | 'modrinth'
+export type LauncherType = 'vanilla' | 'prism' | 'modrinth' | 'nitro'
 
 export interface MinecraftInstance {
   /** Unique identifier, e.g., "prism-Homestead" */

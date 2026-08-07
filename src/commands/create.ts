@@ -1,14 +1,14 @@
 import { SemVer } from 'semver'
-import fs from 'fs-extra'
 import path from 'path'
 import chalk from 'chalk-template'
 import util from 'util'
-import * as child from 'child_process'
 import { nanoid } from 'nanoid'
 import { confirm, select, input } from '@inquirer/prompts'
 
 import { CLI_VERSION } from '../version.js'
 import { getWorldsList, hasBun, hasPnpm, hasYarn } from '../utils/index.js'
+import * as fs from '../utils/fs.js'
+import { sh } from '../utils/shell.js'
 import { getAvailableSandstoneVersions } from './versionDiscovery.js'
 import { discoverAllInstances, type MinecraftInstance } from '../launchers/index.js'
 
@@ -290,7 +290,7 @@ async function createCommandInner(
           }
           const world = await select({
             message: 'What world do you want to save the packs in? >',
-            choices: getWorldsList(saveOptions.clientPath),
+            choices: await getWorldsList(saveOptions.clientPath),
           })
           saveOptions.world = world
           break
@@ -309,9 +309,9 @@ async function createCommandInner(
 
   let packageManager = 'npm'
 
-  const yarn = hasYarn()
-  const pnpm = hasPnpm()
-  const bun =  hasBun()
+  const yarn = await hasYarn()
+  const pnpm = await hasPnpm()
+  const bun = await hasBun()
 
   if (yarn || pnpm || bun) {
     const choices = ['npm']
@@ -326,7 +326,7 @@ async function createCommandInner(
     }))
   }
 
-  fs.mkdirSync(projectPath, { recursive: true })
+  await fs.ensureDir(projectPath)
 
   // Create project & install dependencies
   // `version[0]` is the concrete SemVer (used by `git checkout pack-X.Y.0`
@@ -344,21 +344,21 @@ async function createCommandInner(
   )?.mcVersion
   console.log(chalk`Installing {rgb(229, 193, 0) sandstone@${sandstoneTag}} for {green Minecraft ${selectedMcVersion}}, {rgb(229, 193, 0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`)
 
-  const exec = (cmd: string) => child.execSync(cmd, { cwd: projectPath })
-
   // git clone refuses to populate an existing non-empty dir, so clone into a
-  // tmp sibling and move the contents into projectPath.
+  // tmp sibling and move the contents into projectPath. Bun Shell escapes
+  // all template-literal interpolations by default — the URL is safe even
+  // if it ever carried shell metacharacters (it doesn't, but defense in depth).
   const tmpClone = path.join(projectPath, `.sandstone-template-${Date.now()}`)
-  exec(`git clone https://github.com/sandstone-mc/sandstone-template.git ${tmpClone}`)
+  await sh(`git clone https://github.com/sandstone-mc/sandstone-template.git ${tmpClone}`, { cwd: projectPath, throws: true })
+  await sh(`git -C ${tmpClone} checkout ${projectType}-${version[0]}`, { cwd: projectPath, throws: true })
 
-  exec(`git -C ${tmpClone} checkout ${projectType}-${version[0]}`)
-
-  for (const entry of fs.readdirSync(tmpClone)) {
+  const cloneEntries = await fs.readDirNames(tmpClone)
+  await Promise.all(cloneEntries.map(async (entry) => {
     await fs.move(path.join(tmpClone, entry), path.join(projectPath, entry), { overwrite: true })
-  }
-  await fs.rm(tmpClone, { force: true, recursive: true })
+  }))
+  await fs.remove(tmpClone, { force: true, recursive: true })
 
-  await fs.rm(path.join(projectPath, '.git'), { force: true, recursive: true })
+  await fs.remove(path.join(projectPath, '.git'), { force: true, recursive: true })
 
   // For libraries, rewrite the package.json files BEFORE installing so
   // the install picks up the new names. The template ships with
@@ -367,14 +367,14 @@ async function createCommandInner(
   // chosen package name or the workspace link will break.
   if (projectType === 'library' && libraryPackageName) {
     const rootPkgPath = path.join(projectPath, 'package.json')
-    const rootPkg = JSON.parse(await fs.readFile(rootPkgPath, 'utf-8'))
+    const rootPkg = JSON.parse(await fs.readText(rootPkgPath))
     const oldRootName = rootPkg.name
     rootPkg.name = libraryPackageName
-    await fs.writeFile(rootPkgPath, JSON.stringify(rootPkg, null, 2) + '\n')
+    await fs.writeText(rootPkgPath, JSON.stringify(rootPkg, null, 2) + '\n')
 
     const testPkgPath = path.join(projectPath, 'test', 'package.json')
     if (await fs.pathExists(testPkgPath)) {
-      const testPkg = JSON.parse(await fs.readFile(testPkgPath, 'utf-8'))
+      const testPkg = JSON.parse(await fs.readText(testPkgPath))
       testPkg.name = `${libraryPackageName}-test`
       // The test workspace links to the root via the package name; update
       // the dep spec so the link resolves to our renamed library.
@@ -387,7 +387,7 @@ async function createCommandInner(
         testPkg.dependencies[libraryPackageName] = newSpec
         delete testPkg.dependencies[oldRootName]
       }
-      await fs.writeFile(testPkgPath, JSON.stringify(testPkg, null, 2) + '\n')
+      await fs.writeText(testPkgPath, JSON.stringify(testPkg, null, 2) + '\n')
     }
 
     // Rename in bun.lock too. The template ships a lockfile with the
@@ -401,17 +401,17 @@ async function createCommandInner(
     // refer to the same template-supplied name.
     const lockPath = path.join(projectPath, 'bun.lock')
     if (await fs.pathExists(lockPath)) {
-      const lockContent = await fs.readFile(lockPath, 'utf-8')
-      await fs.writeFile(lockPath, lockContent.split(oldRootName).join(libraryPackageName))
+      const lockContent = await fs.readText(lockPath)
+      await fs.writeText(lockPath, lockContent.split(oldRootName).join(libraryPackageName))
     }
   }
 
-  exec(`${packageManager} run setup`)
+  await sh(`${packageManager} run setup`, { cwd: projectPath, stdio: 'inherit', throws: true })
 
   const configPath = path.join(projectPath, `${projectType === 'library' ? 'test/' : ''}sandstone.config.ts`)
 
   // Merge with the config values
-  let templateConfig = await fs.readFile(configPath, 'utf8')
+  let templateConfig = await fs.readText(configPath)
 
   templateConfig = templateConfig.replace('packUid: \'kZZpDK67\'', `packUid: ${toJson(nanoid(8))}`)
 
@@ -428,7 +428,7 @@ async function createCommandInner(
   }
 
   // Rewrite config
-  fs.writeFileSync(configPath, templateConfig)
+  await fs.writeText(configPath, templateConfig)
 
   const prefix = packageManager === 'npm' ? 'npm run' : packageManager
   console.log(chalk`{green Success!} Created "${projectName}" at "${projectPath}"`)
@@ -439,4 +439,4 @@ async function createCommandInner(
 
   console.log('We suggest that you begin by typing:\n')
   console.log(chalk`  {cyan cd} ${projectName}\n  {cyan ${prefix} dev:watch}`)
-} 
+}

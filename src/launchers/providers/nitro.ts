@@ -1,6 +1,6 @@
-import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import * as fs from '../../utils/fs.js'
 import type { LauncherProvider, MinecraftInstance } from '../types.js'
 
 function getNitroCandidatePaths(): string[] {
@@ -32,9 +32,9 @@ function getNitroCandidatePaths(): string[] {
   return paths
 }
 
-function getNitroDataPath(): string | null {
+async function getNitroDataPath(): Promise<string | null> {
   for (const candidate of getNitroCandidatePaths()) {
-    if (fs.existsSync(candidate)) {
+    if (await fs.pathExists(candidate)) {
       return candidate
     }
   }
@@ -42,10 +42,9 @@ function getNitroDataPath(): string | null {
 }
 
 /** Parse nitro_lock.json for Minecraft version */
-function parseNitroLock(lockPath: string): { version?: string } {
+async function parseNitroLock(lockPath: string): Promise<{ version?: string }> {
   try {
-    const content = fs.readFileSync(lockPath, 'utf-8')
-    const lock = JSON.parse(content)
+    const lock = JSON.parse(await fs.readText(lockPath)) as { minecraft_version?: string }
 
     if (typeof lock.minecraft_version === 'string') {
       return { version: lock.minecraft_version }
@@ -62,38 +61,38 @@ export const nitroProvider: LauncherProvider = {
   displayName: 'Nitrolaunch',
 
   async isInstalled(): Promise<boolean> {
-    return getNitroDataPath() !== null
+    return (await getNitroDataPath()) !== null
   },
 
   getDataPath(): string | null {
-    return getNitroDataPath()
+    return getNitroCandidatePaths()[0] ?? null
   },
 
   async discoverInstances(): Promise<MinecraftInstance[]> {
-    const dataPath = getNitroDataPath()
+    const dataPath = await getNitroDataPath()
     if (!dataPath) return []
 
     const instancesDir = path.join(dataPath, 'instances')
-    if (!fs.existsSync(instancesDir)) return []
+    if (!(await fs.pathExists(instancesDir))) return []
 
     const instances: MinecraftInstance[] = []
 
     try {
-      const entries = fs.readdirSync(instancesDir, { withFileTypes: true })
+      const entries = await fs.readDirEntries(instancesDir)
 
       for (const entry of entries) {
-        if (!entry.isDirectory()) continue
+        if (!entry.isDirectory) continue
         // Skip hidden folders
         if (entry.name.startsWith('.')) continue
 
         const instanceDir = path.join(instancesDir, entry.name)
         const minecraftDir = path.join(instanceDir, '.minecraft')
 
-        if (!fs.existsSync(minecraftDir)) continue
+        if (!(await fs.pathExists(minecraftDir))) continue
 
         // Parse nitro_lock.json for Minecraft version
         const lockPath = path.join(minecraftDir, 'nitro_lock.json')
-        const lock = parseNitroLock(lockPath)
+        const lock = await parseNitroLock(lockPath)
 
         instances.push({
           id: `nitro-${entry.name}`,

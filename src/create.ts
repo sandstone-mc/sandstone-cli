@@ -1,10 +1,17 @@
 #!/usr/bin/env bun
 import { Argument, Command } from 'commander'
+import chalk from 'chalk-template'
 import figlet from 'figlet'
 
 import { CLI_VERSION } from './version.js'
 import { createCommand } from './commands/create.js'
 import { BuildOptions } from './utils/commander.js'
+
+if (Bun.which('bun') === null) {
+  console.error(chalk`{red Error:} Sandstone CLI requires {cyan Bun} (>= 1.1) to run.`)
+  console.error(chalk`Install Bun: {cyan https://bun.com}`)
+  process.exit(1)
+}
 
 const commander = new Command()
 

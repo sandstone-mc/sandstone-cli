@@ -1,6 +1,6 @@
-import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import * as fs from '../../utils/fs.js'
 import type { LauncherProvider, MinecraftInstance } from '../types.js'
 
 function getPrismCandidatePaths(): string[] {
@@ -32,9 +32,9 @@ function getPrismCandidatePaths(): string[] {
   return paths
 }
 
-function getPrismDataPath(): string | null {
+async function getPrismDataPath(): Promise<string | null> {
   for (const candidate of getPrismCandidatePaths()) {
-    if (fs.existsSync(candidate)) {
+    if (await fs.pathExists(candidate)) {
       return candidate
     }
   }
@@ -42,9 +42,9 @@ function getPrismDataPath(): string | null {
 }
 
 /** Parse INI-style instance.cfg to extract instance name */
-function parseInstanceConfig(configPath: string): { name?: string } {
+async function parseInstanceConfig(configPath: string): Promise<{ name?: string }> {
   try {
-    const content = fs.readFileSync(configPath, 'utf-8')
+    const content = await fs.readText(configPath)
     const result: { name?: string } = {}
 
     for (const line of content.split('\n')) {
@@ -62,13 +62,12 @@ function parseInstanceConfig(configPath: string): { name?: string } {
 }
 
 /** Parse mmc-pack.json to extract Minecraft version */
-function parsePackJson(packPath: string): { version?: string } {
+async function parsePackJson(packPath: string): Promise<{ version?: string }> {
   try {
-    const content = fs.readFileSync(packPath, 'utf-8')
-    const pack = JSON.parse(content)
+    const pack = JSON.parse(await fs.readText(packPath)) as { components?: Array<{ uid: string; version: string }> }
 
     // Look for net.minecraft component
-    const components = pack.components as Array<{ uid: string; version: string }> | undefined
+    const components = pack.components
     if (components) {
       const minecraft = components.find(c => c.uid === 'net.minecraft')
       if (minecraft?.version) {
@@ -87,27 +86,31 @@ export const prismProvider: LauncherProvider = {
   displayName: 'Prism Launcher',
 
   async isInstalled(): Promise<boolean> {
-    return getPrismDataPath() !== null
+    return (await getPrismDataPath()) !== null
   },
 
   getDataPath(): string | null {
-    return getPrismDataPath()
+    // Best-effort synchronous guess; the async `isInstalled`/`discoverInstances`
+    // paths are the authoritative checks. Returning the first existing
+    // candidate without an await is a hot-path optimization for the
+    // registry's "is this provider usable?" probe.
+    return getPrismCandidatePaths()[0] ?? null
   },
 
   async discoverInstances(): Promise<MinecraftInstance[]> {
-    const dataPath = getPrismDataPath()
+    const dataPath = await getPrismDataPath()
     if (!dataPath) return []
 
     const instancesDir = path.join(dataPath, 'instances')
-    if (!fs.existsSync(instancesDir)) return []
+    if (!(await fs.pathExists(instancesDir))) return []
 
     const instances: MinecraftInstance[] = []
 
     try {
-      const entries = fs.readdirSync(instancesDir, { withFileTypes: true })
+      const entries = await fs.readDirEntries(instancesDir)
 
       for (const entry of entries) {
-        if (!entry.isDirectory()) continue
+        if (!entry.isDirectory) continue
         // Skip hidden folders and special folders
         if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue
 
@@ -117,9 +120,9 @@ export const prismProvider: LauncherProvider = {
 
         // Prism uses 'minecraft' or '.minecraft' subdirectory
         let minecraftPath: string | null = null
-        if (fs.existsSync(minecraftDir)) {
+        if (await fs.pathExists(minecraftDir)) {
           minecraftPath = minecraftDir
-        } else if (fs.existsSync(dotMinecraftDir)) {
+        } else if (await fs.pathExists(dotMinecraftDir)) {
           minecraftPath = dotMinecraftDir
         }
 
@@ -127,11 +130,11 @@ export const prismProvider: LauncherProvider = {
 
         // Parse instance.cfg for display name
         const configPath = path.join(instanceDir, 'instance.cfg')
-        const config = parseInstanceConfig(configPath)
+        const config = await parseInstanceConfig(configPath)
 
         // Parse mmc-pack.json for Minecraft version
         const packPath = path.join(instanceDir, 'mmc-pack.json')
-        const pack = parsePackJson(packPath)
+        const pack = await parsePackJson(packPath)
 
         instances.push({
           id: `prism-${entry.name}`,

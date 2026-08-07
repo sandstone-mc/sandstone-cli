@@ -1,10 +1,10 @@
-import path from 'node:path'
-import { pathToFileURL } from 'node:url'
-import fs from 'fs-extra'
+import path from 'path'
+import { pathToFileURL } from 'url'
 import chalk from 'chalk'
 
 import { log, initLoggerNoFile } from '../ui/logger.js'
 import { getClientPath } from './build/export.js'
+import * as fs from '../utils/fs.js'
 import type * as sandstone from 'sandstone'
 
 // Mirror of the default `PackType` paths from `sandstone/src/pack/pack.ts`.
@@ -59,7 +59,7 @@ export async function cleanCommand(opts: CleanOptions) {
   const cacheFile = path.join(folder, '.sandstone', 'cache.json')
   let cache: { files?: Record<string, string>; symlinks?: string[]; archives?: string[] } = {}
   try {
-    const fileRead = await fs.readFile(cacheFile, 'utf8')
+    const fileRead = await fs.readText(cacheFile)
     if (fileRead) {
       const parsed = JSON.parse(fileRead)
       cache = parsed.files ? parsed : { files: parsed }
@@ -116,13 +116,13 @@ export async function cleanCommand(opts: CleanOptions) {
   let deleted = 0
   for (const targetPath of pathsToDelete) {
     try {
-      const stats = await fs.lstat(targetPath)
+      const stats = await fs.fileLstat(targetPath)
       if (stats.isSymbolicLink() || stats.isFile()) {
-        await fs.unlink(targetPath)
+        await fs.unlinkPath(targetPath)
         log(chalk.green('Removed:'), targetPath)
         deleted++
       } else if (stats.isDirectory()) {
-        await fs.rm(targetPath, { recursive: true, force: true })
+        await fs.remove(targetPath, { recursive: true, force: true })
         log(chalk.green('Removed:'), targetPath)
         deleted++
       }
@@ -154,7 +154,7 @@ export async function cleanCommand(opts: CleanOptions) {
 
   if (cacheDirty) {
     await fs.ensureDir(path.dirname(cacheFile))
-    await fs.writeFile(cacheFile, JSON.stringify(cache))
+    await fs.writeJSON(cacheFile, cache, { pretty: false })
   }
 
   if (deleted === 0) {

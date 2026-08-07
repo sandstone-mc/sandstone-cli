@@ -1,12 +1,9 @@
-import path from 'node:path'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
-import fs from 'fs-extra'
+import path from 'path'
 
 import { detectPackageManager, sha256File } from '../utils/index.js'
 import { initLoggerNoFile, log, logWarn, logError } from '../ui/logger.js'
-
-const execFileAsync = promisify(execFile)
+import * as fs from '../utils/fs.js'
+import { run } from '../utils/shell.js'
 
 export type PackageManager = 'bun' | 'pnpm' | 'yarn' | 'npm'
 
@@ -30,7 +27,7 @@ const LINK_VERSION_FILENAME = 'link_version'
 async function readLinksFile(projectPath: string): Promise<LinksFile> {
   const file = path.join(projectPath, '.sandstone', LINKS_FILENAME)
   try {
-    const raw = JSON.parse(await fs.readFile(file, 'utf-8'))
+    const raw = JSON.parse(await fs.readText(file))
     if (raw && typeof raw === 'object' && raw.links && typeof raw.links === 'object') {
       return raw as LinksFile
     }
@@ -41,7 +38,7 @@ async function readLinksFile(projectPath: string): Promise<LinksFile> {
 async function writeLinksFile(projectPath: string, data: LinksFile): Promise<void> {
   const file = path.join(projectPath, '.sandstone', LINKS_FILENAME)
   await fs.ensureDir(path.dirname(file))
-  await fs.writeFile(file, JSON.stringify(data, null, 2))
+  await fs.writeJSON(file, data)
 }
 
 // --- PM command maps -------------------------------------------------------
@@ -65,13 +62,9 @@ function pmRemoveCmd(pm: PackageManager, name: string): [string, string[]] {
 }
 
 async function runPm(cmd: [string, string[]], cwd: string): Promise<void> {
-  try {
-    // Cast options to any: promisify's execFile typing is too narrow to admit
-    // `stdio: 'inherit'` in the overload set we hit, but the runtime accepts it.
-    await execFileAsync(cmd[0], cmd[1], { cwd, stdio: 'inherit' } as any)
-  } catch (err: any) {
-    throw new Error(`Command "${cmd[0]} ${cmd[1].join(' ')}" failed in ${cwd}:\n${err.message ?? err}`)
-  }
+  // `stdio: 'inherit'` keeps the PM's stdout visible to the user — installs
+  // are interactive, the CLI shouldn't try to swallow their progress.
+  await run(cmd[0], cmd[1], { cwd, stdio: 'inherit', throws: true })
 }
 
 // --- Helpers ---------------------------------------------------------------
@@ -83,7 +76,7 @@ async function isInstalled(projectPath: string, name: string): Promise<boolean> 
 async function readDepVersion(projectPath: string, name: string): Promise<string | undefined> {
   const pkgPath = path.join(projectPath, 'package.json')
   if (!(await fs.pathExists(pkgPath))) return undefined
-  const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf-8'))
+  const pkg = JSON.parse(await fs.readText(pkgPath))
   const spec = pkg.dependencies?.[name] ?? pkg.devDependencies?.[name] ?? pkg.peerDependencies?.[name]
   // Only treat "real" version specs (semver, tag, registry version) as a
   // previous version worth restoring. Tarball paths and `file:`/`link:`
@@ -114,7 +107,7 @@ export async function packLibrary(libraryPath: string): Promise<PackResult> {
   if (!(await fs.pathExists(pkgPath))) {
     throw new Error(`No package.json in ${abs}`)
   }
-  const pkg = JSON.parse(await fs.readFile(pkgPath, 'utf-8'))
+  const pkg = JSON.parse(await fs.readText(pkgPath))
   const pkgName = (typeof pkg.name === 'string' && pkg.name.length > 0) ? pkg.name : path.basename(abs)
   // For scoped names (`@scope/name`), `npm pack` / `bun pm pack` produce
   // a flat filename with the slash replaced by a hyphen (`scope-name`).
@@ -142,7 +135,7 @@ export async function packLibrary(libraryPath: string): Promise<PackResult> {
   await fs.move(producedPath, dest, { overwrite: true })
 
   const hash = await sha256File(dest)
-  await fs.writeFile(path.join(sandstoneDir, LINK_VERSION_FILENAME), hash)
+  await fs.writeText(path.join(sandstoneDir, LINK_VERSION_FILENAME), hash)
 
   return { name: basename, hash, tarballPath: dest, libraryPath: abs }
 }
@@ -174,14 +167,14 @@ async function linkConsumer(projectPath: string, libraryPath: string): Promise<v
   if (!(await fs.pathExists(versionFile))) {
     throw new Error(`Library at ${libAbs} is not linked yet. Run "sand link" in that directory first.`)
   }
-  const currentHash = (await fs.readFile(versionFile, 'utf-8')).trim()
+  const currentHash = (await fs.readText(versionFile)).trim()
   const tarballPath = path.join(libAbs, '.sandstone', `${path.basename(libAbs)}.tgz`)
   if (!(await fs.pathExists(tarballPath))) {
     throw new Error(`Library at ${libAbs} is missing its tarball. Run "sand link" there again.`)
   }
 
   const data = await readLinksFile(projectAbs)
-  const pkg = JSON.parse(await fs.readFile(libPkg, 'utf-8'))
+  const pkg = JSON.parse(await fs.readText(libPkg))
   const packageName = (typeof pkg.name === 'string' && pkg.name.length > 0) ? pkg.name : path.basename(libAbs)
   const existing = data.links[packageName]
 
@@ -265,7 +258,7 @@ export async function syncLinkedLibraries(projectPath: string): Promise<number> 
       continue
     }
 
-    const currentHash = (await fs.readFile(versionFile, 'utf-8')).trim()
+    const currentHash = (await fs.readText(versionFile)).trim()
     if (currentHash === entry.currentHash) continue
 
     const pm = await detectPackageManager(abs)
@@ -362,7 +355,7 @@ async function unlinkLibrary(libraryPath: string): Promise<void> {
   }
 
   let removed = 0
-  const entries = await fs.readdir(sandstoneDir)
+  const entries = await fs.readDirNames(sandstoneDir)
   for (const e of entries) {
     if (e.endsWith('.tgz')) {
       await fs.remove(path.join(sandstoneDir, e))

@@ -1,8 +1,10 @@
-import fs from 'fs-extra'
 import path from 'path'
-import { exec } from 'child_process'
-import { buildCommand } from './build/index.js'
+import chalk from 'chalk-template'
 import { checkbox } from '@inquirer/prompts'
+
+import { buildCommand } from './build/index.js'
+import * as fs from '../utils/fs.js'
+import { run } from '../utils/shell.js'
 
 type LibraryManifest = {
   libraries: {
@@ -17,7 +19,7 @@ export async function installNativeCommand(_libraries: string[]) {
   let count = libraries.length || 0
 
   const manifest = await (await fetch('https://raw.githubusercontent.com/sandstone-mc/sandstone-libraries/main/manifest.json')).json() as LibraryManifest
-  
+
   if (manifest.libraries.length === 0) {
     console.error('error: no native libraries are available')
   } else {
@@ -64,21 +66,19 @@ export async function installNativeCommand(_libraries: string[]) {
       if (adding) {
         console.log(`Installing ${adding.join(', ')}...`)
 
-        const bun = await fs.exists(path.resolve('./bun.lock'))
-        const pnpm = await fs.exists(path.resolve('./pnpm-lock.yaml'))
-        const yarn = await fs.exists(path.resolve('./yarn.lock'))
-        const npm = await fs.exists(path.resolve('./package-lock.json'))
-
-        if (bun) {
-          exec(`bun i ${adding.join(' ')}`)
-        } else if (pnpm) {
-          // exec(`pnpm i ${adding.join(' ')}`)
+        // Fire-and-forget install via the shell wrapper. Each branch shells
+        // out to the user's package manager; we don't await stdout because
+        // the spawn wrapper already runs with stdio='inherit' when configured
+        // for the `run` helper's interactive form. Here we just want the side
+        // effect to happen.
+        const cwd = path.resolve('.')
+        if (await fs.fileExists(path.resolve('./bun.lock'))) {
+          await run('bun', ['i', ...adding], { cwd, throws: false })
+        } else if (await fs.fileExists(path.resolve('./pnpm-lock.yaml'))) {
           console.error('error: node is not currently supported, use bun instead')
-        } else if (yarn) {
-          // exec(`yarn add ${adding.join(' ')}`)
+        } else if (await fs.fileExists(path.resolve('./yarn.lock'))) {
           console.error('error: node is not currently supported, use bun instead')
-        } else if (npm) {
-          // exec(`npm i ${adding.join(' ')}`)
+        } else if (await fs.fileExists(path.resolve('./package-lock.json'))) {
           console.error('error: node is not currently supported, use bun instead')
         } else {
           console.error('error: no package manager lockfile')
@@ -88,7 +88,7 @@ export async function installNativeCommand(_libraries: string[]) {
   }
 }
 
-type SmithedSearch = { 
+type SmithedSearch = {
   id: string,
   displayName: string,
   data: { display: { description: string } },
@@ -103,7 +103,7 @@ export async function installVanillaCommand(_libraries: string[]) {
 
   let manifest: Record<string, string> | false = false
   try {
-    manifest = JSON.parse(await fs.readFile(path.resolve('./resources/smithed.json'), 'utf-8'))
+    manifest = JSON.parse(await fs.readText(path.resolve('./resources/smithed.json')))
   } catch (e) {}
 
   const base = 'https://api.smithed.dev/v2'
@@ -126,11 +126,11 @@ export async function installVanillaCommand(_libraries: string[]) {
       }
 
       if (!manifest || !(manifest[id] || manifest[meta.rawId])) {
-        
+
         if (option.name.length > optionColumn[0]) optionColumn[0] = option.name.length
 
         if (option.owner.length > optionColumn[1]) optionColumn[1] = option.owner.length
-        
+
         if (option.downloads.length > optionColumn[2]) optionColumn[2] = option.downloads.length
 
         options.push(option)
@@ -233,8 +233,8 @@ export async function uninstallVanillaCommand(_libraries: string[]) {
   let lockFile: Record<string, {}> | false = false
 
   try {
-    manifest = JSON.parse(await fs.readFile(manifestPath, 'utf-8'))
-    lockFile = JSON.parse(await fs.readFile(lockFilePath, 'utf-8'))
+    manifest = JSON.parse(await fs.readText(manifestPath))
+    lockFile = JSON.parse(await fs.readText(lockFilePath))
   } catch (e) {}
 
   if (manifest) {
@@ -253,7 +253,7 @@ export async function uninstallVanillaCommand(_libraries: string[]) {
         libraries.push(...selected)
       }
     }
-  
+
     if (count > 0) {
       for await (const library of libraries) {
         if (manifest[library]) {
@@ -268,12 +268,12 @@ export async function uninstallVanillaCommand(_libraries: string[]) {
           count--
         }
       }
-      await fs.writeFile(manifestPath, JSON.stringify(manifest))
+      await fs.writeText(manifestPath, JSON.stringify(manifest))
 
       if (lockFile) {
-        await fs.writeFile(lockFilePath, JSON.stringify(lockFile))
+        await fs.writeText(lockFilePath, JSON.stringify(lockFile))
       }
-    } 
+    }
   } else {
     console.error('error: no dependency manifest')
   }
@@ -292,7 +292,7 @@ export async function refreshCommand() {
   let lockFile: Record<string, {}> | false = false
 
   try {
-    lockFile = JSON.parse(await fs.readFile(lockFilePath, 'utf-8'))
+    lockFile = JSON.parse(await fs.readText(lockFilePath))
   } catch (e) {}
 
   if (lockFile) {
@@ -300,7 +300,7 @@ export async function refreshCommand() {
 
     await fs.remove(path.resolve('./resources/cache/smithed'))
 
-    await fs.writeFile(lockFilePath, '{}')
+    await fs.writeText(lockFilePath, '{}')
 
     await buildCommand({
       path: './',

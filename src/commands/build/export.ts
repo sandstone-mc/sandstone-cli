@@ -1,11 +1,10 @@
-import path from 'node:path'
-import os from 'node:os'
-import fs from 'fs-extra'
+import path from 'path'
+import os from 'os'
 import AdmZip from 'adm-zip'
 
 import { log } from '../../ui/logger.js'
 import { canUseSymlinks } from '../../utils/index.js'
-
+import * as fs from '../../utils/fs.js'
 import type { handlerReadFile, PackType } from 'sandstone/pack'
 
 export type SandstoneCache = {
@@ -18,7 +17,7 @@ export type SandstoneCache = {
   // zips are symlinked individually): per destination path, the names of
   // the children currently generated for that destination by this build.
   // Used by `preserveSymlink` to know which old per-child symlinks are still
-  // backed by a current entry, and by `createSymlink` to know which children
+  // backed by a current entry, and by `fs.createSymlink` to know which children
   // to (re-)symlink. Keys are absolute/resolved destination paths; values
   // are child basenames. Populated only for destinations that are themselves
   // existing directories, so the field is absent for folder-symlink cases.
@@ -61,7 +60,7 @@ export async function getClientPath(): Promise<string | undefined> {
   const mcPath = getMCPath()
 
   try {
-    await fs.stat(mcPath)
+    await fs.fileLstat(mcPath)
   } catch {
     log('Unable to locate the .minecraft folder. Will not be able to export to client.')
     return undefined
@@ -75,10 +74,20 @@ export async function getClientWorldPath(worldName: string, minecraftPath?: stri
   const savesPath = path.join(mcPath, 'saves')
   const worldPath = path.join(savesPath, worldName)
 
-  if (!fs.existsSync(worldPath)) {
-    const existingWorlds = (await fs.readdir(savesPath, { withFileTypes: true }))
-      .filter((f) => f.isDirectory())
-      .map((f) => f.name)
+  if (!(await fs.pathExists(worldPath))) {
+    const existingWorlds: string[] = []
+    try {
+      const entries = await fs.readDirNames(savesPath)
+      // Filter to dirs via per-entry stat; saves/ is small enough that
+      // the parallel stat pass is cheaper than re-implementing readdir
+      // with a custom Dirent filter.
+      await Promise.all(entries.map(async (name) => {
+        try {
+          const s = await fs.fileLstat(path.join(savesPath, name))
+          if (s.isDirectory()) existingWorlds.push(name)
+        } catch { /* skip */ }
+      }))
+    } catch { /* saves/ missing — report empty list */ }
 
     throw new Error(
       `Unable to locate the "${worldPath}" folder. World ${worldName} does not exist. List of existing worlds: ${JSON.stringify(existingWorlds, null, 2)}`,
@@ -113,7 +122,7 @@ export async function createSymlink(
 
   const comment = `# Sandstone Pack: ${packName}\n`
   try {
-    const currentlyAllowed = (await fs.readFile(allowedList, 'utf-8')).replace(/\r/g, '')
+    const currentlyAllowed = (await fs.readText(allowedList)).replace(/\r/g, '')
 
     // Do not build a RegExp from Minecraft's glob syntax: `**` is invalid
     // regex syntax and would make the catch block overwrite the allowlist.
@@ -121,14 +130,19 @@ export async function createSymlink(
       log('[symlink] Workspace already in allowed_symlinks.txt, skipping...')
     } else {
       log('[symlink] Adding workspace to allowed_symlinks.txt. If the game is running please restart it.')
-      const separator = currentlyAllowed.length > 0 && !currentlyAllowed.endsWith('\n') ? '\n' : ''
-      await fs.appendFile(allowedList, `${separator}#\n${comment}${allowPath}`)
+      // Append: Bun.write has no append mode, so concat existing + new entry.
+      // Preserve prior comments + glob entries; only add a `#` separator line
+      // between them so the new block is visually distinct.
+      const separator = currentlyAllowed.length > 0
+        ? (currentlyAllowed.endsWith('\n') ? '' : '\n') + '#\n'
+        : ''
+      await fs.writeText(allowedList, currentlyAllowed + separator + comment + allowPath)
     }
   } catch (e: any) {
     if (e.code !== 'ENOENT') throw e
 
     log('[symlink] Creating allowed_symlinks.txt. If the game is running please restart it.')
-    await fs.writeFile(allowedList, `${comment}${allowPath}`)
+    await fs.writeText(allowedList, `${comment}${allowPath}`)
   }
 
   // Inspect what (if anything) exists at linkPath
@@ -136,8 +150,8 @@ export async function createSymlink(
   let skip = false
   let errored = false
   try {
-    const stats = await fs.lstat(linkPath)
-    if (stats.isSymbolicLink() && await fs.readlink(linkPath) === path.resolve(targetPath)) {
+    const stats = await fs.fileLstat(linkPath)
+    if (stats.isSymbolicLink() && await fs.readSymlink(linkPath) === path.resolve(targetPath)) {
       log('[symlink] Symlink already created, skipping...')
       skip = true
     } else if (stats.isDirectory()) {
@@ -174,8 +188,8 @@ export async function createSymlink(
 
       let childSkip = false
       try {
-        const childStats = await fs.lstat(childLink)
-        if (childStats.isSymbolicLink() && await fs.readlink(childLink) === path.resolve(childTarget)) {
+        const childStats = await fs.fileLstat(childLink)
+        if (childStats.isSymbolicLink() && await fs.readSymlink(childLink) === path.resolve(childTarget)) {
           childSkip = true
         } else {
           // Existing entry (e.g. real file from a previous non-symlink copy)
@@ -186,7 +200,7 @@ export async function createSymlink(
       } catch {}
 
       if (!childSkip) {
-        await fs.symlink(path.resolve(childTarget), childLink)
+        await fs.createSymlink(path.resolve(childTarget), childLink)
       }
 
       newCache.symlinks ??= []
@@ -200,7 +214,7 @@ export async function createSymlink(
   // Create symlink
   if (!skip) {
     log(`[symlink] Creating symlink for ${targetPath.replace(`${path.dirname(targetPath)}${path.sep}`, '')}`)
-    await fs.symlink(path.resolve(targetPath), linkPath)
+    await fs.createSymlink(path.resolve(targetPath), linkPath)
   }
 
   // Track in cache
@@ -218,7 +232,7 @@ export async function createArchive(
 ): Promise<boolean> {
   const input = path.join(outputFolder, packType.type)
 
-  const files = await fs.readdir(input).catch(() => [])
+  const files = await fs.readDirNames(input).catch(() => [])
   if (files.length === 0) return false
 
   const archiveName = `${packName}_${packType.type}.zip`
@@ -248,12 +262,12 @@ export async function runExportHandler(
   await packType.handleOutput(
     target,
     (async (relativePath: string, encoding: BufferEncoding = 'utf8') =>
-      await fs.readFile(path.join(exportPath, relativePath), encoding)) as unknown as handlerReadFile,
+      await fs.readText(path.join(exportPath, relativePath))) as unknown as handlerReadFile,
     async (relativePath: string, contents: any) => {
       if (contents === undefined) {
-        await fs.unlink(path.join(exportPath, relativePath))
+        await fs.unlinkPath(path.join(exportPath, relativePath))
       } else {
-        await fs.writeFile(path.join(exportPath, relativePath), contents)
+        await fs.writeText(path.join(exportPath, relativePath), contents)
       }
     },
   )
@@ -261,7 +275,7 @@ export async function runExportHandler(
 
 // Export destination helpers
 
-export function preserveSymlink(
+export async function preserveSymlink(
   symlinkPath: string | undefined,
   oldCache: SandstoneCache,
   newCache: SandstoneCache
@@ -280,7 +294,7 @@ export function preserveSymlink(
   // is not misidentified as a directory itself; the fallback branch below
   // handles that case (the symlink itself is in oldCache.symlinks).
   const perChildEntries = newCache.perChildEntries?.[symlinkPath]
-  if (perChildEntries && fs.pathExistsSync(symlinkPath) && fs.lstatSync(symlinkPath).isDirectory()) {
+  if (perChildEntries && (await fs.pathExists(symlinkPath)) && (await fs.fileLstat(symlinkPath)).isDirectory()) {
     const sep = path.sep
     for (const oldSymlink of oldCache.symlinks) {
       if (!oldSymlink.startsWith(symlinkPath + sep)) continue
@@ -334,7 +348,7 @@ export async function exportPack(
   } else {
     // Copy files
     await fs.remove(destPath)
-    await fs.copy(outputPath, destPath)
+    await fs.copyDir(outputPath, destPath)
   }
 }
 
@@ -369,7 +383,7 @@ export async function cleanupOldSymlinks(oldCache: SandstoneCache, newCache: San
 
   for (const symlink of oldCache.symlinks) {
     if (!newSymlinks.has(symlink)) {
-      await fs.unlink(symlink)
+      await fs.unlinkPath(symlink)
     }
   }
 }
@@ -383,13 +397,13 @@ export async function cleanupOldArchives(
 
   const archivesDir = path.join(outputFolder, 'archives')
   if (!newCache.archives || newCache.archives.length === 0) {
-    await fs.rm(archivesDir, { force: true, recursive: true })
+    await fs.remove(archivesDir, { recursive: true, force: true })
     return
   }
 
   for (const archive of oldCache.archives) {
     if (!newCache.archives.includes(archive)) {
-      await fs.rm(path.join(archivesDir, archive))
+      await fs.remove(path.join(archivesDir, archive))
     }
   }
 }

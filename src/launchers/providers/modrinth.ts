@@ -1,7 +1,7 @@
-import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { Database } from 'bun:sqlite'
+import * as fs from '../../utils/fs.js'
 import type { LauncherProvider, MinecraftInstance } from '../types.js'
 
 function getModrinthCandidatePaths(): string[] {
@@ -33,9 +33,9 @@ function getModrinthCandidatePaths(): string[] {
   return paths
 }
 
-function getModrinthDataPath(): string | null {
+async function getModrinthDataPath(): Promise<string | null> {
   for (const candidate of getModrinthCandidatePaths()) {
-    if (fs.existsSync(candidate)) {
+    if (await fs.pathExists(candidate)) {
       return candidate
     }
   }
@@ -48,12 +48,15 @@ interface ProfileRow {
   game_version: string | null
 }
 
-/** Query app.db for profile metadata */
+/** Query app.db for profile metadata. Returns a Map keyed by profile path. */
 function getProfilesFromDb(dataPath: string): Map<string, { name: string; version?: string }> {
   const profiles = new Map<string, { name: string; version?: string }>()
   const dbPath = path.join(dataPath, 'app.db')
 
-  if (!fs.existsSync(dbPath)) return profiles
+  if (!Bun.file(dbPath).size) {
+    // Either missing or empty — bail before sqlite trips over an ENOENT.
+    return profiles
+  }
 
   try {
     const db = new Database(dbPath, { readonly: true })
@@ -79,19 +82,19 @@ export const modrinthProvider: LauncherProvider = {
   displayName: 'Modrinth App',
 
   async isInstalled(): Promise<boolean> {
-    return getModrinthDataPath() !== null
+    return (await getModrinthDataPath()) !== null
   },
 
   getDataPath(): string | null {
-    return getModrinthDataPath()
+    return getModrinthCandidatePaths()[0] ?? null
   },
 
   async discoverInstances(): Promise<MinecraftInstance[]> {
-    const dataPath = getModrinthDataPath()
+    const dataPath = await getModrinthDataPath()
     if (!dataPath) return []
 
     const profilesDir = path.join(dataPath, 'profiles')
-    if (!fs.existsSync(profilesDir)) return []
+    if (!(await fs.pathExists(profilesDir))) return []
 
     // Get profile metadata from database
     const profileMetadata = getProfilesFromDb(dataPath)
@@ -99,10 +102,10 @@ export const modrinthProvider: LauncherProvider = {
     const instances: MinecraftInstance[] = []
 
     try {
-      const entries = fs.readdirSync(profilesDir, { withFileTypes: true })
+      const entries = await fs.readDirEntries(profilesDir)
 
       for (const entry of entries) {
-        if (!entry.isDirectory()) continue
+        if (!entry.isDirectory) continue
         // Skip hidden folders
         if (entry.name.startsWith('.')) continue
 
@@ -110,8 +113,8 @@ export const modrinthProvider: LauncherProvider = {
         const minecraftPath = path.join(profilesDir, entry.name)
 
         // Verify it looks like a minecraft directory (has saves or mods folder)
-        const hasSaves = fs.existsSync(path.join(minecraftPath, 'saves'))
-        const hasMods = fs.existsSync(path.join(minecraftPath, 'mods'))
+        const hasSaves = await fs.pathExists(path.join(minecraftPath, 'saves'))
+        const hasMods = await fs.pathExists(path.join(minecraftPath, 'mods'))
         if (!hasSaves && !hasMods) continue
 
         // Get metadata from database

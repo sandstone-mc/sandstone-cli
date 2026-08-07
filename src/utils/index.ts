@@ -1,10 +1,11 @@
-import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
 import { Worker } from 'node:worker_threads'
-import { execSync } from 'child_process'
 import chalk from 'chalk-template'
+
+import * as fs from './fs.js'
+import { run } from './shell.js'
 
 /** Hash a string or buffer using MD5 */
 export function hash(data: string | Buffer): string {
@@ -24,8 +25,8 @@ export function hash(data: string | Buffer): string {
  */
 const HASH_WORKER_SOURCE = `
 import { parentPort, workerData } from 'node:worker_threads'
-import { createReadStream } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { createReadStream } from 'fs'
+import { createHash } from 'crypto'
 
 const { filePath } = workerData
 ;(async () => {
@@ -86,48 +87,56 @@ export async function sha256File(p: string): Promise<string> {
 
 /** Detect the package manager used in a project directory via lockfile */
 export async function detectPackageManager(dir: string): Promise<'bun' | 'pnpm' | 'yarn' | 'npm' | null> {
-  if (fs.existsSync(path.join(dir, 'bun.lock')) || fs.existsSync(path.join(dir, 'bun.lockb'))) return 'bun'
-  if (fs.existsSync(path.join(dir, 'pnpm-lock.yaml'))) return 'pnpm'
-  if (fs.existsSync(path.join(dir, 'yarn.lock'))) return 'yarn'
-  if (fs.existsSync(path.join(dir, 'package-lock.json'))) return 'npm'
+  // Probe every lockfile in parallel; Bun.file().exists() is cheap enough
+  // that the join with `Promise.all` is a micro-optimization, but it also
+  // surfaces I/O failures uniformly rather than as short-circuited throws.
+  const [hasBunLock, hasBunLockb, hasPnpmLock, hasYarnLock, hasNpmLock] = await Promise.all([
+    fs.fileExists(path.join(dir, 'bun.lock')),
+    fs.fileExists(path.join(dir, 'bun.lockb')),
+    fs.fileExists(path.join(dir, 'pnpm-lock.yaml')),
+    fs.fileExists(path.join(dir, 'yarn.lock')),
+    fs.fileExists(path.join(dir, 'package-lock.json')),
+  ])
+  if (hasBunLock || hasBunLockb) return 'bun'
+  if (hasPnpmLock) return 'pnpm'
+  if (hasYarnLock) return 'yarn'
+  if (hasNpmLock) return 'npm'
   return null
 }
 
 /** Normalize a path to use forward slashes */
 export const normalizePath = (p: string) => p.replaceAll('\\', '/')
 
-export function hasYarn(): boolean {
+/**
+ * Detect which JS package managers / CLI helpers are on PATH.
+ *
+ * Each check shells out to `<cmd> --version` via the quiet shell wrapper
+ * and returns true only when the binary exists AND exits 0. Used by the
+ * create flow to gate the package-manager prompt.
+ */
+async function hasVersion(cmd: string): Promise<boolean> {
   try {
-    execSync('yarn --version')
-    return true
-  } catch (error) {
-    return false
-  }
-}
-export function hasPnpm(): boolean {
-  try {
-    execSync('pnpm --version')
-    return true
-  } catch (error) {
-    return false
-  }
-}
-export function hasBun(): boolean {
-  try {
-    execSync('bun --version')
-    return true
-  } catch (error) {
+    const result = await run(cmd, ['--version'], { throws: false })
+    return result.exitCode === 0
+  } catch {
     return false
   }
 }
 
-export function hasGh(): boolean {
-  try {
-    execSync('gh --version')
-    return true
-  } catch {
-    return false
-  }
+export async function hasYarn(): Promise<boolean> {
+  return hasVersion('yarn')
+}
+
+export async function hasPnpm(): Promise<boolean> {
+  return hasVersion('pnpm')
+}
+
+export async function hasBun(): Promise<boolean> {
+  return hasVersion('bun')
+}
+
+export async function hasGh(): Promise<boolean> {
+  return hasVersion('gh')
 }
 
 export const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
@@ -142,30 +151,32 @@ export async function canUseSymlinks(): Promise<boolean> {
     return true
   }
 
-  const testDir = path.join(os.tmpdir(), `symlink-test-${Date.now()}`)
+  const testDir = path.join(os.tmpdir(), `fs.symlink-test-${Date.now()}`)
   const targetPath = path.join(testDir, 'target')
   const linkPath = path.join(testDir, 'link')
 
   try {
-    await fs.promises.mkdir(testDir)
-    await fs.promises.mkdir(targetPath)
-    await fs.promises.writeFile(path.join(targetPath, 'test.txt'), 'symlink-test')
-    await fs.promises.symlink(targetPath, linkPath, 'dir')
+    await fs.ensureDir(testDir)
+    await fs.ensureDir(targetPath)
+    await Bun.write(path.join(targetPath, 'test.txt'), 'fs.symlink-test')
+    await fs.createSymlink(targetPath, linkPath, 'dir')
 
-    // Verify the symlink actually works by reading through it
-    const content = await fs.promises.readFile(path.join(linkPath, 'test.txt'), 'utf-8')
-    return content === 'symlink-test'
+    // Verify the fs.symlink actually works by reading through it
+    const content = await Bun.file(path.join(linkPath, 'test.txt')).text()
+    return content === 'fs.symlink-test'
   } catch {
     return false
   } finally {
-    await fs.promises.rm(testDir, { recursive: true, force: true }).catch(() => {})
+    await fs.remove(testDir, { recursive: true, force: true }).catch(() => {})
   }
 }
 
 /**
- * Get the .minecraft path
+ * Get the .minecraft path. Async — uses `fs.pathExists` instead of the old
+ * sync `existsSync`. Throws when the directory is missing so callers can
+ * surface a user-friendly error before any further I/O.
  */
-export function getMinecraftPath(): string {
+export async function getMinecraftPath(): Promise<string> {
   function getMCPath(): string {
     switch (os.platform()) {
     case 'win32':
@@ -180,21 +191,32 @@ export function getMinecraftPath(): string {
 
   const mcPath = getMCPath()
 
-  if (!fs.existsSync(mcPath)) {
+  if (!(await fs.pathExists(mcPath))) {
     throw new Error('Unable to locate the .minecraft folder. Please specify it manually.')
   }
 
   return mcPath
 }
 
-export function getWorldsList(clientPath?: string): string[] {
-  const mcPath = clientPath || getMinecraftPath()
+/** List the worlds in a Minecraft installation's `saves/` directory. */
+export async function getWorldsList(clientPath?: string): Promise<string[]> {
+  const mcPath = clientPath || await getMinecraftPath()
   const savesPath = path.join(mcPath, 'saves')
 
-  return fs.readdirSync(
-    savesPath,
-    { withFileTypes: true }
-  ).filter((f) => f.isDirectory).map((f) => f.name)
+  const entries = await fs.readDirNames(savesPath)
+  // We can't tell files from dirs from `fs.readDirNames` alone; fall back to a
+  // per-entry stat. Cheap because `saves/` is small (tens of entries max).
+  const dirStats = await Promise.all(
+    entries.map(async (name) => {
+      try {
+        const s = await Bun.file(path.join(savesPath, name)).stat()
+        return { name, isDir: s.isDirectory() }
+      } catch {
+        return { name, isDir: false }
+      }
+    }),
+  )
+  return dirStats.filter((e) => e.isDir).map((e) => e.name)
 }
 
 // --- 1. Utilities to convert Union to Tuple (Standard TS Magic) ---
@@ -247,4 +269,31 @@ export function add<O extends Record<string, any>>(obj: O): Prettify<PowerSet<O>
 
   // @ts-ignore
   return filtered
+}
+
+export interface MCVersion {
+  mcMajor: number
+  mcMinor: number
+}
+
+export function sandstoneMinorToMC(minor: number): MCVersion {
+  return {
+    mcMajor: 26 + Math.floor(minor / 4),
+    mcMinor: (minor % 4) + 1,
+  }
+}
+
+/**
+ * Sandstone minor version → Minecraft major.minor mapping.
+ *
+ * Each sandstone 1.x.y corresponds exactly to one Minecraft version.
+ * MC has 4 bases per year (26.1-26.4, 27.1-27.4, ...). Sandstone major 2
+ * is out of scope and will be revisited when it ships.
+ *
+ * Kept in sync with /var/home/mulverine/Workspaces/sandstone-work/scripts/sandstoneToMC.ts
+ * (deterministic — no shared package needed).
+ */
+export function sandstoneMinorToMCString(minor: number): string {
+  const { mcMajor, mcMinor } = sandstoneMinorToMC(minor)
+  return `${mcMajor}.${mcMinor}`
 }

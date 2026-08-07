@@ -1,12 +1,12 @@
-import path from 'node:path'
-import { pathToFileURL } from 'node:url'
-import fs from 'fs-extra'
+import path from 'path'
+import { pathToFileURL } from 'url'
 import chalk from 'chalk'
 import { split } from 'obliterator'
 
 import type { BuildResult, ResourceCounts } from '../../ui/types.js'
 import { log, initLoggerNoFile, setSilent } from '../../ui/logger.js'
 import { hash } from '../../utils/index.js'
+import * as fs from '../../utils/fs.js'
 import { resolveStackTrace } from '../../utils/source-map.js'
 import { syncLinkedLibraries } from '../link.js'
 import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../../utils/updateCheck.js'
@@ -79,7 +79,7 @@ async function loadCache(cacheFile: string): Promise<SandstoneCache> {
   }
 
   try {
-    const fileRead = await fs.readFile(cacheFile, 'utf8')
+    const fileRead = await fs.readText(cacheFile)
     if (fileRead) {
       const parsed = JSON.parse(fileRead)
       cache = parsed.files ? parsed : { files: parsed }
@@ -94,7 +94,7 @@ async function loadCache(cacheFile: string): Promise<SandstoneCache> {
 async function saveCache(cacheFile: string, newCache: SandstoneCache) {
   cache = newCache
   await fs.ensureDir(path.dirname(cacheFile))
-  await fs.writeFile(cacheFile, JSON.stringify(cache))
+  await fs.writeJSON(cacheFile, cache, { pretty: false })
 }
 
 // Boilerplate resources to exclude from counts
@@ -144,14 +144,14 @@ async function processPackTypeOutput(
     await packType.handleOutput(
       'output',
       (async (relativePath: string, encoding: BufferEncoding = 'utf8') =>
-        await fs.readFile(path.join(outputPath, relativePath), encoding)) as unknown as handlerReadFile,
+        await fs.readText(path.join(outputPath, relativePath))) as unknown as handlerReadFile,
       async (relativePath: string, contents: any) => {
         if (contents === undefined) {
-          await fs.unlink(path.join(outputPath, relativePath))
+          await Bun.file(path.join(outputPath, relativePath)).delete()
         } else {
-          await fs.writeFile(
+          await fs.writeBytes(
             path.join(outputPath, relativePath),
-            contents instanceof ArrayBuffer ? Buffer.from(contents) : contents
+            contents instanceof ArrayBuffer ? Buffer.from(contents) : contents,
           )
         }
       },
@@ -218,7 +218,7 @@ async function _buildProject(
 
   // Read project package.json to get entrypoint
   const packageJsonPath = path.join(folder, 'package.json')
-  const packageJson = JSON.parse(await fs.readFile(packageJsonPath, 'utf-8'))
+  const packageJson = JSON.parse(await fs.readText(packageJsonPath))
 
   const entrypoint = packageJson.module
   if (!entrypoint) {
@@ -275,15 +275,13 @@ async function _buildProject(
   }
 
   try {
-    if (await fs.pathExists(entrypointPath)) {
-      const isBun = Object.hasOwn(globalThis, 'Bun')
+    if (await fs.fileExists(entrypointPath)) {
       const entrypointUrl = pathToFileURL(entrypointPath).toString()
-
-      if (watching && !isBun) {
-        await import(entrypointUrl, { with: { hot: 'true' } })
-      } else {
-        await import(entrypointUrl)
-      }
+      await import(entrypointUrl)
+      // The hot-reload layer (Bun's module cache invalidation + the CLI's
+      // own require.cache purge in watch mode) is the only reload path now
+      // that hot-hook is gone; rebuilds re-import the entrypoint fresh.
+      void watching
     }
   } catch (e: any) {
     // Enhance error with context, let callers handle logging
@@ -331,7 +329,7 @@ async function _buildProject(
     dry: cliOptions.dry ?? false,
     verbose: cliOptions.verbose ?? false,
 
-    // TODO: Implement `contentSummary` and remove this typecast
+    // TODO: Implement `contentSummary` and fs.remove this typecast
     fileHandler: (saveOptions.customFileHandler as ((relativePath: string, content: any) => Promise<void>) | undefined) ??
       (async (relativePath: string, content: any) => {
         let pathPass = true
@@ -368,7 +366,8 @@ async function _buildProject(
 
           const realPath = path.join(outputFolder, relativePath)
           await fs.ensureDir(path.dirname(realPath))
-          return await fs.writeFile(realPath, content instanceof ArrayBuffer ? Buffer.from(content) : content)
+          await fs.writeBytes(realPath, content instanceof ArrayBuffer ? Buffer.from(content) : content)
+          return
         }
       }),
   })
@@ -409,10 +408,12 @@ async function _buildProject(
       // look them up directly. Only populated when the destination is itself
       // an existing directory — otherwise this packType uses folder symlinking
       // and the per-child list would just be noise.
-      const isDir = (dest: string | undefined) =>
-        !!dest && fs.pathExistsSync(dest) && fs.lstatSync(dest).isDirectory()
-      const clientIsDir = isDir(clientDest)
-      const serverIsDir = isDir(serverDest)
+      const isDir = async (dest: string | undefined): Promise<boolean> => {
+        if (!dest) return false
+        if (!(await fs.pathExists(dest))) return false
+        return (await Bun.file(dest).stat().catch(() => null))?.isDirectory() ?? false
+      }
+      const [clientIsDir, serverIsDir] = await Promise.all([isDir(clientDest), isDir(serverDest)])
       if (clientIsDir || serverIsDir) {
         const packTypePrefix = packType.type + path.sep
         const entries = Object.keys(newCache.files)
@@ -426,8 +427,8 @@ async function _buildProject(
       }
 
       // Preserve existing symlinks (even if no files changed)
-      preserveSymlink(clientDest, oldCache, newCache)
-      preserveSymlink(serverDest, oldCache, newCache)
+      await preserveSymlink(clientDest, oldCache, newCache)
+      await preserveSymlink(serverDest, oldCache, newCache)
 
       // Skip actual export if nothing changed
       if (!changedPackTypes.has(packType.type)) continue
@@ -476,7 +477,7 @@ async function _buildProject(
         if (skipFile) continue
 
         try {
-          await fs.rm(path.join(outputFolder, file))
+          await fs.remove(path.join(outputFolder, file))
         } catch (e: any) {
           if (e.code !== 'ENOENT') throw e
           log(chalk.yellow('Warning:'), `Cached file not found during cleanup: ${file}`)
@@ -487,7 +488,7 @@ async function _buildProject(
           dir = dir === undefined ? segment : path.join(dir, segment)
 
           if (!newDirs.has(dir)) {
-            await fs.rm(path.join(outputFolder, dir), { force: true, recursive: true })
+            await fs.remove(path.join(outputFolder, dir), { recursive: true, force: true })
             deletedDirs.add(dir)
             break
           }
@@ -547,7 +548,7 @@ export async function _buildCommand(
     const stackTrace = traceStart >= 0 ? stackLines.slice(traceStart).join('\n') : ''
 
     // Resolve source maps for better error locations
-    const resolvedStackTrace = stackTrace ? resolveStackTrace(stackTrace) : ''
+    const resolvedStackTrace = await resolveStackTrace(stackTrace)
     const formattedError = resolvedStackTrace ? `${errorMessage}\n${resolvedStackTrace}` : errorMessage
     return {
       success: false,
@@ -603,7 +604,7 @@ export async function buildCommand(opts: BuildOptions, _folder?: string, silent 
     const traceStart = stackLines.findIndex(line => line.trimStart().startsWith('at '))
     const stackTrace = traceStart >= 0 ? stackLines.slice(traceStart).join('\n') : ''
 
-    const resolvedStackTrace = stackTrace ? resolveStackTrace(stackTrace) : ''
+    const resolvedStackTrace = await resolveStackTrace(stackTrace)
     const formattedError = resolvedStackTrace ? `${errorMessage}\n${resolvedStackTrace}` : errorMessage
     // Update notifications always print, even when silent (programmatic
     // callers should still see them).

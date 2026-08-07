@@ -1,6 +1,6 @@
-import fs from 'fs-extra'
 import path from 'path'
 import { stripVTControlCharacters, format } from 'util'
+import * as fs from '../utils/fs.js'
 
 let logPath: string | null = null
 let liveLogCallback: ((level: string | false, args: unknown[]) => void) | null = null
@@ -10,7 +10,7 @@ let silent = false
 
 // Track initialization and pending writes
 let initPromise: Promise<void> | null = null
-let writer: fs.WriteStream | null = null
+let writer: Bun.FileSink | null = null
 const pendingWrites: Promise<void>[] = []
 
 export function initLogger(rootFolder: string): () => Promise<void> {
@@ -59,13 +59,12 @@ export function drainLiveLogBuffer() {
 
 async function logWorkerInit() {
   await fs.ensureDir(path.dirname(logPath!))
-  await fs.writeFile(logPath!, `=== Watch started at ${new Date().toISOString()} ===\n`)
-  writer = fs.createWriteStream(logPath!, { flags: 'a' })
-  // Wait for the stream to be ready before allowing writes
-  await new Promise<void>((resolve, reject) => {
-    writer!.once('open', () => resolve())
-    writer!.once('error', reject)
-  })
+  // Write the header line, then open an append-mode FileSink for incremental
+  // writes. The FileSink buffers internally and auto-flushes at the high
+  // water mark, so the per-line cost is just a buffer append.
+  const header = `=== Watch started at ${new Date().toISOString()} ===\n`
+  await Bun.write(logPath!, header)
+  writer = Bun.file(logPath!).writer({ highWaterMark: 16 * 1024 })
 }
 
 async function logWorkerMain(level: string | false, ...args: unknown[]) {
@@ -127,10 +126,21 @@ function writeChunk(chunk: string | Buffer | Uint8Array): Promise<void> {
       reject(new Error('Writer not initialized'))
       return
     }
-    writer.write(chunk, (err) => {
-      if (err) reject(err)
-      else resolve()
-    })
+    // FileSink.write takes a typed ArrayBufferView / string. Coerce string
+    // to Buffer (the underlying sink handles either); unwrap Uint8Array to
+    // its underlying buffer for the same reason.
+    try {
+      const data = typeof chunk === 'string'
+        ? Buffer.from(chunk)
+        : chunk instanceof Uint8Array
+          ? chunk
+          : chunk
+      const written = writer.write(data as any)
+      void written
+      resolve()
+    } catch (err) {
+      reject(err)
+    }
   })
 }
 
@@ -143,14 +153,9 @@ async function logWorkerFinish() {
   // Make sure to await all pending logWorkerMain calls
   await Promise.all(pendingWrites)
 
-  // Close the writer
+  // Close the writer. `end()` flushes the buffer before closing the FD.
   if (writer) {
-    await new Promise<void>((resolve, reject) => {
-      writer!.close((err) => {
-        if (err) reject(err)
-        else resolve()
-      })
-    })
+    await writer.end()
     writer = null
   }
 }

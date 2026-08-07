@@ -6,17 +6,18 @@
  */
 
 import { SourceMapConsumer, type RawSourceMap } from 'source-map-js'
-import { readFileSync } from 'fs'
 import { dirname, resolve } from 'path'
+import * as fs from './fs.js'
 
-// Cache for loaded source map consumers
+// Cache for loaded source map consumers. Keyed by JS file path so repeated
+// errors touching the same files don't reparse.
 const sourceMapCache = new Map<string, SourceMapConsumer | null>()
 
 /**
- * Synchronously load a source map for a given JS file.
- * Returns null if no source map is found or it's invalid.
+ * Load a source map for a given JS file. Returns null if no source map is
+ * found or it's invalid. Async to match the rest of the CLI (no sync I/O).
  */
-function loadSourceMapSync(jsFilePath: string): SourceMapConsumer | null {
+async function loadSourceMap(jsFilePath: string): Promise<SourceMapConsumer | null> {
   // Check cache first
   if (sourceMapCache.has(jsFilePath)) {
     return sourceMapCache.get(jsFilePath) ?? null
@@ -24,7 +25,7 @@ function loadSourceMapSync(jsFilePath: string): SourceMapConsumer | null {
 
   try {
     // Read the JS file to find the sourceMappingURL
-    const jsContent = readFileSync(jsFilePath, 'utf8')
+    const jsContent = await fs.readText(jsFilePath)
 
     // Look for sourceMappingURL comment
     const match = jsContent.match(/\/\/[#@]\s*sourceMappingURL=(.+)$/m)
@@ -34,7 +35,6 @@ function loadSourceMapSync(jsFilePath: string): SourceMapConsumer | null {
     }
 
     const sourceMappingURL = match[1].trim()
-    let mapPath: string
     let mapContent: string
 
     if (sourceMappingURL.startsWith('data:')) {
@@ -47,8 +47,8 @@ function loadSourceMapSync(jsFilePath: string): SourceMapConsumer | null {
       mapContent = Buffer.from(base64Match[1], 'base64').toString('utf8')
     } else {
       // External source map file
-      mapPath = resolve(dirname(jsFilePath), sourceMappingURL)
-      mapContent = readFileSync(mapPath, 'utf8')
+      const mapPath = resolve(dirname(jsFilePath), sourceMappingURL)
+      mapContent = await fs.readText(mapPath)
     }
 
     const rawMap: RawSourceMap = JSON.parse(mapContent)
@@ -114,9 +114,28 @@ function parseStackLine(line: string): StackFrame {
 }
 
 /**
- * Resolve a stack frame using source maps (synchronous).
+ * Resolve source maps in a stack trace string. Async because source-map
+ * reads are async (the rest of the CLI is async).
  */
-function resolveStackFrame(frame: StackFrame): string {
+export async function resolveStackTrace(stack: string): Promise<string> {
+  const lines = stack.split('\n')
+  const resolvedLines: string[] = []
+
+  for (const line of lines) {
+    // Only process lines that look like stack frames
+    if (line.trimStart().startsWith('at ')) {
+      const frame = parseStackLine(line)
+      const resolved = await resolveStackFrame(frame)
+      resolvedLines.push(resolved)
+    } else {
+      resolvedLines.push(line)
+    }
+  }
+
+  return resolvedLines.join('\n')
+}
+
+async function resolveStackFrame(frame: StackFrame): Promise<string> {
   if (!frame.filePath || !frame.line || !frame.column) {
     return frame.original
   }
@@ -127,7 +146,7 @@ function resolveStackFrame(frame: StackFrame): string {
   }
 
   try {
-    const consumer = loadSourceMapSync(frame.filePath)
+    const consumer = await loadSourceMap(frame.filePath)
     if (!consumer) {
       return frame.original
     }
@@ -158,28 +177,6 @@ function resolveStackFrame(frame: StackFrame): string {
   }
 
   return frame.original
-}
-
-/**
- * Resolve source maps in a stack trace string (synchronous).
- * Returns the stack trace with original source locations where possible.
- */
-export function resolveStackTrace(stack: string): string {
-  const lines = stack.split('\n')
-  const resolvedLines: string[] = []
-
-  for (const line of lines) {
-    // Only process lines that look like stack frames
-    if (line.trimStart().startsWith('at ')) {
-      const frame = parseStackLine(line)
-      const resolved = resolveStackFrame(frame)
-      resolvedLines.push(resolved)
-    } else {
-      resolvedLines.push(line)
-    }
-  }
-
-  return resolvedLines.join('\n')
 }
 
 /**

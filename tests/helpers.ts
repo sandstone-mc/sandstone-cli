@@ -29,7 +29,7 @@ export async function* spawnCli(
   opts: { cwd?: string; extraEnv?: Record<string, string> } = {},
 ): AsyncGenerator<ShellLine, { exitCode: number }, void> {
   const proc = Bun.spawn({
-    cmd: ['bun', SANDBIN, ...args],
+    cmd: [Bun.which('bun') ?? 'bun', SANDBIN, ...args],
     cwd: opts.cwd ?? process.cwd(),
     stdout: 'pipe',
     stderr: 'pipe',
@@ -67,7 +67,11 @@ export async function runSand(args: string[], cwd: string): Promise<{ output: st
   let proc: ReturnType<typeof Bun.spawn> | undefined
   try {
     proc = Bun.spawn({
-      cmd: ['bun', SANDBIN, ...args],
+      // Resolve bun to an absolute path — under `bun test` the subprocess
+      // PATH doesn't always include the directory the test runner's bun
+      // was launched from, which made these tests fail with ENOENT on
+      // `bun` after the Bun-only migration.
+      cmd: [Bun.which('bun') ?? 'bun', SANDBIN, ...args],
       cwd,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -108,7 +112,11 @@ export async function harnessCreate(name: string, isLibrary: boolean): Promise<s
         ['down', 'down', 'down', 'enter'],
         ['enter'],
       ])
-  const cmd = `bun test:harness create ${name} --responses '${responses}'`
+  // Resolve `bun` to an absolute path before handing it to bash so the
+  // spawned login shell inherits a PATH that actually contains bun — under
+  // `bun test` the bare name doesn't always resolve.
+  const bunBin = Bun.which('bun') ?? 'bun'
+  const cmd = `${bunBin} test:harness create ${name} --responses '${responses}'`
   const proc = Bun.spawn({
     cmd: ['bash', '-lc', cmd],
     cwd: CLI,
@@ -165,7 +173,7 @@ export async function findOutputWithMarker(root: string, marker: string): Promis
 /** Spawn a watch process inside a PTY so Ink doesn't crash. */
 export function spawnWatch(args: string[], cwd: string): ReturnType<typeof Bun.spawn> {
   return Bun.spawn({
-    cmd: ['script', '-qfc', `bun ${SANDBIN} ${args.join(' ')}`, '/dev/null'],
+    cmd: ['script', '-qfc', `${Bun.which('bun') ?? 'bun'} ${SANDBIN} ${args.join(' ')}`, '/dev/null'],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -178,7 +186,7 @@ export function spawnWatch(args: string[], cwd: string): ReturnType<typeof Bun.s
 /** Run `bun dev:build` inside a library (compiles + typechecks). */
 export async function buildLibrary(libDir: string): Promise<{ output: string; exitCode: number }> {
   const proc = Bun.spawn({
-    cmd: ['bun', 'run', 'dev:build'],
+    cmd: [Bun.which('bun') ?? 'bun', 'run', 'dev:build'],
     cwd: libDir,
     stdout: 'pipe',
     stderr: 'pipe',

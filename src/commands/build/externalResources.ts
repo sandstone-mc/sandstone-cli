@@ -1,10 +1,10 @@
 import path from 'path'
-import fs from 'fs-extra'
 
 import { DataPackDependencies, ResourcePackDependencies, type PackType } from 'sandstone/pack'
 
 import type { SandstoneCache } from './export.js'
 import { hash } from '../../utils/index.js'
+import * as fs from '../../utils/fs.js'
 import { SandstoneConfig } from 'sandstone'
 
 export type FileExclusions = {
@@ -16,10 +16,22 @@ export type FileHandler = NonNullable<NonNullable<SandstoneConfig['resources']>[
 
 async function walk(dir: string): Promise<string[]> {
   const files: string[] = []
-  const entries = await fs.readdir(dir, { withFileTypes: true })
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name)
-    if (entry.isDirectory()) {
+  const entries = await fs.readDirNames(dir)
+  // A `withFileTypes: true` readdir returns Dirent; since we use `fs.readDirNames`
+  // (plain string list) to avoid the fs-extra-style surface area, do a
+  // parallel stat pass for the directory-vs-file distinction. Cheap because
+  // resources/ trees are small.
+  const annotated = await Promise.all(entries.map(async (name) => {
+    try {
+      const s = await fs.fileStat(path.join(dir, name))
+      return { name, isDir: s.isDirectory() }
+    } catch {
+      return { name, isDir: false }
+    }
+  }))
+  for (const { name, isDir } of annotated) {
+    const fullPath = path.join(dir, name)
+    if (isDir) {
       files.push(...(await walk(fullPath)))
     } else {
       files.push(fullPath)
@@ -38,14 +50,14 @@ export async function autoRegisterPackTypes(
   const resourcesFolder = path.join(folder, 'resources')
 
   if (await fs.pathExists(path.join(resourcesFolder, 'resourcepack'))) {
-    const files = await fs.readdir(path.join(resourcesFolder, 'resourcepack'))
+    const files = await fs.readDirNames(path.join(resourcesFolder, 'resourcepack'))
     if (files.length > 0) {
       sandstonePack.resourcePack()
     }
   }
 
   if (await fs.pathExists(path.join(resourcesFolder, 'datapack'))) {
-    const files = await fs.readdir(path.join(resourcesFolder, 'datapack'))
+    const files = await fs.readDirNames(path.join(resourcesFolder, 'datapack'))
     if (files.length > 0) {
       sandstonePack.dataPack()
     }
@@ -57,7 +69,7 @@ export async function autoRegisterPackTypes(
   // generated pack output.
   const datapackDepsPath = path.join(resourcesFolder, 'datapack_dependencies')
   if (await fs.pathExists(datapackDepsPath)) {
-    const entries = await fs.readdir(datapackDepsPath)
+    const entries = await fs.readDirNames(datapackDepsPath)
     if (entries.length > 0) {
       sandstonePack.packTypes.set('datapack_dependencies', new DataPackDependencies())
     }
@@ -65,7 +77,7 @@ export async function autoRegisterPackTypes(
 
   const resourcepackDepsPath = path.join(resourcesFolder, 'resourcepack_dependencies')
   if (await fs.pathExists(resourcepackDepsPath)) {
-    const entries = await fs.readdir(resourcepackDepsPath)
+    const entries = await fs.readDirNames(resourcepackDepsPath)
     if (entries.length > 0) {
       sandstonePack.packTypes.set('resourcepack_dependencies', new ResourcePackDependencies())
     }
@@ -108,14 +120,14 @@ export async function processExternalResources(
     if (!pathPass) continue
 
     try {
-      let content: Buffer | ArrayBuffer = await fs.readFile(file)
+      let content: Buffer = await fs.readBytes(file)
 
       // Apply file handlers
       if (fileHandlers) {
         for (const handler of fileHandlers) {
           if (handler.path.test(relativePath)) {
             const possiblyString = await handler.callback(content)
-            content = typeof possiblyString === 'string' ? encoder.encode(possiblyString).buffer : content
+            content = typeof possiblyString === 'string' ? Buffer.from(encoder.encode(possiblyString)) : content
           }
         }
       }
@@ -145,7 +157,7 @@ export async function processExternalResources(
         const realPath = path.join(outputFolder, relativePath)
         let sizeDiffers = false
         try {
-          const existingStat = await fs.stat(realPath)
+          const existingStat = await fs.fileStat(realPath)
           if (existingStat.size !== content.byteLength) {
             sizeDiffers = true
           }
@@ -158,7 +170,7 @@ export async function processExternalResources(
           changedPackTypes.add(packType)
 
           await fs.ensureDir(path.dirname(realPath))
-          await fs.writeFile(realPath, content instanceof ArrayBuffer ? Buffer.from(content) : content)
+          await fs.writeBytes(realPath, content)
         }
       }
     } catch {}

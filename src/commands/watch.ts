@@ -1,7 +1,9 @@
-import { spawn } from 'node:child_process'
 import ParcelWatcher, { subscribe, type Event } from '@parcel/watcher'
+import { watchFile, unwatchFile } from 'node:fs'
+import { realpath } from 'fs/promises'
 import React from 'react'
 import { render } from 'ink'
+import { join, relative } from 'path'
 
 import { normalizePath } from '../utils/index.js'
 import { _buildCommand, type BuildOptions, type BuildContext } from './build/index.js'
@@ -9,10 +11,9 @@ import { repackIfLinked } from './link.js'
 import { WatchUI, getWatchUIAPI } from '../ui/WatchUI.js'
 import { initLogger, log, logInfo, logWarn, logError, logDebug, logTrace, setLiveLogCallback } from '../ui/logger.js'
 import type { TrackedChange, ChangeCategory } from '../ui/types.js'
-import { hot } from '@sandstone-mc/hot-hook'
 import { resolveStackTrace } from '../utils/source-map.js'
-import fs from 'fs-extra'
-import { join, relative } from 'node:path'
+import * as fs from '../utils/fs.js'
+import { run, spawn } from '../utils/shell.js'
 
 // Console capture for watch mode - wraps console to redirect output to our log file
 const originalConsole = globalThis.console
@@ -72,7 +73,6 @@ export async function watchCommand(opts: WatchOptions) {
   let needRebuild = false
   let pendingChanges: TrackedChange[] = []
   let buildContext: BuildContext | undefined
-  let hotInitialized = false
   let lastBuildFailed = false
 
   const folder = opts.library ? join(opts.path, 'test') : opts.path
@@ -120,20 +120,14 @@ export async function watchCommand(opts: WatchOptions) {
         // POSIX: `sh -c <cmd>`; Windows: `cmd /c <cmd>`.
         const shellCmd = process.platform === 'win32' ? 'cmd' : 'sh'
         const shellArg = process.platform === 'win32' ? '/c' : '-c'
-        // Run each command sequentially. Best-effort — failures are logged
-        // but don't block subsequent commands. Uses Node-standard child_process
-        // so the CLI has no hard bun-runtime dependency.
+        // Run each command sequentially via the shell wrapper. The wrapper
+        // already runs `.quiet().nothrow()` by default — we want stdout to
+        // stream through to the terminal here, so pass `stdio: 'inherit'`
+        // through `run`'s argv-style path.
         for (const cmd of commands) {
           try {
             console.log(`$ ${cmd}`)
-            const child = spawn(shellCmd, [shellArg, cmd], {
-              stdio: ['ignore', 'inherit', 'inherit'],
-              env: process.env,
-            })
-            await new Promise<void>((resolve) => {
-              child.on('close', () => resolve())
-              child.on('error', () => resolve())
-            })
+            await run(shellCmd, [shellArg, cmd], { stdio: 'inherit', throws: false })
           } catch (err) {
             console.error(`Update command failed: ${cmd}\n${(err as Error).message ?? err}`)
           }
@@ -165,16 +159,16 @@ export async function watchCommand(opts: WatchOptions) {
     api?.setChangedFiles(changes)
     log('Building...', changes.map(c => './' + relative(opts.path, c.path).replace(/\\/g, '/')).join(', '))
 
-    const packageJSON = JSON.parse(await fs.readFile(join(folder, 'package.json'), 'utf-8'))
+    const packageJSON = JSON.parse(await fs.readText(join(folder, 'package.json')))
 
-    const libChanges = Object.hasOwn(globalThis, 'Bun') ? changes.filter((change) => !change.path.includes('test/')) : []
+    const libChanges = changes.filter((change) => !change.path.includes('test/'))
 
     const libFolder = join(opts.path, 'lib')
 
     if (
       (!opts.library && (
         !packageJSON['module']?.endsWith('.ts')
-        || !(await fs.exists(join(opts.path, 'sandstone.config.ts')))
+        || !(await fs.fileExists(join(opts.path, 'sandstone.config.ts')))
       ))
     ) {
       if (api !== undefined && api.exit !== undefined) {
@@ -191,8 +185,7 @@ export async function watchCommand(opts: WatchOptions) {
         !(await fs.pathExists(join(libFolder, 'index.d.ts')))
       )
     ) {
-      /* @ts-ignore */
-      const CLI = Bun.spawn(['bun', 'dev:build'], {
+      const CLI = spawn(['bun', 'dev:build'], {
         windowsHide: true,
         windowsVerbatimArguments: true,
         stdout: 'ignore',
@@ -207,24 +200,14 @@ export async function watchCommand(opts: WatchOptions) {
       await repackIfLinked(opts.path)
     }
 
-    // Initialize hot-hook only once on the first build
-    if (!hotInitialized) {
-      await hot.init({
-        root: join(folder, packageJSON['module']),
-        // Ensure sandstone remains a singleton so CLI and user code share the same pack instance
-        globalSingletons: ['**/node_modules/sandstone/**', '**/sandstone/dist/**'],
-        // Disable hot-hook's internal watcher - we use parcel watcher and notify hot-hook
-        watch: false,
-      })
-      hotInitialized = true
-    }
-
-    if (Object.hasOwn(globalThis, 'Bun') && changes.length > 0) {
-      // Bun ignores query params for module caching and doesn't support MessagePort
-      // in register(), so hot-hook's invalidation mechanism is non-functional.
-      // Instead, clear Bun's module cache for project source files before re-importing.
-      const resolvedFolder = normalizePath(await fs.realpath(folder))
-      const resolvedRoot = opts.library ? normalizePath(await fs.realpath(opts.path)) : resolvedFolder
+    if (changes.length > 0) {
+      // Bun ignores query params for module caching and doesn't support
+      // MessagePort in register(), so hot-hook's invalidation mechanism is
+      // non-functional. We just purged hot-hook from the CLI entirely —
+      // now we just clear Bun's module cache for project source files
+      // before re-importing. This is Bun-only.
+      const resolvedFolder = normalizePath(await realpath(folder))
+      const resolvedRoot = opts.library ? normalizePath(await realpath(opts.path)) : resolvedFolder
 
       let clearedCount = 0
       for (const key of Object.keys(require.cache)) {
@@ -247,21 +230,6 @@ export async function watchCommand(opts: WatchOptions) {
         unmountInk?.()
         process.stderr.write('\n\x1b[33mBun encountered a parse error and cannot recover. Please restart the watch command.\x1b[0m\n\n')
         process.exit(1)
-      }
-    } else {
-      // Node.js path: use hot-hook's message port invalidation
-      for (const change of changes) {
-        hot.notifyFileChange(change.path)
-      }
-      if (libChanges.length !== 0) {
-        const libModuleFiles = await fs.readdir(join(opts.path, 'lib'), { recursive: true })
-        for (const file of libModuleFiles) {
-          hot.notifyFileChange(join(opts.path, 'lib', file as unknown as string))
-        }
-      }
-      // Small delay to let the loader process the invalidations
-      if (changes.length > 0) {
-        await new Promise(resolve => setTimeout(resolve, 10))
       }
     }
 
@@ -313,8 +281,8 @@ export async function watchCommand(opts: WatchOptions) {
     getWatchUIAPI()?.setStatus('restarting')
 
     const [runtime, ...args] = process.argv
-    const child = spawn(runtime, args, {
-      stdio: 'inherit',
+    const child = spawn([runtime, ...args], {
+      stdio: ['inherit', 'inherit', 'inherit'],
       detached: true,
     })
     child.unref()
@@ -429,12 +397,12 @@ export async function watchCommand(opts: WatchOptions) {
   const linksFilePath = join(opts.path, '.sandstone', 'links.json')
   const linkVersionWatchers: { file: string }[] = []
   try {
-    const linksData = JSON.parse(await fs.readFile(linksFilePath, 'utf-8')) as { links?: Record<string, { libraryPath: string }> }
+    const linksData = JSON.parse(await fs.readText(linksFilePath)) as { links?: Record<string, { libraryPath: string }> }
     for (const entry of Object.values(linksData.links ?? {})) {
       const lv = join(entry.libraryPath, '.sandstone', 'link_version')
       if (!(await fs.pathExists(lv))) continue
       const onChange = () => onFilesChange([{ path: lv, category: 'dependencies' }])
-      fs.watchFile(lv, { interval: 500 }, (curr, prev) => {
+      watchFile(lv, { interval: 500 }, (curr, prev) => {
         if (curr.mtimeMs !== prev.mtimeMs) onChange()
       })
       linkVersionWatchers.push({ file: lv })
@@ -475,7 +443,7 @@ async function cleanup(subscription: ParcelWatcher.AsyncSubscription, unmountInk
   await subscription.unsubscribe()
   // Stop the fs.watchFile watchers for linked libraries' link_version files.
   if (linkVersionWatchers) {
-    for (const w of linkVersionWatchers) fs.unwatchFile(w.file)
+    for (const w of linkVersionWatchers) unwatchFile(w.file)
   }
   // Detach our SIGINT handler so a stale watch can't intercept the next
   // process's Ctrl+C.

@@ -1,9 +1,9 @@
-import fs from 'fs'
 import path from 'path'
 import os from 'os'
+import * as fs from '../../utils/fs.js'
 import type { LauncherProvider, MinecraftInstance } from '../types.js'
 
-function getVanillaPath(): string | null {
+async function getVanillaPath(): Promise<string | null> {
   const home = os.homedir()
   let mcPath: string
 
@@ -20,7 +20,7 @@ function getVanillaPath(): string | null {
       break
   }
 
-  return fs.existsSync(mcPath) ? mcPath : null
+  return (await fs.pathExists(mcPath)) ? mcPath : null
 }
 
 export const vanillaProvider: LauncherProvider = {
@@ -28,15 +28,26 @@ export const vanillaProvider: LauncherProvider = {
   displayName: 'Vanilla Minecraft',
 
   async isInstalled(): Promise<boolean> {
-    return getVanillaPath() !== null
+    return (await getVanillaPath()) !== null
   },
 
   getDataPath(): string | null {
-    return getVanillaPath()
+    // Kept synchronous per the provider interface contract; mirrors the
+    // behavior when the .minecraft folder is on the standard path. Falls
+    // back to the synchronous guess only if you don't want to await —
+    // async discoverInstances() is the authoritative answer.
+    const home = os.homedir()
+    let mcPath: string
+    switch (os.platform()) {
+      case 'win32': mcPath = path.join(home, 'AppData/Roaming/.minecraft'); break
+      case 'darwin': mcPath = path.join(home, 'Library/Application Support/minecraft'); break
+      default: mcPath = path.join(home, '.minecraft')
+    }
+    return mcPath
   },
 
   async discoverInstances(): Promise<MinecraftInstance[]> {
-    const dataPath = getVanillaPath()
+    const dataPath = await getVanillaPath()
     if (!dataPath) return []
 
     return [{

@@ -10,16 +10,14 @@
  *   - Cached: 30-minute in-memory cache so spam-running build doesn't
  *     hammer registry endpoints.
  *
- * All filesystem and shell calls use async APIs (fs/promises, promisified
- * child_process) so we never block the event loop.
+ * All filesystem and shell calls use async APIs (utils/fs Bun-based +
+ * utils/shell `run()` wrapper) so we never block the event loop.
  */
 
-import { promises as fs } from 'fs'
-import { execFile } from 'child_process'
-import { promisify } from 'util'
+import * as fs from './fs.js'
+import { run } from './shell.js'
+import { sandstoneMinorToMCString } from './index.js'
 import path from 'path'
-
-const execFileAsync = promisify(execFile)
 
 // ---------- Types ----------
 
@@ -92,7 +90,7 @@ async function fetchNpmPackage(packageName: string): Promise<NpmPackageData | nu
 async function readInstalledSandstoneVersion(projectDir: string): Promise<string | null> {
   const pkgPath = path.join(projectDir, 'node_modules', 'sandstone', 'package.json')
   try {
-    const raw = await fs.readFile(pkgPath, 'utf8')
+    const raw = await fs.readText(pkgPath)
     const pkg = JSON.parse(raw) as { version?: string }
     return pkg.version ?? null
   } catch {
@@ -111,20 +109,11 @@ export async function detectLocalPM(projectDir: string): Promise<LocalPM> {
   // while they normally run everything through `bun` — the runtime is the
   // ground truth, the lockfile is a hint.
   if (typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined') return 'bun'
-  if (await fileExists(path.join(projectDir, 'bun.lock')) || await fileExists(path.join(projectDir, 'bun.lockb'))) return 'bun'
-  if (await fileExists(path.join(projectDir, 'pnpm-lock.yaml'))) return 'pnpm'
-  if (await fileExists(path.join(projectDir, 'yarn.lock'))) return 'yarn'
-  if (await fileExists(path.join(projectDir, 'package-lock.json'))) return 'npm'
+  if (await fs.pathExists(path.join(projectDir, 'bun.lock')) || await fs.pathExists(path.join(projectDir, 'bun.lockb'))) return 'bun'
+  if (await fs.pathExists(path.join(projectDir, 'pnpm-lock.yaml'))) return 'pnpm'
+  if (await fs.pathExists(path.join(projectDir, 'yarn.lock'))) return 'yarn'
+  if (await fs.pathExists(path.join(projectDir, 'package-lock.json'))) return 'npm'
   return 'npm'
-}
-
-async function fileExists(p: string): Promise<boolean> {
-  try {
-    await fs.access(p)
-    return true
-  } catch {
-    return false
-  }
 }
 
 function localAddCommand(pm: LocalPM, spec: string, dev = false): string {
@@ -150,7 +139,7 @@ function localAddCommand(pm: LocalPM, spec: string, dev = false): string {
  */
 async function isDevDependency(projectDir: string, packageName: string): Promise<boolean> {
   try {
-    const raw = await fs.readFile(path.join(projectDir, 'package.json'), 'utf8')
+    const raw = await fs.readText(path.join(projectDir, 'package.json'))
     const pkg = JSON.parse(raw) as {
       dependencies?: Record<string, string>
       devDependencies?: Record<string, string>
@@ -201,8 +190,11 @@ function globalLookupEnv(): NodeJS.ProcessEnv {
 async function findGlobalSandBinaryPath(): Promise<string | null> {
   const cmd = isWindows() ? 'where' : 'which'
   try {
-    const { stdout } = await execFileAsync(cmd, ['sand'], { env: globalLookupEnv() })
-    const hit = stdout
+    // `which`/`where` write the resolved path to stdout — let the shell
+    // wrapper capture it.
+    const result = await run(cmd, ['sand'], { env: globalLookupEnv(), throws: false })
+    const hit = (await result.stdout)
+      .toString()
       .split('\n')
       .map(line => line.trim())
       .find(line => line.length > 0 && !isInsideLocalBin(line))
@@ -272,8 +264,6 @@ function resolveChannel(distTags: Record<string, string>, installed: string, pac
 
 // ---------- sandstone update check ----------
 
-import { sandstoneMinorToMCString } from './sandstoneToMC.js'
-
 export async function runUpdateCheck(projectDir: string): Promise<SandstoneUpdateInfo | null> {
   const installed = await readInstalledSandstoneVersion(projectDir)
   if (!installed) return null
@@ -333,7 +323,7 @@ function currentEntryPath(): string | null {
 
 async function realpathOrSelf(p: string): Promise<string> {
   try {
-    return await fs.realpath(p)
+    return await fs.realpath(p) as unknown as string
   } catch {
     return p
   }
@@ -376,7 +366,7 @@ async function detectCLIRuntime(projectDir: string): Promise<CLIRuntimeContext> 
 
 async function readCLIVersionFromDir(dir: string): Promise<string | null> {
   try {
-    const raw = await fs.readFile(path.join(dir, 'package.json'), 'utf8')
+    const raw = await fs.readText(path.join(dir, 'package.json'))
     const pkg = JSON.parse(raw) as { version?: string }
     return pkg.version ?? null
   } catch {
@@ -390,8 +380,8 @@ async function readCLIVersionFromDir(dir: string): Promise<string | null> {
  */
 async function readGlobalSandVersion(): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync('sand', ['--version'], { env: globalLookupEnv() })
-    const m = stdout.trim().match(/(\d+\.\d+\.\d+)/)
+    const result = await run('sand', ['--version'], { env: globalLookupEnv(), throws: false })
+    const m = (await result.stdout).toString().trim().match(/(\d+\.\d+\.\d+)/)
     return m ? m[1]! : null
   } catch {
     return null
@@ -477,14 +467,11 @@ export async function runCrossInstanceUpdateCheck(projectDir: string): Promise<C
 
 // ---------- MC header (async; reads installed version) ----------
 
-import { readFile as readFileAsync } from 'fs/promises'
-
 export async function getMCHeaderAsync(projectDir: string): Promise<string | null> {
   let installed: string
   try {
-    const raw = await readFileAsync(
-      path.join(projectDir, 'node_modules', 'sandstone', 'package.json'),
-      'utf8'
+    const raw = await fs.readText(
+      path.join(projectDir, 'node_modules', 'sandstone', 'package.json')
     )
     installed = (JSON.parse(raw) as { version: string }).version
   } catch {

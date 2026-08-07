@@ -13,10 +13,9 @@
  * PM-agnostic: never shells out to `npm`/`bun`/etc.
  */
 
-import { hasGh } from '../utils/index.js'
+import { hasGh, sandstoneMinorToMCString } from '../utils/index.js'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
-import { sandstoneMinorToMCString } from '../utils/sandstoneToMC.js'
 
 const execFileAsync = promisify(execFile)
 

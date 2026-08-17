@@ -172,10 +172,6 @@ async function createCommandInner(
   // `sandstone-1-1`). When 1.3.x is released, 1.2.x gets archived and
   // automatically picks up `sandstone-1-2` — no CLI change needed.
   const currentMasterMinor = available[0]?.minor
-  const sandstoneDistTag = (info: { major: number; minor: number }): string =>
-    info.minor === currentMasterMinor
-      ? 'latest'
-      : `sandstone-${info.major}-${info.minor}`
   const versionChoices = available.map(
     (info): [SemVer, SemVer] => [sv(minorTag(info).version), sv(CLI_VERSION)]
   )
@@ -404,6 +400,16 @@ async function createCommandInner(
       const lockContent = await fs.readText(lockPath)
       await fs.writeText(lockPath, lockContent.split(oldRootName).join(libraryPackageName))
     }
+
+    // Rewrite the import in test/src/test-display.ts to match the new name.
+    const testDisplayPath = path.join(projectPath, 'test', 'src', 'test-display.ts')
+    const testDisplay = await fs.readText(testDisplayPath)
+    await fs.writeText(testDisplayPath, testDisplay.replace(`from '${oldRootName}'`, `from '${libraryPackageName}'`))
+
+    // Rewrite the snapshot path prefix from /default/ to the chosen namespace.
+    const snapPath = path.join(projectPath, 'test', '__snapshots__', 'index.test.ts.snap')
+    const snap = await fs.readText(snapPath)
+    await fs.writeText(snapPath, snap.replace('/default/', `/${namespace}/`))
   }
 
   await sh(`${packageManager} run setup`, { cwd: projectPath, stdio: 'inherit', throws: true })

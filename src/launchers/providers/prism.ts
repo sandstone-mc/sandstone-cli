@@ -7,7 +7,7 @@ function getPrismCandidatePaths(): string[] {
   const home = os.homedir()
   const paths: string[] = []
 
-  switch (os.platform()) {
+  switch (process.platform) {
     case 'win32':
       paths.push(path.join(home, 'AppData/Roaming/PrismLauncher'))
       break

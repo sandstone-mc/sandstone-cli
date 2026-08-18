@@ -147,7 +147,7 @@ export const capitalize = (s: string) => s.charAt(0).toUpperCase() + s.slice(1)
  * On Windows, tests if symlinking actually works (requires admin or developer mode).
  */
 export async function canUseSymlinks(): Promise<boolean> {
-  if (os.platform() !== 'win32') {
+  if (process.platform !== 'win32') {
     return true
   }
 
@@ -171,37 +171,13 @@ export async function canUseSymlinks(): Promise<boolean> {
   }
 }
 
-/**
- * Get the .minecraft path. Async — uses `fs.pathExists` instead of the old
- * sync `existsSync`. Throws when the directory is missing so callers can
- * surface a user-friendly error before any further I/O.
- */
-export async function getMinecraftPath(): Promise<string> {
-  function getMCPath(): string {
-    switch (os.platform()) {
-    case 'win32':
-      return path.join(os.homedir(), 'AppData/Roaming/.minecraft')
-    case 'darwin':
-      return path.join(os.homedir(), 'Library/Application Support/minecraft')
-    case 'linux':
-    default:
-      return path.join(os.homedir(), '.minecraft')
-    }
-  }
-
-  const mcPath = getMCPath()
-
-  if (!(await fs.pathExists(mcPath))) {
-    throw new Error('Unable to locate the .minecraft folder. Please specify it manually.')
-  }
-
-  return mcPath
-}
-
 /** List the worlds in a Minecraft installation's `saves/` directory. */
-export async function getWorldsList(clientPath?: string): Promise<string[]> {
-  const mcPath = clientPath || await getMinecraftPath()
-  const savesPath = path.join(mcPath, 'saves')
+export async function getWorldsList(clientPath: string): Promise<string[]> {
+  const savesPath = path.join(clientPath, 'saves')
+
+  // Empty/missing `saves/` (e.g. a freshly-installed Prism instance the user
+  // has never launched) is a valid state — return no worlds rather than crash.
+  if (!(await fs.pathExists(savesPath))) return []
 
   const entries = await fs.readDirNames(savesPath)
   // We can't tell files from dirs from `fs.readDirNames` alone; fall back to a

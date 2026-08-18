@@ -10,7 +10,7 @@ import { getWorldsList, hasBun, hasPnpm, hasYarn } from '../utils/index.js'
 import * as fs from '../utils/fs.js'
 import { sh } from '../utils/shell.js'
 import { getAvailableSandstoneVersions } from './versionDiscovery.js'
-import { discoverAllInstances, type MinecraftInstance } from '../launchers/index.js'
+import { discoverAllInstances, vanillaProvider, type MinecraftInstance } from '../launchers/index.js'
 
 type CreateOptions = {
   // Flags
@@ -58,6 +58,25 @@ function compareVersions(a: number[] | null, b: number[] | null): number {
     if (a[i] !== b[i]) return b[i] - a[i]  // descending
   }
   return 0
+}
+
+/**
+ * Resolve a Minecraft client path: ask the user via `selectClientInstance`,
+ * then fall back to the vanilla provider when the selection is empty
+ * (user picked "None" or submitted a blank custom path). Returns the
+ * resolved path, or throws if no installation is available anywhere.
+ */
+async function resolveClientPath(): Promise<string> {
+  const selected = await selectClientInstance()
+  if (selected) return selected
+
+  const vanillaInstances = await vanillaProvider.discoverInstances()
+  if (vanillaInstances.length > 0) return vanillaInstances[0].minecraftPath
+
+  throw new Error(
+    'No Minecraft installation selected and no vanilla .minecraft folder found. '
+    + 'Install Minecraft once or re-run `sand create` and pick an instance.',
+  )
 }
 
 /** Prompt user to select a Minecraft installation from detected instances */
@@ -272,21 +291,23 @@ async function createCommandInner(
 
       switch (saveChoice) {
         case 'root': {
-          const clientPath = await selectClientInstance()
-          if (clientPath) {
-            saveOptions.clientPath = clientPath
-          }
+          saveOptions.clientPath = await resolveClientPath()
           saveOptions.root = true
           break
         }
         case 'world': {
-          const clientPath = await selectClientInstance()
-          if (clientPath) {
-            saveOptions.clientPath = clientPath
+          saveOptions.clientPath = await resolveClientPath()
+          const worlds = await getWorldsList(saveOptions.clientPath)
+          if (worlds.length === 0) {
+            console.log('\nNo worlds found in this installation\'s `saves/` folder.')
+            console.log('Launch the instance in your launcher and create a world first, then re-run `sand create`.')
+            console.log('Falling back to save at the instance root instead.\n')
+            saveOptions.root = true
+            break
           }
           const world = await select({
             message: 'What world do you want to save the packs in? >',
-            choices: await getWorldsList(saveOptions.clientPath),
+            choices: worlds,
           })
           saveOptions.world = world
           break
@@ -345,8 +366,8 @@ async function createCommandInner(
   // all template-literal interpolations by default — the URL is safe even
   // if it ever carried shell metacharacters (it doesn't, but defense in depth).
   const tmpClone = path.join(projectPath, `.sandstone-template-${Date.now()}`)
-  await sh(`git clone https://github.com/sandstone-mc/sandstone-template.git ${tmpClone}`, { cwd: projectPath, throws: true })
-  await sh(`git -C ${tmpClone} checkout ${projectType}-${version[0]}`, { cwd: projectPath, throws: true })
+  await sh(`git clone https://github.com/sandstone-mc/sandstone-template.git '${tmpClone}'`, { cwd: projectPath, throws: true })
+  await sh(`git -C '${tmpClone}' checkout ${projectType}-${version[0]}`, { cwd: projectPath, throws: true })
 
   const cloneEntries = await fs.readDirNames(tmpClone)
   await Promise.all(cloneEntries.map(async (entry) => {

@@ -7,7 +7,7 @@ async function getVanillaPath(): Promise<string | null> {
   const home = os.homedir()
   let mcPath: string
 
-  switch (os.platform()) {
+  switch (process.platform) {
     case 'win32':
       mcPath = path.join(home, 'AppData/Roaming/.minecraft')
       break
@@ -38,7 +38,7 @@ export const vanillaProvider: LauncherProvider = {
     // async discoverInstances() is the authoritative answer.
     const home = os.homedir()
     let mcPath: string
-    switch (os.platform()) {
+    switch (process.platform) {
       case 'win32': mcPath = path.join(home, 'AppData/Roaming/.minecraft'); break
       case 'darwin': mcPath = path.join(home, 'Library/Application Support/minecraft'); break
       default: mcPath = path.join(home, '.minecraft')

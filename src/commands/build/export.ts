@@ -45,7 +45,7 @@ export function getSymlinksAvailable(): boolean {
 // Minecraft path detection
 
 function getMCPath(): string {
-  switch (os.platform()) {
+  switch (process.platform) {
     case 'win32':
       return path.join(os.homedir(), 'AppData/Roaming/.minecraft')
     case 'darwin':
@@ -110,7 +110,7 @@ export async function createSymlink(
   // Update allowed_symlinks.txt for Minecraft
   let rawPath = path.resolve(path.join(folder))
   let sep: string = path.sep
-  if (os.platform() === 'win32') {
+  if (process.platform === 'win32') {
     // Minecraft's glob syntax uses `\` as the escape character, so each
     // separator in the workspace path must be doubled.
     sep = `${path.sep}${path.sep}`

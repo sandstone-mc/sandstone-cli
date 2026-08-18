@@ -4,13 +4,17 @@
  * The CLI now has a hard dependency on Bun, so all subprocess invocations
  * route through here. Two shapes are exposed:
  *
- *   - `sh(cmd, opts)` — bash-string command. Uses `Bun.spawn(['sh', '-c', cmd])`
+ *   - `sh(cmd, opts)` — shell-string command. POSIX: `Bun.spawn(['sh', '-c', cmd])`
  *     so the command is parsed and tokenized by POSIX sh (same as
- *     `child_process.execSync`). Default behavior is `.quiet()` +
- *     `.nothrow()`: stdout/stderr are captured, not printed, and a non-zero
- *     exit code does NOT throw. The caller decides what to do with the
- *     exit code. Use this for plumbing (`git clone`, `${pm} install`,
- *     `rm -rf ...`) where piping/globs/env vars are useful.
+ *     `child_process.execSync`). Windows: `Bun.spawn(['cmd.exe', '/d', '/s',
+ *     '/c', cmd])` — cmd.exe has different quoting/escape rules, so POSIX
+ *     single-quote args (`'foo bar'`) don't translate; callers needing
+ *     Windows compatibility should use `shellQuote()` instead of inline
+ *     quoting. Default behavior is `.quiet()` + `.nothrow()`: stdout/stderr
+ *     are captured, not printed, and a non-zero exit code does NOT throw.
+ *     The caller decides what to do with the exit code. Use this for
+ *     plumbing (`git clone`, `${pm} install`, `rm -rf ...`) where
+ *     piping/globs/env vars are useful.
  *
  *     We don't use Bun Shell's `$\`${cmd}\`` here because string
  *     interpolation escapes the entire string as a single argument —
@@ -127,9 +131,17 @@ export async function run(
 }
 
 /**
- * Internal: spawn `sh -c <cmd>` and return a lazy ShellResult.
+ * Internal: spawn a shell to interpret `<cmd>` and return a lazy ShellResult.
+ *
+ * POSIX: `sh -c <cmd>`. Windows: `cmd.exe /d /s /c <cmd>` — `/d` disables
+ * AutoRun, `/s` allows the outer quotes to contain special chars (needed
+ * when callers wrap the command in `"..."`). Mirrors watch.ts so the rest
+ * of the CLI doesn't carry two copies of this platform fork.
  */
 async function spawnSh(cmd: string, opts: ShellOptions): Promise<ShellResult> {
+  if (process.platform === 'win32') {
+    return spawnArgv(['cmd.exe', '/d', '/s', '/c', cmd], opts)
+  }
   return spawnArgv(['sh', '-c', cmd], opts)
 }
 

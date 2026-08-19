@@ -35,7 +35,7 @@ function getModrinthCandidatePaths(): string[] {
 
 async function getModrinthDataPath(): Promise<string | null> {
   for (const candidate of getModrinthCandidatePaths()) {
-    if (await fs.pathExists(candidate)) {
+    if (await fs.pathExists(path.join(candidate, 'profiles'))) {
       return candidate
     }
   }
@@ -45,7 +45,7 @@ async function getModrinthDataPath(): Promise<string | null> {
 interface ProfileRow {
   path: string
   name: string
-  game_version: string | null
+  applied_content_set_id: string | null
 }
 
 /** Query app.db for profile metadata. Returns a Map keyed by profile path. */
@@ -53,19 +53,42 @@ function getProfilesFromDb(dataPath: string): Map<string, { name: string; versio
   const profiles = new Map<string, { name: string; version?: string }>()
   const dbPath = path.join(dataPath, 'app.db')
 
-  if (!Bun.file(dbPath).size) {
+  let size = 0
+  try {
+    size = Bun.file(dbPath).size
+  } catch {
     // Either missing or empty — bail before sqlite trips over an ENOENT.
     return profiles
   }
+  if (!size) return profiles
 
   try {
-    const db = new Database(dbPath, { readonly: true })
-    const rows = db.query<ProfileRow, []>('SELECT path, name, game_version FROM profiles').all()
+    const db = new Database(dbPath, { readonly: true, create: false })
+
+    const rows = db.query<ProfileRow, []>('SELECT path, name, applied_content_set_id FROM instances').all()
+
+    if (rows.length === 0) {
+      db.close()
+      return profiles
+    }
+
+    const setIds = new Set<string>()
+    for (const row of rows) if (row.applied_content_set_id) setIds.add(row.applied_content_set_id)
+    const placeholders = Array.from(setIds).map(() => '?').join(',')
+    const versionsBySet = new Map<string, string>()
+    if (setIds.size > 0) {
+      const versionRows = db.query<{ id: string; game_version: string | null }, string[]>(
+        `SELECT id, game_version FROM instance_content_sets WHERE id IN (${placeholders})`,
+      ).all(...setIds)
+      for (const v of versionRows) {
+        if (v.game_version) versionsBySet.set(v.id, v.game_version)
+      }
+    }
 
     for (const row of rows) {
-      profiles.set(row.path, {
+      profiles.set(path.basename(row.path), {
         name: row.name,
-        version: row.game_version ?? undefined,
+        version: row.applied_content_set_id ? versionsBySet.get(row.applied_content_set_id) : undefined,
       })
     }
 

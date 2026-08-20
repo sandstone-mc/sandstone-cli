@@ -279,9 +279,11 @@ export async function runUpdateCheck(projectDir: string): Promise<SandstoneUpdat
 
   const pm = await detectLocalPM(projectDir)
   // For non-latest channels, pin to the per-minor dist-tag (e.g.
-  // `sandstone-1-0`) so a v1.0.x install stays in v1.0.x. `^1.0.5` would
-  // otherwise resolve to anything >=1.0.5 <2.0.0 — including 1.1.x.
-  const spec = channel === 'latest' ? `sandstone@^${available}` : `sandstone@${channel}`
+  // `sandstone-1-0`) so a v1.0.x install stays in v1.0.x. For the latest
+  // channel, use `~` so the install stays on the current minor even after
+  // a new minor ships — `^1.2.23` would resolve to >=1.2.23 <2.0.0 and
+  // pull 1.3.x once 1.3 lands.
+  const spec = channel === 'latest' ? `sandstone@~${available}` : `sandstone@${channel}`
   const command = localAddCommand(
     pm,
     spec,

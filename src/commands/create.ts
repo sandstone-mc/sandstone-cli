@@ -346,20 +346,13 @@ async function createCommandInner(
   await fs.ensureDir(projectPath)
 
   // Create project & install dependencies
-  // `version[0]` is the concrete SemVer (used by `git checkout pack-X.Y.0`
-  // below) but the displayed install specifier is the npm dist-tag —
-  // `latest` for the current master minor, `sandstone-{X}-{Y}` for an
-  // archived branch. Same version either way; the tag is just more stable.
-  const sandstoneTag = version[0].minor === currentMasterMinor
-    ? 'latest'
-    : `sandstone-${version[0].major}-${version[0].minor}`
   // MC version for the selected minor (e.g. `26.2`). Found by matching the
   // picked SemVer back into the discovered list; majors are unique per
   // minor so a `(major, minor)` lookup is unambiguous.
   const selectedMcVersion = available.find(
     (v) => v.major === version[0].major && v.minor === version[0].minor,
   )?.mcVersion
-  console.log(chalk`Installing {rgb(229, 193, 0) sandstone@${sandstoneTag}} for {green Minecraft ${selectedMcVersion}}, {rgb(229, 193, 0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`)
+  console.log(chalk`Installing {rgb(229, 193, 0) sandstone} for {green Minecraft ${selectedMcVersion}}, {rgb(229, 193, 0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`)
 
   // git clone refuses to populate an existing non-empty dir, so clone into a
   // tmp sibling and move the contents into projectPath. Bun Shell escapes

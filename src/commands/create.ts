@@ -359,8 +359,8 @@ async function createCommandInner(
   // all template-literal interpolations by default — the URL is safe even
   // if it ever carried shell metacharacters (it doesn't, but defense in depth).
   const tmpClone = path.join(projectPath, `.sandstone-template-${Date.now()}`)
-  await sh(`git clone https://github.com/sandstone-mc/sandstone-template.git '${tmpClone}'`, { cwd: projectPath, throws: true })
-  await sh(`git -C '${tmpClone}' checkout ${projectType}-${version[0]}`, { cwd: projectPath, throws: true })
+  await sh(`git clone https://github.com/sandstone-mc/sandstone-template.git "${tmpClone}"`, { cwd: projectPath, throws: true })
+  await sh(`git -C "${tmpClone}" checkout ${projectType}-${version[0]}`, { cwd: projectPath, throws: true })
 
   const cloneEntries = await fs.readDirNames(tmpClone)
   await Promise.all(cloneEntries.map(async (entry) => {

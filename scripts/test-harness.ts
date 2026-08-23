@@ -222,9 +222,10 @@ async function runWithPty(
         ? hasConfirmHint || hasRaw || hasPos
         : (hasRaw || hasPos) && !awaitingPromptClose
 
-      if (DEBUG) {
-        console.error(`[harness] CHECK idx=${responseIndex} pending=${pendingWrite} awaitingClose=${awaitingPromptClose} first=${isFirstPrompt} ready=${ready} (rawMode=${hasRaw} confirmHint=${hasConfirmHint} pos=${hasPos})`)
-      }
+      // Compact summary of every data chunk so CI shows where we stall.
+      const cleanTail = data.toString('binary').replace(/[^\x20-\x7E]/g, c => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`).slice(-120)
+      console.log(`[runWithPty] DATA idx=${responseIndex} bytes=${data.length} tail=${JSON.stringify(cleanTail)}`)
+      console.log(`[runWithPty] CHECK idx=${responseIndex} pending=${pendingWrite} awaitingClose=${awaitingPromptClose} first=${isFirstPrompt} ready=${ready} (raw=${hasRaw} confirm=${hasConfirmHint} pos=${hasPos})`)
 
       if (!exited && !pendingWrite && responseIndex < responses.length && ready) {
         const target = responses[responseIndex]

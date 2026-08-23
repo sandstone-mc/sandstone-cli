@@ -35,7 +35,10 @@ afterAll(async () => {
 
 describe('create', () => {
   test('library: package.json and test/package.json renamed + bun.lock updated', async () => {
+    console.log('[link.test] step: harnessCreate(mylib, true) starting')
     LIB = await harnessCreate('mylib', true)
+    console.log(`[link.test] step: harnessCreate returned, LIB=${LIB}`)
+    console.log(`[link.test] step: existsSync LIB/package.json`)
     expect(existsSync(join(LIB, 'package.json'))).toBe(true)
     const rootName = JSON.parse(await readFile(join(LIB, 'package.json'), 'utf-8')).name
     expect(rootName).not.toBe('sandstone-template')
@@ -50,7 +53,8 @@ describe('create', () => {
     const lock = await readFile(join(LIB, 'bun.lock'), 'utf-8')
     expect(lock).not.toContain('sandstone-template')
     expect(lock).toContain(libName)
-  }, 180_000)
+    console.log('[link.test] step: all library asserts passed')
+  }, 30_000)
 
   test('library: test/ workspace installs and resolves the link', async () => {
     const testDir = join(LIB, 'test')
@@ -71,12 +75,12 @@ describe('create', () => {
       `bun install failed\nstdout:\n${stdout}\nstderr:\n${stderr}`,
     ).toBe(0)
     expect(existsSync(join(testDir, 'node_modules', libName))).toBe(true)
-  }, 60_000)
+  }, 30_000)
 
   test('pack: package.json created via harness', async () => {
     PACK = await harnessCreate('mypack', false)
     expect(existsSync(join(PACK, 'package.json'))).toBe(true)
-  }, 60_000)
+  }, 30_000)
 })
 
 describe('link', () => {

@@ -93,7 +93,9 @@ export async function runSand(args: string[], cwd: string): Promise<{ output: st
 
 /** Drive `create-sandstone` via the existing test harness. */
 export async function harnessCreate(name: string, isLibrary: boolean): Promise<string> {
+  console.log(`[harnessCreate] start name=${name} isLibrary=${isLibrary}`)
   if (existsSync(join(TESTRUNS, name))) await rm(join(TESTRUNS, name), { recursive: true, force: true })
+  console.log(`[harnessCreate] cleaned ${join(TESTRUNS, name)}`)
   // Library: 5 prompts (confirm, version, npm package name, save, pm).
   // Pack: 6 (confirm, version, pack name, namespace, save, pm).
   const responses = isLibrary
@@ -112,11 +114,13 @@ export async function harnessCreate(name: string, isLibrary: boolean): Promise<s
         ['down', 'down', 'down', 'enter'],
         ['enter'],
       ])
+  console.log(`[harnessCreate] responses built len=${responses.length}`)
   // Resolve `bun` to an absolute path before handing it to bash so the
   // spawned login shell inherits a PATH that actually contains bun — under
   // `bun test` the bare name doesn't always resolve.
   const bunBin = Bun.which('bun') ?? 'bun'
   const cmd = `${bunBin} test:harness create ${name} --responses '${responses}'`
+  console.log(`[harnessCreate] spawning bash: ${cmd}`)
   const proc = Bun.spawn({
     cmd: ['bash', '-lc', cmd],
     cwd: CLI,
@@ -124,8 +128,12 @@ export async function harnessCreate(name: string, isLibrary: boolean): Promise<s
     stderr: 'inherit',
     env: { ...process.env, FORCE_COLOR: '0' },
   })
-  await proc.exited
-  return join(TESTRUNS, name, name)
+  console.log(`[harnessCreate] proc spawned pid=${proc.pid}, awaiting exit`)
+  const exitCode = await proc.exited
+  console.log(`[harnessCreate] proc exited code=${exitCode}`)
+  const resultPath = join(TESTRUNS, name, name)
+  console.log(`[harnessCreate] returning ${resultPath}`)
+  return resultPath
 }
 
 /** Reset the test-runs directory at the start of a suite. */

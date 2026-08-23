@@ -170,9 +170,13 @@ async function runWithPty(
       console.error(`[harness] runWithPty: ${fullCommand} (cwd=${cwd})`)
       console.error(`[harness] responses: ${JSON.stringify(responses)}`)
     }
+    console.log(`[runWithPty] spawning pty: ${fullCommand}`)
+    console.log(`[runWithPty] cwd=${cwd}`)
+    console.log(`[runWithPty] responses=${JSON.stringify(responses)}`)
 
     proc.onExit(({ exitCode }) => {
       if (DEBUG) console.error(`[harness] onExit: code=${exitCode}, responsesSent=${responseIndex}`)
+      console.log(`[runWithPty] onExit code=${exitCode} responsesSent=${responseIndex}`)
       exited = true
       resolve({ output: fullOutput, exitCode })
     })
@@ -225,6 +229,7 @@ async function runWithPty(
       if (!exited && !pendingWrite && responseIndex < responses.length && ready) {
         const target = responses[responseIndex]
         if (DEBUG) console.error(`[harness] TRIGGER firing response ${responseIndex}: ${JSON.stringify(target)}`)
+        console.log(`[runWithPty] TRIGGER firing response ${responseIndex}: ${JSON.stringify(target)}`)
         outputBuffer = ''
         awaitingPromptClose = true
         pendingWrite = true   // stays true until sendResponse fully completes

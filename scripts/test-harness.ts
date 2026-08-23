@@ -294,12 +294,15 @@ async function runWithPty(
       }, 50)
     }
 
+    // Cold CI cache can take 60–90s to install the library template's
+    // ~250 packages; 30s was too tight and killed the create mid-install.
+    // The test that invokes this also has to bump its timeout to match.
     setTimeout(() => {
       if (!exited) {
         proc.kill()
         resolve({ output: fullOutput + '\n[TIMEOUT]', exitCode: null })
       }
-    }, 30000)
+    }, 180000)
   })
 }
 

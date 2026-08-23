@@ -50,7 +50,7 @@ describe('create', () => {
     const lock = await readFile(join(LIB, 'bun.lock'), 'utf-8')
     expect(lock).not.toContain('sandstone-template')
     expect(lock).toContain(libName)
-  }, 30_000)
+  }, 180_000)
 
   test('library: test/ workspace installs and resolves the link', async () => {
     const testDir = join(LIB, 'test')
@@ -71,12 +71,12 @@ describe('create', () => {
       `bun install failed\nstdout:\n${stdout}\nstderr:\n${stderr}`,
     ).toBe(0)
     expect(existsSync(join(testDir, 'node_modules', libName))).toBe(true)
-  }, 30_000)
+  }, 60_000)
 
   test('pack: package.json created via harness', async () => {
     PACK = await harnessCreate('mypack', false)
     expect(existsSync(join(PACK, 'package.json'))).toBe(true)
-  }, 30_000)
+  }, 60_000)
 })
 
 describe('link', () => {

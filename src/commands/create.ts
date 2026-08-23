@@ -354,19 +354,7 @@ async function createCommandInner(
   )?.mcVersion
   console.log(chalk`Installing {rgb(229, 193, 0) sandstone} for {green Minecraft ${selectedMcVersion}}, {rgb(229, 193, 0) sandstone-cli@${version[1]}} and {cyan typescript} using {cyan ${packageManager}}.`)
 
-  // git clone refuses to populate an existing non-empty dir, so clone into a
-  // tmp sibling and move the contents into projectPath. Bun Shell escapes
-  // all template-literal interpolations by default — the URL is safe even
-  // if it ever carried shell metacharacters (it doesn't, but defense in depth).
-  const tmpClone = path.join(projectPath, `.sandstone-template-${Date.now()}`)
-  await sh(`git clone https://github.com/sandstone-mc/sandstone-template.git "${tmpClone}"`, { cwd: projectPath, throws: true })
-  await sh(`git -C "${tmpClone}" checkout ${projectType}-${version[0]}`, { cwd: projectPath, throws: true })
-
-  const cloneEntries = await fs.readDirNames(tmpClone)
-  await Promise.all(cloneEntries.map(async (entry) => {
-    await fs.move(path.join(tmpClone, entry), path.join(projectPath, entry), { overwrite: true })
-  }))
-  await fs.remove(tmpClone, { force: true, recursive: true })
+  await sh(`git clone -b ${projectType}-${version[0]} --single-branch https://github.com/sandstone-mc/sandstone-template.git .`, { cwd: projectPath, throws: true })
 
   await fs.remove(path.join(projectPath, '.git'), { force: true, recursive: true })
 

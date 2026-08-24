@@ -1,3 +1,4 @@
+import 'bun-test-cli-harness'
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
@@ -54,7 +55,7 @@ describe('create', () => {
     expect(lock).not.toContain('sandstone-template')
     expect(lock).toContain(libName)
     console.log('[link.test] step: all library asserts passed')
-  }, 30_000)
+  }, 180_000)
 
   test('library: test/ workspace installs and resolves the link', async () => {
     const testDir = join(LIB, 'test')

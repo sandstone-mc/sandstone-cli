@@ -2,6 +2,8 @@ import { mkdir, rm, readdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { screen } from 'bun-test-cli-harness'
+import { createCommand } from '../src/commands/create.ts'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 export const CLI = join(__dirname, '..')
@@ -91,49 +93,68 @@ export async function runSand(args: string[], cwd: string): Promise<{ output: st
   }
 }
 
-/** Drive `create-sandstone` via the existing test harness. */
+/**
+ * Drive `create-sandstone` prompts in-process via bun-test-cli-harness's
+ * `screen`, then return the project path. Runs `createCommand` directly
+ * (no PTY, no subprocess) so the `@inquirer/*` mocks installed by the
+ * harness intercept every prompt.
+ */
 export async function harnessCreate(name: string, isLibrary: boolean): Promise<string> {
-  console.log(`[harnessCreate] start name=${name} isLibrary=${isLibrary}`)
   if (existsSync(join(TESTRUNS, name))) await rm(join(TESTRUNS, name), { recursive: true, force: true })
-  console.log(`[harnessCreate] cleaned ${join(TESTRUNS, name)}`)
-  // Library: 5 prompts (confirm, version, npm package name, save, pm).
-  // Pack: 6 (confirm, version, pack name, namespace, save, pm).
-  const responses = isLibrary
-    ? JSON.stringify([
-        ['y', 'enter'],                          // library?
-        ['enter'],                              // sandstone version
-        ['@test-scope/my-lib', 'enter'],         // npm package name (scoped)
-        ['down', 'down', 'down', 'enter'],      // save location: N/A
-        ['enter'],                              // package manager
-      ])
-    : JSON.stringify([
-        ['n', 'enter'],
-        ['enter'],
-        ['enter'],            // pack name (default = project name)
-        ['enter'],            // namespace
-        ['down', 'down', 'down', 'enter'],
-        ['enter'],
-      ])
-  console.log(`[harnessCreate] responses built len=${responses.length}`)
-  // Resolve `bun` to an absolute path before handing it to bash so the
-  // spawned login shell inherits a PATH that actually contains bun — under
-  // `bun test` the bare name doesn't always resolve.
-  const bunBin = Bun.which('bun') ?? 'bun'
-  const cmd = `${bunBin} test:harness create ${name} --responses '${responses}'`
-  console.log(`[harnessCreate] spawning bash: ${cmd}`)
-  const proc = Bun.spawn({
-    cmd: ['bash', '-lc', cmd],
-    cwd: CLI,
-    stdout: 'inherit',
-    stderr: 'inherit',
-    env: { ...process.env, FORCE_COLOR: '0' },
-  })
-  console.log(`[harnessCreate] proc spawned pid=${proc.pid}, awaiting exit`)
-  const exitCode = await proc.exited
-  console.log(`[harnessCreate] proc exited code=${exitCode}`)
-  const resultPath = join(TESTRUNS, name, name)
-  console.log(`[harnessCreate] returning ${resultPath}`)
-  return resultPath
+
+  const projectDir = join(TESTRUNS, name, name)
+  const createPromise = createCommand(projectDir, { root: false })
+
+  // The first prompt (confirm) renders synchronously inside createCommand,
+  // so no `await screen.next()` is needed before sending input. Each
+  // subsequent `await screen.next()` blocks until the current prompt's
+  // answer has been rendered AND the next prompt has begun rendering.
+
+  // 1. confirm: library?
+  if (isLibrary) screen.type('y')
+  else screen.type('n')
+  screen.keypress('enter')
+  await screen.next()
+
+  // 2. version: accept default
+  screen.keypress('enter')
+  await screen.next()
+
+  if (isLibrary) {
+    // 3. npm package name (scoped)
+    screen.type('@test-scope/my-lib')
+    screen.keypress('enter')
+    await screen.next()
+  } else {
+    // 3. pack name (default = project name)
+    screen.keypress('enter')
+    await screen.next()
+    // 4. namespace (default = project name)
+    screen.keypress('enter')
+    await screen.next()
+  }
+
+  // save location: default = root (index 0); one `up` wraps to "N/A" (last)
+  console.log(`[harnessCreate] driving save location, screen: ${JSON.stringify(screen.getScreen())}`)
+  screen.keypress('up')
+  screen.keypress('enter')
+  await screen.next()
+  console.log(`[harnessCreate] save location done, screen: ${JSON.stringify(screen.getScreen())}`)
+
+  // package manager: accept default. Don't call `screen.next()` after the
+  // final prompt — there are no more inquirer renders to wait for (the
+  // next stdout output is createCommand's own `console.log` calls, which
+  // go to process.stdout and never produce a 'render' event on the
+  // BufferedStream), so it would hang forever.
+  console.log(`[harnessCreate] driving PM, screen: ${JSON.stringify(screen.getScreen())}`)
+  screen.keypress('enter')
+
+  // createCommand now runs git clone + bun install to finish.
+  console.log(`[harnessCreate] awaiting createPromise, screen: ${JSON.stringify(screen.getScreen())}`)
+  await createPromise
+  console.log(`[harnessCreate] createPromise resolved`)
+
+  return join(TESTRUNS, name, name)
 }
 
 /** Reset the test-runs directory at the start of a suite. */

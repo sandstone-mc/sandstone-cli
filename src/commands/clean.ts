@@ -68,9 +68,6 @@ export async function cleanCommand(opts: CleanOptions) {
     cache = { files: {} }
   }
 
-  // Resolve destination paths the same way `_buildProject` does, so that
-  // files copied (rather than symlinked) and `.zip` archives from
-  // `exportZips` are also removed.
   const worldName = opts.world || saveOptions.world
   const root = saveOptions.root
   const clientPath = opts.clientPath || saveOptions.clientPath || (await getClientPath().catch(() => undefined))

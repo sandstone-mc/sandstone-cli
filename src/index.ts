@@ -29,6 +29,7 @@ CLI
   .addOption(BuildOptions.get('root'))
   .addOption(BuildOptions.get('strictErrors'))
   .addOption(BuildOptions.get('production'))
+  .addOption(BuildOptions.get('debug'))
   .addOption(BuildOptions.get('path'))
   .addOption(BuildOptions.get('name'))
   .addOption(BuildOptions.get('namespace'))

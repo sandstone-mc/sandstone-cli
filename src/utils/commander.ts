@@ -30,6 +30,7 @@ const options = {
   root: opt('-r, --root', 'Save the pack & resource pack in the .minecraft/datapacks & .minecraft/resource_packs folders. Override the value specified in the configuration file.'),
   strictErrors: opt('-e, --strict-errors', 'Stop pack compilation on type errors.'),
   production: opt('-p, --production', 'Runs Sandstone in production mode. This sets process.env.SANDSTONE_ENV to "production".'),
+  debug: opt('--debug', 'Write internal visitor / context-stack debug logs to .sandstone/build-debug.log (overwritten each run). No effect on stdout.'),
 
   // Values
   path: opt('-h,--path <path>', 'Path of the folder containing your sandstone workspace.', { default: './' }),

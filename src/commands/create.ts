@@ -438,6 +438,31 @@ async function createCommandInner(
   // Rewrite config
   await fs.writeText(configPath, templateConfig)
 
+  // Strip the dev-only `/patches` symlink + gitignore entry that the
+  // workspace `bun dev:link` script adds. The symlink only exists for
+  // local dev linking; new projects don't need it.
+  const patchesPath = path.join(projectPath, 'patches')
+  try {
+    const stat = await fs.fileLstat(patchesPath)
+    if (stat.isSymbolicLink()) {
+      await fs.unlinkPath(patchesPath)
+    }
+  } catch {
+    // not present — nothing to do
+  }
+  const gitignorePath = path.join(projectPath, '.gitignore')
+  if (await fs.pathExists(gitignorePath)) {
+    const before = await fs.readText(gitignorePath)
+    // Drop the comment + bare `/patches` block added by bun dev:link.
+    const after = before.replace(
+      /\n*# Symlink to \.\.\/sandstone\/patches\/ for bun link workaround\n\/patches\n?/,
+      '\n',
+    )
+    if (after !== before) {
+      await fs.writeText(gitignorePath, after)
+    }
+  }
+
   const prefix = packageManager === 'npm' ? 'npm run' : packageManager
   console.log(chalk`{green Success!} Created "${projectName}" at "${projectPath}"`)
 

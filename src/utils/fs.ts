@@ -112,6 +112,14 @@ export async function readDirNames(path: string): Promise<string[]> {
   return readdir(path)
 }
 
+/**
+ * Encodings whose files should be read as text (`string`) rather than raw
+ * bytes (`Buffer`). Covers the encodings Node and browsers can losslessly
+ * round-trip into a JS string; everything else (binary files, `latin1`,
+ * `base64`, …) falls through to the bytes path.
+ */
+export const textFormats = new Set<BufferEncoding>(['ascii', 'utf-16le', 'utf-8', 'utf16le', 'utf8'])
+
 export async function fileStat(path: string) {
   return stat(path)
 }
@@ -134,8 +142,13 @@ export async function unlinkPath(path: string): Promise<void> {
 
 export type RemoveOptions = { recursive?: boolean; force?: boolean }
 
+/**
+ * Remove a path. Defaults match `fs-extra.remove`: recursive + force, so
+ * missing paths are a no-op and non-empty dirs get cleaned. Pass
+ * `{ recursive: false }` for a strict single-target unlink.
+ */
 export async function remove(path: string, options: RemoveOptions = {}): Promise<void> {
-  await rm(path, { recursive: options.recursive ?? false, force: options.force ?? false })
+  await rm(path, { recursive: options.recursive ?? true, force: options.force ?? true })
 }
 
 export async function move(src: string, dest: string, options: { overwrite?: boolean } = {}): Promise<void> {

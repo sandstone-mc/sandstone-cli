@@ -37,6 +37,28 @@ export function initLoggerNoFile() {
 }
 
 /**
+ * Initialize the logger with a per-run debug log file at
+ * `.sandstone/build-debug.log`. Use with `sand build --debug` so console
+ * output is mirrored to a file in addition to stdout (same shape as the
+ * watcher's `.sandstone/watch.log`). File is overwritten each run.
+ *
+ * Live callback writes to stdout directly (not via `console.log`) so
+ * callers can safely override `console.*` to route through the logger
+ * without creating a recursive loop.
+ */
+export function initBuildLogger(rootFolder: string): () => Promise<void> {
+  logPath = path.join(rootFolder, '.sandstone', 'build-debug.log')
+  initPromise = logWorkerInit()
+  liveLogReady = true
+  liveLogCallback = (level, args) => {
+    const prefix = level ? `[${level}] ` : ''
+    const text = args.map((a) => (typeof a === 'string' ? a : format(a))).join(' ')
+    process.stdout.write(prefix + text + '\n')
+  }
+  return () => logWorkerFinish()
+}
+
+/**
  * Set whether the logger should suppress live output.
  */
 export function setSilent(value: boolean) {

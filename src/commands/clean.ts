@@ -3,7 +3,7 @@ import { pathToFileURL } from 'url'
 import chalk from 'chalk'
 
 import { log, initLoggerNoFile } from '../ui/logger.js'
-import { getClientPath } from './build/export.js'
+import { getClientPath, type SandstoneCache } from './build/export.js'
 import * as fs from '../utils/fs.js'
 import type * as sandstone from 'sandstone'
 
@@ -57,7 +57,7 @@ export async function cleanCommand(opts: CleanOptions) {
   // `datapacks/` folder) are recorded here too, so the cache is the
   // authoritative source for symlink paths.
   const cacheFile = path.join(folder, '.sandstone', 'cache.json')
-  let cache: { files?: Record<string, string>; symlinks?: string[]; archives?: string[] } = {}
+  let cache: SandstoneCache = { files: {} }
   try {
     const fileRead = await fs.readText(cacheFile)
     if (fileRead) {
@@ -65,7 +65,7 @@ export async function cleanCommand(opts: CleanOptions) {
       cache = parsed.files ? parsed : { files: parsed }
     }
   } catch {
-    cache = {}
+    cache = { files: {} }
   }
 
   // Resolve destination paths the same way `_buildProject` does, so that
@@ -91,7 +91,11 @@ export async function cleanCommand(opts: CleanOptions) {
   for (const [type, paths] of Object.entries(PACK_TYPE_PATHS)) {
     if (clientPath) {
       let clientDest: string
-      const useWorldPath = !!worldName && (type !== 'resourcepack' || !!saveOptions.exportZips)
+      // Read the resolved `exportZips` value that the build wrote for this
+      // pack type. The build resolves `saveOptions.exportZips ?? packType.archiveOutput`
+      // and persists it, so clean never has to re-derive the default.
+      const shouldArchive = cache.packTypeExportZips?.[type] ?? false
+      const useWorldPath = !!worldName && (type !== 'resourcepack' || shouldArchive)
       if (useWorldPath) {
         clientDest = path
           .join(clientPath, paths.clientPath)

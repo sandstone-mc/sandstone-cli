@@ -5,7 +5,8 @@ import AdmZip from 'adm-zip'
 import { log } from '../../ui/logger.js'
 import { canUseSymlinks } from '../../utils/index.js'
 import * as fs from '../../utils/fs.js'
-import type { handlerReadFile, PackType } from 'sandstone/pack'
+import type * as sandstone from 'sandstone'
+import type { PackType } from 'sandstone/pack'
 
 export type SandstoneCache = {
   files: Record<string, string>
@@ -22,15 +23,21 @@ export type SandstoneCache = {
   // are child basenames. Populated only for destinations that are themselves
   // existing directories, so the field is absent for folder-symlink cases.
   perChildEntries?: Record<string, string[]>
+  // The resolved `exportZips` value used for each pack type at build time
+  // (`saveOptions.exportZips ?? packType.archiveOutput`). Persisted so that
+  // `sand clean` can read the same value back instead of re-deriving it from
+  // the pack type's default — which is only known to the core library.
+  packTypeExportZips?: Record<string, boolean>
 }
 
 // Module-level symlink availability cache
 let symlinksAvailable: boolean | undefined
 
-export async function checkSymlinksAvailable(cachedValue?: boolean): Promise<boolean> {
+export async function checkSymlinksAvailable(local: sandstone.BeforeSaveLocal): Promise<boolean> {
   if (symlinksAvailable === undefined) {
-    if (cachedValue !== undefined) {
-      symlinksAvailable = cachedValue
+    const cached = local.oldCache?.canUseSymlinks
+    if (cached !== undefined) {
+      symlinksAvailable = cached
     } else {
       symlinksAvailable = await canUseSymlinks()
     }
@@ -225,25 +232,23 @@ export async function createSymlink(
 // Archive creation
 
 export async function createArchive(
-  outputFolder: string,
-  packName: string,
-  packType: PackType,
-  newCache: SandstoneCache
+  local: sandstone.AfterAllLocal,
+  packType: PackType
 ): Promise<boolean> {
-  const input = path.join(outputFolder, packType.type)
+  const input = path.join(local.outputFolder, packType.type)
 
-  const files = await fs.readDirNames(input).catch(() => [])
+  const files = await local.fs.readDirNames(input).catch(() => [])
   if (files.length === 0) return false
 
-  const archiveName = `${packName}_${packType.type}.zip`
-  newCache.archives ??= []
-  newCache.archives.push(archiveName)
+  const archiveName = `${local.packName}_${packType.type}.zip`
+  local.newCache.archives ??= []
+  local.newCache.archives.push(archiveName)
 
   const archive = new AdmZip()
   await archive.addLocalFolderPromise(input, {})
-  await fs.ensureDir(path.join(outputFolder, 'archives'))
+  await local.fs.ensureDir(path.join(local.outputFolder, 'archives'))
   await archive.writeZipPromise(
-    path.join(outputFolder, 'archives', archiveName),
+    path.join(local.outputFolder, 'archives', archiveName),
     { overwrite: true },
   )
 
@@ -253,6 +258,7 @@ export async function createArchive(
 // Run pack type's export handler for client/server destinations
 
 export async function runExportHandler(
+  local: sandstone.AfterAllLocal,
   packType: PackType,
   target: 'client' | 'server',
   exportPath: string
@@ -261,13 +267,16 @@ export async function runExportHandler(
 
   await packType.handleOutput(
     target,
-    (async (relativePath: string, encoding: BufferEncoding = 'utf8') =>
-      await fs.readText(path.join(exportPath, relativePath))) as unknown as handlerReadFile,
+    ((relativePath: string, encoding: BufferEncoding = 'utf8') => 
+      fs.textFormats.has(encoding)
+          ? local.fs.readText(path.join(exportPath, relativePath))
+          : local.fs.readBytes(path.join(exportPath, relativePath))
+    ),
     async (relativePath: string, contents: any) => {
       if (contents === undefined) {
-        await fs.unlinkPath(path.join(exportPath, relativePath))
+        await local.fs.unlinkPath(path.join(exportPath, relativePath))
       } else {
-        await fs.writeText(path.join(exportPath, relativePath), contents)
+        await local.fs.writeText(path.join(exportPath, relativePath), contents)
       }
     },
   )
@@ -318,92 +327,78 @@ export async function preserveSymlink(
 }
 
 export async function exportPack(
+  local: sandstone.AfterAllLocal,
   destPath: string,
-  minecraftPath: string,
-  outputPath: string,
-  outputFolder: string,
-  folder: string,
-  packName: string,
   packType: PackType,
   archivedOutput: boolean,
-  exportZips: boolean | undefined,
-  oldCache: SandstoneCache,
-  newCache: SandstoneCache
 ) {
   // Ensure the destination's parent directory exists. Fresh or lightly-used
   // .minecraft installs may not yet have a global `datapacks/` or
   // `resourcepacks/` folder, which would otherwise cause the copy/symlink
   // below to fail with ENOENT.
-  await fs.ensureDir(path.dirname(destPath))
+  await local.fs.ensureDir(path.dirname(destPath))
 
-  if (packType.archiveOutput && archivedOutput && exportZips) {
+  if (archivedOutput && (local.saveOptions.exportZips ?? packType.archiveOutput)) {
     // Copy archive
-    const archivePath = path.join(outputFolder, 'archives', `${packName}_${packType.type}.zip`)
-    await fs.copyFile(archivePath, `${destPath}.zip`)
+    const archivePath = path.join(local.outputFolder, 'archives', `${local.packName}_${packType.type}.zip`)
+    await local.fs.copyFile(archivePath, `${destPath}.zip`)
   } else if (getSymlinksAvailable()) {
     // Create symlink (only if it doesn't already exist)
-    if (!oldCache.symlinks?.includes(destPath)) {
-      await createSymlink(folder, packName, newCache, minecraftPath, outputPath, destPath)
+    if (!local.oldCache?.symlinks?.includes(destPath)) {
+      await createSymlink(local.folder, local.packName, local.newCache!, local.clientPath!, path.join(local.outputFolder, packType.type), destPath)
     }
   } else {
     // Copy files
-    await fs.remove(destPath)
-    await fs.copyDir(outputPath, destPath)
+    await local.fs.remove(destPath)
+    await local.fs.copyDir(path.join(local.outputFolder, packType.type), destPath)
   }
 }
 
 export function getExportPath(
+  local: sandstone.AfterAllLocal,
   packType: PackType,
-  basePath: string,
-  target: 'client' | 'server',
-  packName: string,
-  worldName: string | undefined,
-  exportZips: boolean | undefined
+  target: 'client' | 'server'
 ): string {
   if (target === 'server') {
-    return path.join(basePath, packType.serverPath).replace('$packName$', packName)
+    return path.join(local.serverPath!, packType.serverPath).replace('$packName$', local.packName)
   }
 
   // Client path: use world path or root path
-  const useWorldPath = worldName && (packType.type !== 'resourcepack' || exportZips)
+  const useWorldPath = local.worldName && (packType.type !== 'resourcepack' || (local.saveOptions.exportZips ?? packType.archiveOutput))
   if (useWorldPath) {
-    return path.join(basePath, packType.clientPath)
-      .replace('$packName$', packName)
-      .replace('$worldName$', worldName)
+    return path.join(local.clientPath!, packType.clientPath)
+      .replace('$packName$', local.packName)
+      .replace('$worldName$', local.worldName!)
   }
-  return path.join(basePath, packType.rootPath).replace('$packName$', packName)
+  return path.join(local.clientPath!, packType.rootPath).replace('$packName$', local.packName)
 }
 
 // Cleanup
 
-export async function cleanupOldSymlinks(oldCache: SandstoneCache, newCache: SandstoneCache) {
-  if (!oldCache.symlinks) return
+export async function cleanupOldSymlinks(local: sandstone.AfterAllLocal) {
+  if (!local.oldCache?.symlinks) return
 
-  const newSymlinks = new Set(newCache.symlinks)
+  const newSymlinks = new Set(local.newCache?.symlinks ?? [])
 
-  for (const symlink of oldCache.symlinks) {
+  for (const symlink of local.oldCache.symlinks) {
     if (!newSymlinks.has(symlink)) {
-      await fs.unlinkPath(symlink)
+      await local.fs.unlinkPath(symlink)
     }
   }
 }
 
-export async function cleanupOldArchives(
-  outputFolder: string,
-  oldCache: SandstoneCache,
-  newCache: SandstoneCache
-) {
-  if (!oldCache.archives) return
+export async function cleanupOldArchives(local: sandstone.AfterAllLocal) {
+  if (!local.oldCache?.archives) return
 
-  const archivesDir = path.join(outputFolder, 'archives')
-  if (!newCache.archives || newCache.archives.length === 0) {
-    await fs.remove(archivesDir, { recursive: true, force: true })
+  const archivesDir = path.join(local.outputFolder, 'archives')
+  if (!local.newCache?.archives || local.newCache.archives.length === 0) {
+    await local.fs.remove(archivesDir, { recursive: true, force: true })
     return
   }
 
-  for (const archive of oldCache.archives) {
-    if (!newCache.archives.includes(archive)) {
-      await fs.remove(path.join(archivesDir, archive))
+  for (const archive of local.oldCache!.archives!) {
+    if (!local.newCache!.archives!.includes(archive)) {
+      await local.fs.remove(path.join(archivesDir, archive))
     }
   }
 }

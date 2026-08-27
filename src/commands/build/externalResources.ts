@@ -1,29 +1,24 @@
 import path from 'path'
 
 import { DataPackDependencies, ResourcePackDependencies, type PackType } from 'sandstone/pack'
+import type * as sandstone from 'sandstone'
 
 import type { SandstoneCache } from './export.js'
 import { hash } from '../../utils/index.js'
-import * as fs from '../../utils/fs.js'
-import { SandstoneConfig } from 'sandstone'
+import type { FileExclusions, FileHandler } from 'sandstone'
 
-export type FileExclusions = {
-  generated: RegExp[] | undefined
-  existing: RegExp[] | undefined
-} | false
+export type { FileExclusions, FileHandler }
 
-export type FileHandler = NonNullable<NonNullable<SandstoneConfig['resources']>['handle']>[number]
-
-async function walk(dir: string): Promise<string[]> {
+async function walk(local: sandstone.BeforeSaveLocal, dir: string): Promise<string[]> {
   const files: string[] = []
-  const entries = await fs.readDirNames(dir)
+  const entries = await local.fs.readDirNames(dir)
   // A `withFileTypes: true` readdir returns Dirent; since we use `fs.readDirNames`
   // (plain string list) to avoid the fs-extra-style surface area, do a
   // parallel stat pass for the directory-vs-file distinction. Cheap because
   // resources/ trees are small.
   const annotated = await Promise.all(entries.map(async (name) => {
     try {
-      const s = await fs.fileStat(path.join(dir, name))
+      const s = await local.fs.fileStat(path.join(dir, name))
       return { name, isDir: s.isDirectory() }
     } catch {
       return { name, isDir: false }
@@ -32,7 +27,7 @@ async function walk(dir: string): Promise<string[]> {
   for (const { name, isDir } of annotated) {
     const fullPath = path.join(dir, name)
     if (isDir) {
-      files.push(...(await walk(fullPath)))
+      files.push(...(await walk(local, fullPath)))
     } else {
       files.push(fullPath)
     }
@@ -44,22 +39,21 @@ async function walk(dir: string): Promise<string[]> {
  * Check if external resources exist and register pack types accordingly.
  */
 export async function autoRegisterPackTypes(
-  folder: string,
-  sandstonePack: { packTypes: Map<string, PackType>; resourcePack: () => void; dataPack: () => void }
+  local: sandstone.BeforeSaveLocal,
 ) {
-  const resourcesFolder = path.join(folder, 'resources')
+  const resourcesFolder = path.join(local.folder, 'resources')
 
-  if (await fs.pathExists(path.join(resourcesFolder, 'resourcepack'))) {
-    const files = await fs.readDirNames(path.join(resourcesFolder, 'resourcepack'))
+  if (await local.fs.pathExists(path.join(resourcesFolder, 'resourcepack'))) {
+    const files = await local.fs.readDirNames(path.join(resourcesFolder, 'resourcepack'))
     if (files.length > 0) {
-      sandstonePack.resourcePack()
+      local.sandstonePack.resourcePack()
     }
   }
 
-  if (await fs.pathExists(path.join(resourcesFolder, 'datapack'))) {
-    const files = await fs.readDirNames(path.join(resourcesFolder, 'datapack'))
+  if (await local.fs.pathExists(path.join(resourcesFolder, 'datapack'))) {
+    const files = await local.fs.readDirNames(path.join(resourcesFolder, 'datapack'))
     if (files.length > 0) {
-      sandstonePack.dataPack()
+      local.sandstonePack.dataPack()
     }
   }
 
@@ -68,18 +62,18 @@ export async function autoRegisterPackTypes(
   // These pack types export Smithed-style dependency archives alongside the
   // generated pack output.
   const datapackDepsPath = path.join(resourcesFolder, 'datapack_dependencies')
-  if (await fs.pathExists(datapackDepsPath)) {
-    const entries = await fs.readDirNames(datapackDepsPath)
+  if (await local.fs.pathExists(datapackDepsPath)) {
+    const entries = await local.fs.readDirNames(datapackDepsPath)
     if (entries.length > 0) {
-      sandstonePack.packTypes.set('datapack_dependencies', new DataPackDependencies())
+      local.sandstonePack.packTypes.set('datapack_dependencies', new DataPackDependencies())
     }
   }
 
   const resourcepackDepsPath = path.join(resourcesFolder, 'resourcepack_dependencies')
-  if (await fs.pathExists(resourcepackDepsPath)) {
-    const entries = await fs.readDirNames(resourcepackDepsPath)
+  if (await local.fs.pathExists(resourcepackDepsPath)) {
+    const entries = await local.fs.readDirNames(resourcepackDepsPath)
     if (entries.length > 0) {
-      sandstonePack.packTypes.set('resourcepack_dependencies', new ResourcePackDependencies())
+      local.sandstonePack.packTypes.set('resourcepack_dependencies', new ResourcePackDependencies())
     }
   }
 }
@@ -88,25 +82,20 @@ export async function autoRegisterPackTypes(
  * Process external resources from the resources/ folder.
  */
 export async function processExternalResources(
+  local: sandstone.BeforeSaveLocal,
   packType: string,
-  folder: string,
-  outputFolder: string,
-  oldCache: SandstoneCache,
-  newCache: SandstoneCache,
-  changedPackTypes: Set<string>,
-  newDirs: Set<string>,
   fileExclusions: FileExclusions,
   fileHandlers: FileHandler[] | false
 ) {
-  const working = path.join(folder, 'resources', packType)
+  const working = path.join(local.folder, 'resources', packType)
 
   const encoder = new TextEncoder()
 
-  if (!(await fs.pathExists(working))) {
+  if (!(await local.fs.pathExists(working))) {
     return
   }
 
-  for (const file of await walk(working)) {
+  for (const file of await walk(local, working)) {
     const relativePath = path.join(packType, file.substring(working.length + 1))
 
     // Check exclusions
@@ -120,7 +109,7 @@ export async function processExternalResources(
     if (!pathPass) continue
 
     try {
-      let content: Buffer = await fs.readBytes(file)
+      let content: Buffer = await local.fs.readBytes(file)
 
       // Apply file handlers
       if (fileHandlers) {
@@ -137,27 +126,27 @@ export async function processExternalResources(
       // If sandstonePack.save() already wrote a file at this path (e.g., a Tag generated it),
       // the cache already holds the generated hash — leave the generated file untouched and
       // don't overwrite it with the resources file content.
-      const generatedByPack = relativePath in newCache.files && newCache.files[relativePath] !== hashValue
+      const generatedByPack = relativePath in local.newCache!.files && local.newCache!.files[relativePath] !== hashValue
 
       if (!generatedByPack) {
-        newCache.files[relativePath] = hashValue
+        local.newCache!.files[relativePath] = hashValue
 
         // Track directories
         for (let dir = path.dirname(relativePath); dir && dir !== '.'; dir = path.dirname(dir)) {
-          if (newDirs.has(dir)) {
+          if (local.newDirs!.has(dir)) {
             break
           } else {
-            newDirs.add(dir)
+            local.newDirs!.add(dir)
           }
         }
 
         // Write if changed, or if the output file's size differs from the resources file's size.
         // The cache alone can miss stale output when sandstonePack.save() previously wrote merged
         // content to disk but processExternalResources then overwrote the cache entry.
-        const realPath = path.join(outputFolder, relativePath)
+        const realPath = path.join(local.outputFolder, relativePath)
         let sizeDiffers = false
         try {
-          const existingStat = await fs.fileStat(realPath)
+          const existingStat = await local.fs.fileStat(realPath)
           if (existingStat.size !== content.byteLength) {
             sizeDiffers = true
           }
@@ -166,11 +155,11 @@ export async function processExternalResources(
           sizeDiffers = true
         }
 
-        if (oldCache.files[relativePath] !== hashValue || sizeDiffers) {
-          changedPackTypes.add(packType)
+        if (local.oldCache!.files[relativePath] !== hashValue || sizeDiffers) {
+          local.changedPackTypes!.add(packType)
 
-          await fs.ensureDir(path.dirname(realPath))
-          await fs.writeBytes(realPath, content)
+          await local.fs.ensureDir(path.dirname(realPath))
+          await local.fs.writeBytes(realPath, content)
         }
       }
     } catch {}

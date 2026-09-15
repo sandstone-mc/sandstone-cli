@@ -6,6 +6,7 @@ import type { WatchStatus, TrackedChange, BuildResult, WatchUIAPI, ChangeCategor
 import { drainLiveLogBuffer } from './logger.js'
 import { UpdateCheckIndicator, type IndicatorState } from './UpdateCheckIndicator.jsx'
 import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../utils/updateCheck.js'
+import { useTerminalColumns, clipAnsi, displayWidth } from './ansi.js'
 
 const MAX_CONTENT_LINES = 8
 
@@ -22,11 +23,39 @@ interface WatchUIProps {
   onRunUpdates?: (commands: string[]) => void
 }
 
-function formatChangedFiles(files: TrackedChange[]): string {
+/**
+ * Join file basenames into a width-budgeted summary. Uses display columns
+ * (not char count) so ANSI codes and emoji don't blow the budget. When the
+ * budget runs out mid-name, the last visible entry is clipped with '…' and
+ * a `+N more` suffix is appended.
+ */
+function formatChangedFiles(files: TrackedChange[], budget: number): string {
   if (files.length === 0) return 'No recent changes'
-  const paths = files.map(f => f.path.split(/[/\\]/).pop() || f.path)
-  if (paths.length <= 3) return paths.join(', ')
-  return `${paths.slice(0, 3).join(', ')} +${paths.length - 3} more`
+  const names = files.map(f => f.path.split(/[/\\]/).pop() || f.path)
+  const sep = ', '
+  const sepW = displayWidth(sep)
+  let used = 0
+  const parts: string[] = []
+  let overflowStart = -1
+  for (let i = 0; i < names.length; i++) {
+    const w = displayWidth(names[i])
+    const addition = (parts.length > 0 ? sepW : 0) + w
+    if (used + addition > budget) {
+      overflowStart = i
+      break
+    }
+    parts.push(names[i])
+    used += addition
+  }
+  if (overflowStart >= 0) {
+    const suffix = ` +${names.length - overflowStart} more`
+    const suffixW = displayWidth(suffix)
+    const remaining = budget - used - sepW - suffixW
+    const clipped = remaining > 1 ? clipAnsi(names[overflowStart], 0, remaining, '…') : '…'
+    parts.push(clipped)
+    return `${parts.join(sep)}${suffix}`
+  }
+  return parts.join(sep)
 }
 
 function groupByCategory(files: TrackedChange[]): Record<ChangeCategory, string[]> {
@@ -61,28 +90,61 @@ interface ContentDisplayProps {
   /** Effective number of lines this display may occupy. May be < MAX when
    *  the parent reserves space for an MC header + update commands. */
   maxLines: number
+  /** Terminal width. Each rendered line is clipped to this width so long
+   *  log/error/file lines don't blow past the visible area. */
+  cols: number
 }
 
-function ContentDisplay({ mode, logLines, errorText, changes, scrollOffset, maxLines }: ContentDisplayProps) {
+/** Build a width-budgeted `a, b, c +N more` summary for one category. */
+function buildFileList(names: string[], budget: number): string {
+  const sep = ', '
+  const sepW = displayWidth(sep)
+  let used = 0
+  const parts: string[] = []
+  let overflowStart = -1
+  for (let i = 0; i < names.length; i++) {
+    const w = displayWidth(names[i])
+    const addition = (parts.length > 0 ? sepW : 0) + w
+    if (used + addition > budget) {
+      overflowStart = i
+      break
+    }
+    parts.push(names[i])
+    used += addition
+  }
+  if (overflowStart >= 0) {
+    const suffix = ` +${names.length - overflowStart} more`
+    const suffixW = displayWidth(suffix)
+    const remaining = budget - used - sepW - suffixW
+    const clipped = remaining > 1 ? clipAnsi(names[overflowStart], 0, remaining, '…') : '…'
+    parts.push(clipped)
+    return `${parts.join(sep)}${suffix}`
+  }
+  return parts.join(sep)
+}
+
+function ContentDisplay({ mode, logLines, errorText, changes, scrollOffset, maxLines, cols }: ContentDisplayProps) {
   let contentData: { text: string; color?: string }[] = []
 
   if (mode === 'error' && errorText) {
-    contentData = errorText.split('\n').map(line => ({ text: line || ' ', color: 'red' }))
+    contentData = errorText.split('\n').map(line => ({ text: line ? clipAnsi(line, 0, cols, '…') : ' ', color: 'red' }))
   } else if (mode === 'changes') {
     const groups = groupByCategory(changes)
     const nonEmpty = Object.entries(groups).filter(([, files]) => files.length > 0) as [ChangeCategory, string[]][]
 
     contentData.push({ text: 'Changes by category:', color: undefined })
     for (const [category, files] of nonEmpty.slice(0, 4)) {
-      const fileList = files.slice(0, 3).join(', ') + (files.length > 3 ? ` +${files.length - 3} more` : '')
       const suffix = category === 'dependencies' ? ' (restart required)' : ''
-      contentData.push({ text: `  ${categoryLabels[category]}: ${fileList}${suffix}`, color: 'cyan' })
+      const prefix = `  ${categoryLabels[category]}: `
+      const prefixW = displayWidth(prefix) + displayWidth(suffix)
+      const fileList = buildFileList(files, cols - prefixW)
+      contentData.push({ text: `${prefix}${fileList}${suffix}`, color: 'cyan' })
     }
     if (nonEmpty.length === 0) {
       contentData.push({ text: '  No changes tracked', color: 'gray' })
     }
   } else {
-    contentData = logLines.map(line => ({ text: line }))
+    contentData = logLines.map(line => ({ text: clipAnsi(line, 0, cols, '…') }))
   }
 
   const totalLines = contentData.length
@@ -139,6 +201,7 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: Wa
   const [scrollOffset, setScrollOffset] = useState(0)
   const [mcHeader, setMcHeader] = useState<string | null>(null)
   const [updateCheckState, setUpdateCheckState] = useState<IndicatorState>({ kind: 'silent' })
+  const cols = useTerminalColumns()
 
   const isError = status === 'error' && buildResult?.error
   const isManualPending = manual && status === 'pending' && changedFiles.length > 0
@@ -307,11 +370,12 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: Wa
         changes={changedFiles}
         scrollOffset={scrollOffset}
         maxLines={effectiveContentLines}
+        cols={cols}
       />
 
       <Text> </Text>
 
-      <Text color="gray">Changed: {formatChangedFiles(changedFiles)}</Text>
+      <Text color="gray">Changed: {formatChangedFiles(changedFiles, Math.max(10, cols - 'Changed: '.length))}</Text>
 
       {buildResult?.resourceCounts ? (
         <Text>
@@ -323,7 +387,7 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: Wa
 
       {isError ? <Text color="yellow">Waiting for changes to retry...</Text> : <Text> </Text>}
 
-      <Text color="gray">{footerParts.join(' | ')}</Text>
+      <Text color="gray">{clipAnsi(footerParts.join(' | '), 0, cols, '…')}</Text>
     </Box>
   )
 }

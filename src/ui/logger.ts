@@ -1,6 +1,7 @@
 import path from 'path'
-import { stripVTControlCharacters, format } from 'util'
+import { format } from 'util'
 import * as fs from '../utils/fs.js'
+import { stripAnsi } from './ansi.js'
 
 let logPath: string | null = null
 let liveLogCallback: ((level: string | false, args: unknown[]) => void) | null = null
@@ -101,7 +102,7 @@ async function logWorkerMain(level: string | false, ...args: unknown[]) {
   }
 
   // Skip logs that are just empty strings
-  if (args.length === 1 && typeof args[0] === 'string' && stripVTControlCharacters(args[0]).trim() === '') {
+  if (args.length === 1 && typeof args[0] === 'string' && stripAnsi(args[0]).trim() === '') {
     return
   }
 
@@ -116,7 +117,7 @@ async function logWorkerMain(level: string | false, ...args: unknown[]) {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]
     if (typeof arg === 'string') {
-      chunks.push(stripVTControlCharacters(arg).replaceAll('\n', `\n${' '.repeat(prefix.length)}`))
+      chunks.push(stripAnsi(arg).replaceAll('\n', `\n${' '.repeat(prefix.length)}`))
     } else if (Buffer.isBuffer(arg) || arg instanceof Uint8Array) {
       chunks.push(arg)
     } else if (arg instanceof ArrayBuffer) {
@@ -125,7 +126,7 @@ async function logWorkerMain(level: string | false, ...args: unknown[]) {
       chunks.push(new Uint8Array(await arg.arrayBuffer()))
     } else {
       // Use util.format for objects, numbers, etc.
-      chunks.push(stripVTControlCharacters(format('%O', arg)).replaceAll('\n', `\n${' '.repeat(prefix.length)}`))
+      chunks.push(stripAnsi(format('%O', arg)).replaceAll('\n', `\n${' '.repeat(prefix.length)}`))
     }
     // Add space between args (but not after last)
     if (i < args.length - 1) {

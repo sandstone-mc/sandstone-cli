@@ -1,8 +1,16 @@
 import { join as pathJoin } from 'node:path'
+import { createHash } from 'node:crypto'
 
 import { NotConnectedError } from '../errors.js'
 import { ensureJava, requiredJavaMajor } from '../java.js'
-import { downloadMod, downloadUrl, findModVersion, type ModrinthVersion } from '../modrinth.js'
+import {
+  downloadMod,
+  downloadUrl,
+  findLatestVersionsForHashes,
+  findModVersion,
+  primaryFile,
+  type ModrinthVersion,
+} from '../modrinth.js'
 import { sandstoneToMcVersion } from '../sandstone-version.js'
 import * as fs from '../../utils/fs.js'
 import { ghFetchText } from '../../utils/github.js'
@@ -17,7 +25,47 @@ import type {
   ServerPath,
 } from '../types.js'
 import { ALL_CAPABILITIES_OFF } from '../types.js'
-import { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { ChildProcessWithoutNullStreams } from 'node:child_process'
+
+/** sha512 file hash of a tracked mod (Modrinth-installed or URL-installed). */
+type ModSha512 = string
+
+/** How an installed mod was sourced. URL-installed mods aren't auto-updated. */
+type ModSource = 'modrinth' | 'url'
+
+/**
+ * Per-mod metadata persisted in `sandstone_manifest.json`. Keyed by
+ * filename so the host can rename + remove files cleanly when an
+ * update changes the version's primary filename.
+ */
+interface InstalledModInfo {
+  source: ModSource
+  sha512: ModSha512
+  // Modrinth-only — populated for `source: 'modrinth'`, undefined otherwise.
+  versionId?: string
+  versionNumber?: string
+  projectId?: string
+  datePublished?: string
+}
+
+/** Shape of `sandstone_manifest.json` in the integrated server dir. */
+interface SandstoneManifest {
+  installedFabricLoader?: string
+  installerVersion?: string
+  minecraftVersion?: string
+  installedAt?: string
+  /** ISO-8601 timestamp of the last successful mod update check. */
+  lastModUpdateCheck?: string
+  /** Mods currently present in `<serverDir>/mods/`. Keyed by filename. */
+  installedMods?: Record<string, InstalledModInfo>
+}
+
+/**
+ * Minimum gap between two consecutive mod update checks on the same
+ * server. Throttles the bulk POST to /version_files/update — the API
+ * is rate-limited per-IP and we want connects to stay cheap.
+ */
+const ONE_HOUR_MS = 60 * 60 * 1000
 
 /**
  * Integrated provider — CLI-managed local Fabric server inside
@@ -59,11 +107,16 @@ export class IntegratedHost implements HostProvider {
   private child: ChildProcessWithoutNullStreams | null = null
   private connected = false
   // Shared line-splitter state — written by startServer's chunk handler,
-  // read by attachLog (replay) + forwarded to the active handler. Reset
+  // read by attachLog (replay) + forwarded to active handlers. Reset
   // every startServer.
   private logBuffer: string[] = []
   private partialLine = ''
-  private logHandler: LogChunkHandler | null = null
+  /**
+   * Multiple concurrent `attachLog` subscribers are supported — each
+   * call returns its own subscription. New lines are fanned out to every
+   * entry in the set.
+   */
+  private logHandlers = new Set<LogChunkHandler>()
   private doneDetected = false
   /** Resolver for the in-flight startServer readiness promise. */
   private resolveReady: (() => void) | null = null
@@ -156,6 +209,14 @@ export class IntegratedHost implements HostProvider {
         await this.installMods(mcVersion)
       }
     }
+    // Backfill the manifest's installedMods map for existing servers that
+    // pre-date auto-update tracking — hash every jar in mods/ and ask
+    // Modrinth which version each one is. No-op when already populated.
+    await this.ensureModsTracked(mcVersion)
+    // Auto-update pass. Throttled by ONE_HOUR_MS via lastModUpdateCheck
+    // in the manifest — connect() calls within an hour of a prior check
+    // (or a fresh installMods pass) skip the POST entirely.
+    await this.checkModUpdates(mcVersion)
     // Track whether this connection will generate a fresh world — if the
     // world dir had no level.dat before connect, we'll lay down the
     // spawn platform after the server finishes booting.
@@ -292,9 +353,9 @@ export class IntegratedHost implements HostProvider {
           matcher.resolve(line)
         }
       }
-      if (this.logHandler) {
+      for (const handler of this.logHandlers) {
         try {
-          this.logHandler(lines)
+          handler(lines)
         } catch (err) {
           // eslint-disable-next-line no-console
           console.error('integrated logHandler threw:', err)
@@ -465,14 +526,11 @@ export class IntegratedHost implements HostProvider {
 
   async attachLog(onChunk: LogChunkHandler): Promise<LogSubscription> {
     this.requireConnected('integrated')
-    // attachLog is callable both before and after startServer. Lines
-    // received after this point (whether the child is already spawning
-    // or about to spawn) flow through the shared line-splitter to
-    // `onChunk`. The buffer-replay below covers the case where the
-    // caller attached late.
-    if (this.logHandler) {
-      throw new Error('Log is already attached — call unattach on the existing subscription first')
-    }
+    // attachLog is callable both before and after startServer. Multiple
+    // concurrent subscribers are supported — each call adds to the set
+    // and gets its own subscription. Lines received after this point
+    // (whether the child is already spawning or about to spawn) flow
+    // through the shared line-splitter to every entry.
 
     // Replay any lines the splitter has already buffered so callers
     // that attach after spawn see the full boot log.
@@ -484,13 +542,13 @@ export class IntegratedHost implements HostProvider {
         console.error('integrated logHandler threw during replay:', err)
       }
     }
-    this.logHandler = onChunk
+    this.logHandlers.add(onChunk)
     const self = this
 
     return {
       async unattach() {
-        if (self.logHandler !== onChunk) return
-        self.logHandler = null
+        if (!self.logHandlers.has(onChunk)) return
+        self.logHandlers.delete(onChunk)
         // Flush any trailing partial line so callers see it.
         if (self.partialLine.length > 0) {
           onChunk([self.partialLine])
@@ -519,6 +577,192 @@ export class IntegratedHost implements HostProvider {
 
   private requireConnected(label: string): void {
     if (!this.connected) throw new NotConnectedError(label)
+  }
+
+  /**
+   * Read `sandstone_manifest.json` from the server dir. Returns an empty
+   * object when the file is missing or unreadable — every field is
+   * optional, so callers can treat the result as "what we know so far".
+   */
+  private async readManifest(): Promise<SandstoneManifest> {
+    const manifestPath = pathJoin(this.serverDir, 'sandstone_manifest.json')
+    try {
+      const raw = await fs.readText(manifestPath)
+      return JSON.parse(raw) as SandstoneManifest
+    } catch {
+      return {}
+    }
+  }
+
+  /** Persist `sandstone_manifest.json`. Pretty-printed for diffability. */
+  private async writeManifest(manifest: SandstoneManifest): Promise<void> {
+    await fs.writeText(
+      pathJoin(this.serverDir, 'sandstone_manifest.json'),
+      JSON.stringify(manifest, null, 2),
+    )
+  }
+
+  /**
+   * Compute a file's sha512 hash as a lowercase hex string. Used to
+   * populate the manifest's per-mod hash + to bulk-query Modrinth's
+   * update endpoint.
+   */
+  private async sha512OfFile(absPath: string): Promise<string> {
+    const bytes = await fs.readBytes(absPath)
+    return createHash('sha512').update(bytes).digest('hex')
+  }
+
+  /**
+   * First-connect bootstrap: when `manifest.installedMods` is empty
+   * (e.g. an existing server pre-dating auto-update tracking), hash
+   * every jar in `mods/` and ask Modrinth which ones it recognizes.
+   * Recognized jars are recorded as `source: 'modrinth'`, unrecognized
+   * as `source: 'url'`. The sha512 we record is always the on-disk
+   * hash — `/version_files/update` returns the *latest* matching
+   * version per hash, not the version we have installed, so we use it
+   * only to disambiguate source, never to record metadata. Version
+   * metadata is filled in by `installMods` on the next re-install.
+   *
+   * Idempotent: no-op when entries already exist. Also clears
+   * `lastModUpdateCheck` on the first bootstrap so the throttle
+   * doesn't suppress the very first update check.
+   */
+  private async ensureModsTracked(mcVersion: string): Promise<void> {
+    const manifest = await this.readManifest()
+    if (manifest.installedMods && Object.keys(manifest.installedMods).length > 0) {
+      return
+    }
+    const modsDir = pathJoin(this.serverDir, 'mods')
+    if (!(await fs.pathExists(modsDir))) return
+
+    const entries: Array<{ filename: string; sha512: string }> = []
+    for (const entry of await fs.readDirNames(modsDir)) {
+      if (!entry.endsWith('.jar')) continue
+      const full = pathJoin(modsDir, entry)
+      try {
+        const sha512 = await this.sha512OfFile(full)
+        entries.push({ filename: entry, sha512 })
+      } catch {
+        // skip unreadable jars
+      }
+    }
+    if (entries.length === 0) return
+
+    const installedMods: Record<string, InstalledModInfo> = {}
+    let modrinthHashes: Set<string> = new Set()
+    try {
+      const latest = await findLatestVersionsForHashes(
+        entries.map((e) => e.sha512),
+        mcVersion,
+      )
+      modrinthHashes = new Set(latest.keys())
+    } catch (err) {
+      // Network failure: every jar falls through to `source: 'url'`,
+      // which loses auto-update for these files until they're re-installed
+      // by `installMods`. Better than giving up on the manifest entirely.
+      // eslint-disable-next-line no-console
+      console.warn(`mod tracking bootstrap failed: ${err}`)
+    }
+
+    for (const { filename, sha512 } of entries) {
+      installedMods[filename] = modrinthHashes.has(sha512)
+        ? { source: 'modrinth', sha512 }
+        : { source: 'url', sha512 }
+    }
+
+    manifest.installedMods = installedMods
+    // Reset the throttle so the just-populated entries get checked. The
+    // upcoming `checkModUpdates` call will set `lastModUpdateCheck`
+    // itself (success or no-op).
+    delete manifest.lastModUpdateCheck
+    await this.writeManifest(manifest)
+  }
+
+  /**
+   * Auto-update pass. Skips if the last check was within ONE_HOUR_MS,
+   * otherwise POSTs every Modrinth-sourced mod's sha512 to
+   * `/version_files/update` and downloads newer versions. Updates the
+   * manifest with new sha512 / version metadata + bumps
+   * `lastModUpdateCheck` to `now`, regardless of whether anything
+   * changed (so a no-op check still satisfies the throttle).
+   */
+  private async checkModUpdates(mcVersion: string): Promise<void> {
+    const manifest = await this.readManifest()
+
+    // Throttle: skip only when we have both a recent timestamp AND a
+    // populated installedMods map. Missing fields = the manifest's
+    // tracking state is incomplete (pre-feature install, partial write,
+    // etc.) — treat that as "never checked" and run.
+    const hasMods =
+      !!manifest.installedMods && Object.keys(manifest.installedMods).length > 0
+    if (manifest.lastModUpdateCheck && hasMods) {
+      const elapsed = Date.now() - new Date(manifest.lastModUpdateCheck).getTime()
+      if (elapsed < ONE_HOUR_MS) return
+    }
+
+    const installedMods = manifest.installedMods ?? {}
+    const tracked = Object.entries(installedMods).filter(
+      ([, info]) => info.source === 'modrinth' && info.sha512,
+    )
+    if (tracked.length === 0) {
+      // Nothing to check against — bump the timestamp so we don't loop
+      // on every connect when mods/ is empty or all entries are URL.
+      manifest.lastModUpdateCheck = new Date().toISOString()
+      await this.writeManifest(manifest)
+      return
+    }
+
+    const hashToEntry = new Map(tracked.map(([filename, info]) => [info.sha512!, { filename, info }]))
+    let updates: Map<string, ModrinthVersion>
+    try {
+      updates = await findLatestVersionsForHashes(
+        Array.from(hashToEntry.keys()),
+        mcVersion,
+      )
+    } catch (err) {
+      // Don't bump the timestamp on failure — let the next connect retry.
+      // eslint-disable-next-line no-console
+      console.warn(`mod update check failed: ${err}`)
+      return
+    }
+
+    const modsDir = pathJoin(this.serverDir, 'mods')
+    let changed = false
+    const next: Record<string, InstalledModInfo> = { ...installedMods }
+    for (const [sha, version] of updates) {
+      const entry = hashToEntry.get(sha)
+      if (!entry) continue
+      const newFile = primaryFile(version)
+      if (newFile.hashes.sha512 === sha) continue // already current
+      console.log(
+        `[integrated] mod update: ${entry.filename} ${entry.info.versionNumber ?? '?'} → ${version.version_number}`,
+      )
+      await downloadMod(version, pathJoin(modsDir, newFile.filename))
+      if (newFile.filename !== entry.filename) {
+        try {
+          await fs.remove(pathJoin(modsDir, entry.filename))
+        } catch {
+          // ignore
+        }
+      }
+      delete next[entry.filename]
+      next[newFile.filename] = {
+        source: 'modrinth',
+        sha512: newFile.hashes.sha512,
+        versionId: version.id,
+        versionNumber: version.version_number,
+        projectId: version.project_id,
+        datePublished: version.date_published,
+      }
+      changed = true
+    }
+
+    manifest.installedMods = next
+    manifest.lastModUpdateCheck = new Date().toISOString()
+    await this.writeManifest(manifest)
+    if (changed) {
+      console.log(`[integrated] mod updates applied`)
+    }
   }
 
   private async ensureEulaAccepted(): Promise<void> {
@@ -701,19 +945,12 @@ export class IntegratedHost implements HostProvider {
         )
       })
 
-      await fs.writeText(
-        pathJoin(this.serverDir, 'sandstone_manifest.json'),
-        JSON.stringify(
-          {
-            installedFabricLoader: installedLoader ?? latestLoader,
-            installerVersion,
-            minecraftVersion,
-            installedAt: new Date().toISOString(),
-          },
-          null,
-          2,
-        ),
-      )
+      await this.writeManifest({
+        installedFabricLoader: installedLoader ?? latestLoader,
+        installerVersion,
+        minecraftVersion,
+        installedAt: new Date().toISOString(),
+      })
     } finally {
       try {
         await fs.deleteFile(installerPath)
@@ -760,6 +997,30 @@ export class IntegratedHost implements HostProvider {
     const cfg = this.config.mods ?? {}
     const enabled = (v: boolean | undefined) => v !== false
 
+    // Track every mod we install so auto-update can find them later.
+    // Modrinth-installed mods use the sha512 from the Modrinth version
+    // metadata (no extra disk read); URL-installed mods get hashed from
+    // disk after download.
+    const manifest = await this.readManifest()
+    const installedMods: Record<string, InstalledModInfo> = {
+      ...(manifest.installedMods ?? {}),
+    }
+    const trackModrinth = (version: ModrinthVersion, filename?: string): void => {
+      const file = primaryFile(version)
+      const name = filename ?? file.filename
+      installedMods[name] = {
+        source: 'modrinth',
+        sha512: file.hashes.sha512,
+        versionId: version.id,
+        versionNumber: version.version_number,
+        projectId: version.project_id,
+        datePublished: version.date_published,
+      }
+    }
+    const trackUrl = (filename: string, sha512: string): void => {
+      installedMods[filename] = { source: 'url', sha512 }
+    }
+
     // Required gate: fabric-api.
     if (!enabled(cfg.fabricApi)) {
       throw new Error(
@@ -774,6 +1035,7 @@ export class IntegratedHost implements HostProvider {
         )
       }
       await downloadMod(version, pathJoin(modsDir, primaryFileName(version)))
+      trackModrinth(version)
     }
 
     // Best-effort defaults. Each maps config key → Modrinth slug.
@@ -807,13 +1069,12 @@ export class IntegratedHost implements HostProvider {
       const slug = slugFor[key as string]
       const version = await findModVersion(slug, mcVersion).catch(() => null)
       if (!version) continue
-      await downloadMod(
-        version,
-        pathJoin(modsDir, primaryFileName(version)),
-      ).catch((err) => {
+      const filename = primaryFileName(version)
+      await downloadMod(version, pathJoin(modsDir, filename)).catch((err) => {
         // eslint-disable-next-line no-console
         console.warn(`mod ${slug} download failed: ${err}`)
       })
+      trackModrinth(version)
       if (key === 'commandcrafter') commandcrafterInstalled = true
     }
 
@@ -822,7 +1083,9 @@ export class IntegratedHost implements HostProvider {
     if (commandcrafterInstalled) {
       const kotlin = await findModVersion('fabric-language-kotlin')
       if (kotlin) {
-        await downloadMod(kotlin, pathJoin(modsDir, primaryFileName(kotlin)))
+        const filename = primaryFileName(kotlin)
+        await downloadMod(kotlin, pathJoin(modsDir, filename))
+        trackModrinth(kotlin)
       }
     }
 
@@ -831,13 +1094,28 @@ export class IntegratedHost implements HostProvider {
       if (extra.modrinthId) {
         const v = await findModVersion(extra.modrinthId, mcVersion)
         if (v) {
-          await downloadMod(v, pathJoin(modsDir, extra.filename ?? primaryFileName(v)))
+          const filename = extra.filename ?? primaryFileName(v)
+          await downloadMod(v, pathJoin(modsDir, filename))
+          trackModrinth(v, filename)
         }
       } else if (extra.url) {
         const name = extra.filename ?? basenameFromUrl(extra.url)
         await downloadUrl(extra.url, pathJoin(modsDir, name))
+        try {
+          const sha512 = await this.sha512OfFile(pathJoin(modsDir, name))
+          trackUrl(name, sha512)
+        } catch {
+          // Best-effort — skip tracking if hashing fails.
+        }
       }
     }
+
+    manifest.installedMods = installedMods
+    // Mark the just-completed install as a recent update check so the
+    // auto-update pass on the same connect() doesn't redundantly POST
+    // /version_files/update for the files we already pulled latest.
+    manifest.lastModUpdateCheck = new Date().toISOString()
+    await this.writeManifest(manifest)
   }
 
   /** Wipe `<serverDir>/mods/` so the next pass re-resolves from Modrinth. */

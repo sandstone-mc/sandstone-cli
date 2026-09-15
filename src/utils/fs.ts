@@ -66,6 +66,40 @@ export async function writeBytes(path: string, contents: Buffer | ArrayBuffer | 
 }
 
 /**
+ * Write text atomically: stage to `<path>.tmp.<random>`, then `rename` over
+ * the target. Readers never see a partial write. On POSIX, optionally
+ * `chmod` the result (used for the connect endpoint file's 0600 mode).
+ *
+ * The tmp file lives in the same directory as `path` so the `rename` is
+ * guaranteed to be on the same filesystem (cross-FS renames fail with
+ * `EXDEV`). Cleans up the tmp file on any failure.
+ */
+export async function writeTextAtomic(
+  path: string,
+  contents: string,
+  options: { mode?: number } = {},
+): Promise<void> {
+  const { randomUUID } = await import('node:crypto')
+  const tmp = `${path}.tmp.${randomUUID()}`
+  try {
+    await Bun.write(tmp, contents)
+    const { rename, chmod } = await import('node:fs/promises')
+    await rename(tmp, path)
+    if (options.mode !== undefined && process.platform !== 'win32') {
+      await chmod(path, options.mode)
+    }
+  } catch (err) {
+    try {
+      const { unlink } = await import('node:fs/promises')
+      await unlink(tmp)
+    } catch {
+      // tmp file might never have been created
+    }
+    throw err
+  }
+}
+
+/**
  * Copy a single file by reference. `Bun.write(dest, Bun.file(src))` is the
  * documented fast path — it does a `copy_file_range`/`fcopyfile` syscall when
  * the platform allows, falling back to a buffered read+write otherwise.

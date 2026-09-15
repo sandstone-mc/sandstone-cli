@@ -40,6 +40,14 @@ const options = {
   clientPath: opt('-c, --client-path <path>', 'Path of the client folder. Override the value specified in the configuration file.'),
   serverPath: opt('--server-path <path>', 'Path of the server folder. Override the value specified in the configuration file.'),
 
+  // Connect (sand connect) — used to start a persistent host daemon.
+  hostType: opt('--host-type <type>', 'Host provider type for `sand connect` (ssh|rcon|ftp|local-client|integrated|mcsmanager-login).', { env: 'SANDSTONE_HOST_TYPE' }),
+  hostConfig: opt('--host-config <json>', 'JSON-encoded host provider config. Sensitive fields are visible in `ps aux` — prefer --host-config-file with mode 0600.', { env: 'SANDSTONE_HOST_CONFIG' }),
+  hostConfigFile: opt('--host-config-file <path>', 'Path to a JSON file with the host provider config (chmod 0600 recommended).', { env: 'SANDSTONE_HOST_CONFIG_FILE' }),
+  bind: opt('--bind <addr>', 'Bind address for the daemon WS server (default 127.0.0.1).', { env: 'SANDSTONE_BIND' }),
+  port: opt('--port <n>', 'Bind port. 0 picks a free port (default 0).', { env: 'SANDSTONE_PORT' }),
+  shutdown: opt('--shutdown', 'With `sand connect`, read the project endpoint file and ask the running daemon to shut down.', { env: 'SANDSTONE_CONNECT_SHUTDOWN' }),
+
   // TODO: ssh
 
   // Watch-specific

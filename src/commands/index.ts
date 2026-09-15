@@ -1,6 +1,8 @@
 export { buildCommand } from './build/index.js'
 export { cleanCommand, type CleanOptions } from './clean.js'
+export { connectCommand, type ConnectCommandOptions } from './connect.js'
 export { createCommand } from './create.js'
 export { installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand } from './dependency.js'
 export { linkCommand, unlinkCommand, type LinkCommandOptions, type UnlinkCommandOptions } from './link.js'
+export { runCommand, type RunCommandOptions } from './run.js'
 export { watchCommand, type WatchOptions } from './watch.js'

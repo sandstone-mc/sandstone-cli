@@ -4,7 +4,7 @@ import chalk from 'chalk-template'
 import figlet from 'figlet'
 
 import { CLI_VERSION } from './version.js'
-import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand, cleanCommand, linkCommand, unlinkCommand } from './commands/index.js'
+import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand } from './commands/index.js'
 import { BuildOptions } from './utils/commander.js'
 
 if (Bun.which('bun') === null) {
@@ -127,6 +127,28 @@ CLI
   .addOption(BuildOptions.get('path'))
   .action((target: string | undefined, opts: { path: string }) => unlinkCommand({ path: opts.path, target }))
   .addArgument(new Argument('[target]', 'Name or libraryPath to unlink from this project. Omit to unlink the current library.'))
+
+CLI
+  .command('connect')
+  .description('Start (or shut down) a long-lived host daemon that exposes the chosen provider over WebSocket. Endpoint file lives at <project>/.sandstone/connect.url. ⛏')
+  .addOption(BuildOptions.get('path'))
+  .addOption(BuildOptions.get('hostType'))
+  .addOption(BuildOptions.get('hostConfig'))
+  .addOption(BuildOptions.get('hostConfigFile'))
+  .addOption(BuildOptions.get('bind'))
+  .addOption(BuildOptions.get('port'))
+  .addOption(BuildOptions.get('shutdown'))
+  .action(connectCommand)
+
+CLI
+  .command('run')
+  .description('Run a Minecraft console command on the configured server. Uses the live sand connect daemon if one is running, otherwise connects directly. ⛏')
+  .addOption(BuildOptions.get('path'))
+  .addOption(BuildOptions.get('hostType'))
+  .addOption(BuildOptions.get('hostConfig'))
+  .addOption(BuildOptions.get('hostConfigFile'))
+  .action((commandAndArgs: string[], opts: { path: string; hostType?: string; hostConfig?: string; hostConfigFile?: string }) => runCommand(opts, commandAndArgs))
+  .addArgument(new Argument('<command...>', 'The Minecraft console command to run (e.g. "op MulverineX", "say Hello").'))
 
 
 CLI.parse(process.argv)

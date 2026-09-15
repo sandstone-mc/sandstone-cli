@@ -108,6 +108,46 @@ export async function downloadMod(
 }
 
 /**
+ * Bulk update check: given a list of file sha512 hashes, return the
+ * latest Modrinth version matching `mcVersion` + `loader` for each one.
+ * Used by the integrated host's auto-update flow — the host persists
+ * each installed mod's sha512 in its manifest and pings this endpoint
+ * to learn whether a newer version has shipped.
+ *
+ * Behavior:
+ *  - Response is a map keyed by the requested hash. Hashes Modrinth
+ *    doesn't recognize are simply absent from the map (no error).
+ *  - The returned version is *always* the latest matching the filters,
+ *    regardless of whether the requested hash corresponds to that
+ *    version or an older one. Compare `result.files[primary].hashes.sha512`
+ *    to the requested hash client-side to detect staleness.
+ */
+export async function findLatestVersionsForHashes(
+  hashes: string[],
+  mcVersion: string,
+  loader = 'fabric',
+): Promise<Map<string, ModrinthVersion>> {
+  if (hashes.length === 0) return new Map()
+  const resp = await ghFetch(`${API}/version_files/update`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      hashes,
+      algorithm: 'sha512',
+      loaders: [loader],
+      game_versions: [mcVersion],
+    }),
+  })
+  if (!resp.ok) {
+    throw new Error(
+      `Modrinth update lookup failed: HTTP ${resp.status} ${resp.statusText}`,
+    )
+  }
+  const data = (await resp.json()) as Record<string, ModrinthVersion>
+  return new Map(Object.entries(data))
+}
+
+/**
  * Download any URL to `destFile` (absolute path). Streams via the
  * github util so a future `mr` CLI (or similar) could plug in here.
  */

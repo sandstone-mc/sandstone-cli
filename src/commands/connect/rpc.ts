@@ -10,7 +10,7 @@
  * {@link errorToRpc}.
  */
 
-import { HostAuthError, NotConnectedError, UnsupportedCapabilityError } from '../hosts/errors.js'
+import { HostAuthError, NotConnectedError, UnsupportedCapabilityError } from '../../hosts/errors.js'
 
 /** Bump when the on-wire shape changes incompatibly. */
 export const PROTOCOL_VERSION = 1

@@ -5,7 +5,7 @@
  * the per-connection state the server tracks while a client is connected.
  */
 
-import type { HostProvider, LogSubscription } from '../hosts/types.js'
+import type { HostProvider, LogSubscription } from '../../hosts/types.js'
 
 /**
  * Per-WebSocket connection state. The server creates one when a client

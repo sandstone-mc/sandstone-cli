@@ -30,7 +30,7 @@
 import { randomBytes } from 'node:crypto'
 import { mkdir, stat as fsStat, unlink, lstat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { writeTextAtomic } from '../utils/fs.js'
+import { writeTextAtomic } from '../../utils/fs.js'
 
 /** Bump when the file shape changes incompatibly. */
 export const ENDPOINT_VERSION = 1

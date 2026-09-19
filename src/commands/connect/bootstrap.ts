@@ -18,11 +18,11 @@
 import { randomBytes } from 'node:crypto'
 import chalk from 'chalk-template'
 
-import { getAvailableSandstoneVersions } from '../commands/versionDiscovery.js'
-import { getProvider } from '../hosts/registry.js'
-import '../hosts/index.js' // side-effect: register all providers
-import { CompositeHost } from '../hosts/composite.js'
-import type { HostConfigInput, HostProvider, HostType } from '../hosts/types.js'
+import { getAvailableSandstoneVersions } from '../versionDiscovery.js'
+import { getProvider } from '../../hosts/registry.js'
+import '../../hosts/index.js' // side-effect: register all providers
+import { CompositeHost } from '../../hosts/composite.js'
+import type { HostConfigInput, HostProvider, HostType } from '../../hosts/types.js'
 
 export interface BootstrapOptions {
   hostTypes: HostType[]

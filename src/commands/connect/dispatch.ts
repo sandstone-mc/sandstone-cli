@@ -30,8 +30,8 @@ import {
 } from './rpc.js'
 import type { SubscriptionRegistry } from './subscriptions.js'
 import { RpcErrorCode } from './rpc.js'
-import { Capability, capabilitiesToRecord } from '../hosts/types.js'
-import type { HostProvider, LogChunkHandler, ServerPath } from '../hosts/types.js'
+import { Capability, capabilitiesToRecord } from '../../hosts/types.js'
+import type { HostProvider, LogChunkHandler, ServerPath } from '../../hosts/types.js'
 
 export interface DispatchContext {
   host: HostProvider

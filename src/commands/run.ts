@@ -22,11 +22,11 @@
  */
 
 import { resolve } from 'node:path'
-import { connect as openClient, type Client } from '../connect/client.js'
-import { pidAlive, readEndpoint } from '../connect/endpoint-file.js'
-import { BootstrapError, bootstrapHosts } from '../connect/bootstrap.js'
+import { connect as openClient, type Client } from './connect/client.js'
+import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
+import { BootstrapError, bootstrapHosts } from './connect/bootstrap.js'
 import type { HostConfigInput, HostProvider, HostType, LogChunkHandler } from '../hosts/types.js'
-import { DEFAULT_HOST_TYPES } from './connect.js'
+import { DEFAULT_HOST_TYPES } from './connect/index.js'
 import chalk from 'chalk-template'
 
 export interface RunCommandOptions {

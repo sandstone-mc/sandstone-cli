@@ -29,10 +29,10 @@ import {
   type RpcResponse,
   type WelcomeEvent,
 } from './rpc.js'
-import { capabilitiesToRecord } from '../hosts/types.js'
+import { capabilitiesToRecord } from '../../hosts/types.js'
 import { RpcHandlerError, ShutdownSignal, dispatch, narrowMethod, withHost, type DispatchContext } from './dispatch.js'
 import { SubscriptionRegistry } from './subscriptions.js'
-import type { HostProvider } from '../hosts/types.js'
+import type { HostProvider } from '../../hosts/types.js'
 import type { SessionContext } from './types.js'
 
 /** Per-connection ws data — the secret is shared across all connections in this daemon. */

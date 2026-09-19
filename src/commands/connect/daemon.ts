@@ -22,7 +22,7 @@
  */
 
 import chalk from 'chalk-template'
-import { capabilitiesToRecord, type HostConfigInput, type HostProvider, type HostType } from '../hosts/types.js'
+import { capabilitiesToRecord, type HostConfigInput, type HostProvider, type HostType } from '../../hosts/types.js'
 import { BootstrapError, bootstrapHosts } from './bootstrap.js'
 import { startServer } from './server.js'
 import {

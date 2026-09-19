@@ -16,11 +16,11 @@
  */
 
 import { resolve } from 'node:path'
-import { connect as openClient } from '../connect/client.js'
-import { startDaemon } from '../connect/daemon.js'
-import { readEndpoint, pidAlive } from '../connect/endpoint-file.js'
-import { KNOWN_HOST_TYPES, type HostConfigInput, type HostType } from '../hosts/types.js'
-import { printSplash } from '../utils/index.js'
+import { connect as openClient } from './client.js'
+import { startDaemon } from './daemon.js'
+import { readEndpoint, pidAlive } from './endpoint-file.js'
+import { KNOWN_HOST_TYPES, type HostConfigInput, type HostType } from '../../hosts/types.js'
+import { printSplash } from '../../utils/index.js'
 import chalk from 'chalk-template'
 
 export interface ConnectCommandOptions {

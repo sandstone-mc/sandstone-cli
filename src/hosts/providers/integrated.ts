@@ -17,6 +17,7 @@ import { ghFetchText } from '../../utils/github.js'
 import { spawn as shellSpawn } from '../../utils/shell.js'
 import { Capability, type HostCapabilities, type HostProvider, type IntegratedHostConfig, type IntegratedHostModsConfig, type LogChunkHandler, type LogSubscription, type ServerPath } from '../types.js'
 import { ChildProcessWithoutNullStreams } from 'node:child_process'
+import { MINECRAFT_LOG_PREFIX } from 'src/commands/run.js';
 
 /** sha512 file hash of a tracked mod (Modrinth-installed or URL-installed). */
 type ModSha512 = string
@@ -57,6 +58,8 @@ interface SandstoneManifest {
  * is rate-limited per-IP and we want connects to stay cheap.
  */
 const ONE_HOUR_MS = 60 * 60 * 1000
+
+const UnwhitelistedAttempt = new RegExp(`${MINECRAFT_LOG_PREFIX}${String.raw`(\w+) \(/([\w\.]+):`}`)
 
 /**
  * Integrated provider — CLI-managed local Fabric server inside
@@ -253,7 +256,7 @@ export class IntegratedHost implements HostProvider {
       // Fabric loader upgrade doesn't require touching mods.
       if (mcChanged || noManifest) {
         this.logVerbose(
-          `test: MC version changed (${manifestMcVersion ?? 'none'} → ${mcVersion}) — re-resolving mods`,
+          `[integrated] MC version changed (${manifestMcVersion ?? 'none'} → ${mcVersion}) — re-resolving mods`,
         )
         await this.clearMods()
         await this.installMods(mcVersion)
@@ -474,6 +477,14 @@ export class IntegratedHost implements HostProvider {
       for (const line of lines) {
         if (this.logBuffer.length >= 10_000) this.logBuffer.shift()
         this.logBuffer.push(line)
+        if (line.endsWith('lost connection: You are not white-listed on this server!')) {
+          const [_, localPlayer, clientAddress] = UnwhitelistedAttempt.exec(line)!
+          if (clientAddress === '127.0.0.1') {
+            console.log(`[integrated] local connection attempt with account "${localPlayer}" detected, whitelisting & opping, please rejoin`)
+            this.executeRawCommand(`whitelist add ${localPlayer}`)
+            this.executeRawCommand(`op ${localPlayer}`)
+          }
+        }
         // Resolve a pending one-shot matcher, if any. Used by
         // `awaitLogLine` to confirm a console command's response arrived
         // before continuing.
@@ -499,7 +510,7 @@ export class IntegratedHost implements HostProvider {
           if (line.includes('Done (')) {
             this.doneDetected = true
             this.logVerbose(
-              `[${this.serverDir}] startServer: detected "Done (" — server is ready`,
+              `[integrated#startServer] detected "Done (" — server is ready`,
             )
             const resolvers = this.resolveReady
             this.resolveReady = []
@@ -561,31 +572,31 @@ export class IntegratedHost implements HostProvider {
     if (this.needsInitialWorldSetup) {
       this.needsInitialWorldSetup = false
       console.log(
-        `[${this.serverDir}] startServer: running initial world setup (fill + setblock)`,
+        `[integrated#startServer] running initial world setup (fill + setblock)`,
       )
       const fillSucceeded = this.detectLogLine(/Successfully filled 1089 block\(s\)/)
       console.log(
-        `[${this.serverDir}] startServer: writing 'fill 24 -61 24 -8 -61 -8 stone'`,
+        `[integrated#startServer] writing 'fill 24 -61 24 -8 -61 -8 stone'`,
       )
       await this.executeRawCommand('fill 24 -61 24 -8 -61 -8 stone')
       console.log(
-        `[${this.serverDir}] startServer: awaiting fill response (matcher set: ${fillSucceeded !== undefined})`,
+        `[integrated#startServer] awaiting fill response (matcher set: ${fillSucceeded !== undefined})`,
       )
       await fillSucceeded
       console.log(
-        `[${this.serverDir}] startServer: fill response received`,
+        `[integrated#startServer] fill response received`,
       )
       const setblockSucceeded = this.detectLogLine(/Changed the block at 8, -61, 8/)
       console.log(
-        `[${this.serverDir}] startServer: writing 'setblock 8 -61 8 cobblestone'`,
+        `[integrated#startServer] writing 'setblock 8 -61 8 cobblestone'`,
       )
       await this.executeRawCommand('setblock 8 -61 8 cobblestone')
       console.log(
-        `[${this.serverDir}] startServer: awaiting setblock response`,
+        `[integrated#startServer] awaiting setblock response`,
       )
       await setblockSucceeded
       console.log(
-        `[${this.serverDir}] startServer: setblock response received`,
+        `[integrated#startServer] setblock response received`,
       )
     }
   }
@@ -1081,6 +1092,7 @@ export class IntegratedHost implements HostProvider {
       // Pipe stdout so we can scrape "Installing Fabric Loader X.Y.Z(MC)"
       // to record what was actually picked.
       await new Promise<void>((resolve, reject) => {
+        console.log('[integrated] running fabric server installer...')
         const proc = shellSpawn([this.java!.path, ...args], {
           cwd: this.serverDir,
           stdio: ['ignore', 'pipe', 'inherit'],

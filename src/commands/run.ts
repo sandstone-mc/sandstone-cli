@@ -295,10 +295,12 @@ function parseTimeoutMs(raw: string | undefined): number {
  * actual message. When `--expect` matches, the user wants the message,
  * not the wrapping.
  */
-const MINECRAFT_PREFIX = /^\[\d{2}:\d{2}:\d{2}\] \[[^\]]+\/\w+\]: /
+export const MINECRAFT_LOG_PREFIX = String.raw`^\[\d{2}:\d{2}:\d{2}\] \[[^\]]+\/\w+\]: `
+
+const MinecraftLogPrefixRegex = new RegExp(`${MINECRAFT_LOG_PREFIX}`)
 
 function stripMinecraftPrefix(line: string): string {
-  const m = line.match(MINECRAFT_PREFIX)
+  const m = line.match(MinecraftLogPrefixRegex)
   return m ? line.slice(m[0].length) : line
 }
 

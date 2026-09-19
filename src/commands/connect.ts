@@ -2,25 +2,31 @@
  * `sand connect` — long-lived host daemon over WebSocket.
  *
  * Two modes:
- *   - Default: spawn a daemon that hosts the chosen provider and listens
+ *   - Default: spawn a daemon that hosts the chosen provider(s) and listens
  *     on a local WS port. Endpoint file written to
  *     `<projectRoot>/.sandstone/connect.url`.
  *   - `--shutdown`: read the endpoint file and send the daemon the
  *     `shutdown` RPC. Exits 0 on success, 1 if the file is missing or
  *     the daemon can't be reached.
+ *
+ * `--host-type` accepts a single provider (`--host-type integrated`) or
+ * multiple comma-separated providers (`--host-type ssh,rcon`). With >1
+ * types, `--host-config` must be a keyed map: `'{"ssh":{...},"rcon":{...}}'`.
+ * With 1 type, the flat shape is accepted for back-compat.
  */
 
 import { resolve } from 'node:path'
 import { connect as openClient } from '../connect/client.js'
-import { startDaemon, DaemonError } from '../connect/daemon.js'
+import { startDaemon } from '../connect/daemon.js'
 import { readEndpoint, pidAlive } from '../connect/endpoint-file.js'
-import type { HostType } from '../hosts/types.js'
+import { KNOWN_HOST_TYPES, type HostConfigInput, type HostType } from '../hosts/types.js'
+import { printSplash } from '../utils/index.js'
 import chalk from 'chalk-template'
 
 export interface ConnectCommandOptions {
-  /** `--host-type <type>` */
+  /** `--host-type <type>` or `--host-type <t1>,<t2>` */
   hostType?: string
-  /** `--host-config <json>` */
+  /** `--host-config <json>` (flat single or keyed composite map) */
   hostConfig?: string
   /** `--host-config-file <path>` */
   hostConfigFile?: string
@@ -45,21 +51,28 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     return
   }
 
-  // Validate the daemon-start flags.
-  const hostType = opts.hostType as HostType | undefined
-  if (!hostType) {
-    console.error(chalk`{red Error:} --host-type is required (one of: ssh, rcon, ftp, local-client, integrated, mcsmanager-login)`)
+  // Banner — only the long-running daemon command gets the splash.
+  printSplash()
+
+  // Parse + validate --host-type (comma-separated list).
+  // `--host-type` defaults to the integrated+rcon composite — the only
+  // built-in default. `--host-config` / `--host-config-file` default
+  // to a minimal map keyed by host type. Anything else requires an
+  // explicit flag.
+  const hostTypes = parseHostTypes(opts.hostType)
+  if (hostTypes.length === 0) {
+    console.error(
+      chalk`{red Error:} --host-type is required when not using the default (one of: ssh, rcon, ftp, local-client, integrated, mcsmanager-login)`,
+    )
     process.exit(2)
   }
-  const knownTypes = new Set<HostType>(['ssh', 'rcon', 'ftp', 'local-client', 'integrated', 'mcsmanager-login'])
-  if (!knownTypes.has(hostType)) {
-    console.error(chalk`{red Error:} Unknown --host-type '${hostType}'`)
-    process.exit(2)
+  for (const t of hostTypes) {
+    if (!KNOWN_HOST_TYPES.has(t)) {
+      console.error(chalk`{red Error:} Unknown --host-type '${t}'`)
+      process.exit(2)
+    }
   }
-  if (!opts.hostConfig && !opts.hostConfigFile) {
-    console.error(chalk`{red Error:} Either --host-config <json> or --host-config-file <path> is required`)
-    process.exit(2)
-  }
+
   if (opts.hostConfig && opts.hostConfigFile) {
     console.error(chalk`{red Error:} Pass either --host-config or --host-config-file, not both`)
     process.exit(2)
@@ -77,11 +90,14 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     }
   }
 
-  const hostConfig = await loadHostConfig(opts)
-  // Most providers benefit from knowing the project root (integrated
-  // requires it). Inject it from the --path flag when not already set.
-  if (typeof (hostConfig as { projectRoot?: unknown }).projectRoot !== 'string') {
-    ;(hostConfig as Record<string, unknown>).projectRoot = projectRoot
+  // Default to a minimal composite config when --host-config is
+  // omitted: each requested member gets `{}` and the daemon's auto-
+  // config block fills in host/port/password/sandstoneVersion/etc.
+  let rawConfig: HostConfigInput
+  if (opts.hostConfig || opts.hostConfigFile) {
+    rawConfig = await loadHostConfig(opts)
+  } else {
+    rawConfig = Object.fromEntries(hostTypes.map((t) => [t, {}])) as HostConfigInput
   }
   const port = opts.port !== undefined ? Number(opts.port) : 0
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -89,9 +105,15 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     process.exit(2)
   }
 
+  // For >1 host types, --host-config must be a keyed map of HostType → config.
+  // For 1 type, accept the flat shape (legacy back-compat).
+  const perHostConfig = hostTypes.length === 1
+    ? normalizeSingleConfig(rawConfig, hostTypes[0]!, projectRoot)
+    : normalizeCompositeConfig(rawConfig, hostTypes, projectRoot)
+
   const handle = await startDaemon({
-    hostType,
-    hostConfig,
+    hostTypes,
+    perHostConfig,
     projectRoot,
     bind: opts.bind,
     port,
@@ -114,7 +136,76 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
   process.exit(0)
 }
 
-async function loadHostConfig(opts: ConnectCommandOptions): Promise<unknown> {
+/** Default host types for a local-dev daemon: integrated + rcon. */
+export const DEFAULT_HOST_TYPES: readonly HostType[] = ['rcon', 'integrated']
+
+function parseHostTypes(raw: string | undefined): HostType[] {
+  // Default to a composite daemon — the typical local dev setup:
+  // integrated spins up the Fabric server, rcon speaks its console.
+  if (!raw) return [...DEFAULT_HOST_TYPES]
+  const types = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  // Dedup while preserving order.
+  return Array.from(new Set(types)) as HostType[]
+}
+
+/**
+ * Accept the flat single-config shape used when `--host-type` lists one
+ * provider. Inject `projectRoot` + `verbose` defaults so callers can
+ * omit them.
+ */
+function normalizeSingleConfig(
+  raw: HostConfigInput,
+  type: HostType,
+  projectRoot: string,
+): Partial<Record<HostType, HostConfigInput>> {
+  const cfg = { ...raw }
+  if (cfg.projectRoot === undefined) cfg.projectRoot = projectRoot
+  cfg.verbose = true
+  return { [type]: cfg } as Partial<Record<HostType, HostConfigInput>>
+}
+
+/**
+ * Accept the keyed composite shape used when `--host-type` lists multiple
+ * providers. Each member's config is normalized independently.
+ */
+function normalizeCompositeConfig(
+  raw: HostConfigInput,
+  hostTypes: HostType[],
+  projectRoot: string,
+): Partial<Record<HostType, HostConfigInput>> {
+  if (!isObject(raw)) {
+    console.error(
+      chalk`{red Error:} With multiple --host-type values, --host-config must be a JSON object keyed by type (e.g. '{"ssh":{...},"rcon":{...}}')`,
+    )
+    process.exit(2)
+  }
+  const out: Partial<Record<HostType, HostConfigInput>> = {}
+  const keyed = raw as Record<string, unknown>
+  for (const type of hostTypes) {
+    const member = keyed[type]
+    if (!member) {
+      console.error(chalk`{red Error:} --host-config is missing config for '${type}'`)
+      process.exit(2)
+    }
+    if (!isObject(member)) {
+      console.error(chalk`{red Error:} --host-config['${type}'] must be a JSON object`)
+      process.exit(2)
+    }
+    const cfg = { ...member, verbose: true } as HostConfigInput
+    if (cfg.projectRoot === undefined) cfg.projectRoot = projectRoot
+    out[type] = cfg
+  }
+  return out
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v)
+}
+
+async function loadHostConfig(opts: ConnectCommandOptions): Promise<HostConfigInput> {
   if (opts.hostConfigFile) {
     const raw = await Bun.file(opts.hostConfigFile).text()
     return JSON.parse(raw)

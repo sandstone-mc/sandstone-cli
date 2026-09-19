@@ -3,9 +3,20 @@ import os from 'os'
 import crypto from 'crypto'
 import { Worker } from 'node:worker_threads'
 import chalk from 'chalk-template'
+import figlet from 'figlet'
 
 import * as fs from './fs.js'
 import { run } from './shell.js'
+
+/**
+ * Print the "Sandstone" ASCII banner. Long-running interactive commands
+ * (`sand connect`, `sand create`) call this once at startup so the
+ * operator sees the splash; one-shot commands (`sand build`, `sand run`,
+ * `sand install`, etc.) skip it.
+ */
+export function printSplash(): void {
+  console.log(figlet.textSync('Sandstone'))
+}
 
 /** Hash a string or buffer using MD5 */
 export function hash(data: string | Buffer): string {

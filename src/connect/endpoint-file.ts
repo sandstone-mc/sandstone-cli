@@ -43,6 +43,8 @@ export interface EndpointFile {
   url: string
   secret: string
   hostType: string
+  /** When the daemon is a composite of multiple providers, the list of member types. */
+  hostTypes?: string[]
   displayName: string
   capabilities: Record<string, boolean>
   pid: number
@@ -167,6 +169,7 @@ function validateEndpoint(v: unknown): EndpointFile | null {
   if (typeof v.url !== 'string') return null
   if (typeof v.secret !== 'string') return null
   if (typeof v.hostType !== 'string') return null
+  if (v.hostTypes !== undefined && !Array.isArray(v.hostTypes)) return null
   if (typeof v.displayName !== 'string') return null
   if (!isObject(v.capabilities)) return null
   if (typeof v.pid !== 'number') return null

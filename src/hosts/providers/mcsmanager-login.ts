@@ -1,15 +1,7 @@
 import { io as ioClient, type Socket } from 'socket.io-client'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
-import type {
-  HostCapabilities,
-  HostProvider,
-  LogChunkHandler,
-  LogSubscription,
-  McsManagerHostConfig,
-  ServerPath,
-} from '../types.js'
-import { ALL_CAPABILITIES_OFF } from '../types.js'
+import { Capability, type HostCapabilities, type HostProvider, type LogChunkHandler, type LogSubscription, type McsManagerHostConfig, type ServerPath } from '../types.js'
 
 /**
  * MCSManager provider — web-panel Login API variant. Cookie + session-
@@ -52,13 +44,13 @@ interface StreamChannelResponse {
 export class McsManagerLoginHost implements HostProvider {
   readonly type = 'mcsmanager-login' as const
   readonly displayName = 'MCSManager (Login)'
-  readonly capabilities: HostCapabilities = {
-    ...ALL_CAPABILITIES_OFF,
-    readFile: true,
-    writeFile: true,
-    attachLog: true,
-    executeRawCommand: true,
-  }
+  readonly capabilities: HostCapabilities = new Set([
+    Capability.ReadFile,
+    Capability.WriteFile,
+    Capability.AttachLog,
+    Capability.ExecuteRawCommand,
+    Capability.ExecuteRawCommandHasResponse,
+  ])
 
   private readonly config: McsManagerHostConfig
   private cookie = ''

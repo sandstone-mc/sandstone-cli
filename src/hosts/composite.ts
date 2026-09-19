@@ -1,15 +1,15 @@
 import { UnsupportedCapabilityError } from './errors.js'
-import type {
-  CapabilityMethods,
-  HostCapabilities,
-  HostProvider,
-  HostType,
-  LogChunkFanoutHandler,
-  LogChunkHandler,
-  LogSubscription,
-  ServerPath,
-} from './types.js'
-import { mergeCapabilities } from './types.js'
+import { Capability, mergeCapabilities, type CapabilityMethods, type HostCapabilities, type HostProvider, type HostType, type LogChunkFanoutHandler, type LogChunkHandler, type LogSubscription, type ServerPath } from './types.js'
+
+/** Map each dispatchable method name to its {@link Capability}. */
+const METHOD_TO_CAPABILITY: Record<keyof CapabilityMethods, Capability> = {
+  startServer: Capability.StartServer,
+  stopServer: Capability.StopServer,
+  readFile: Capability.ReadFile,
+  writeFile: Capability.WriteFile,
+  attachLog: Capability.AttachLog,
+  executeRawCommand: Capability.ExecuteRawCommand,
+}
 
 /**
  * Multi-provider dispatcher. Each capability is independently dispatched to
@@ -121,7 +121,7 @@ export class CompositeHost implements HostProvider {
     const settled: LogSubscription[] = []
     try {
       for (const m of this.members) {
-        if (!m.capabilities.attachLog) continue
+        if (!m.capabilities.has(Capability.AttachLog)) continue
         if (typeof m.attachLog !== 'function') continue
         const sub = await m.attachLog((lines) => onChunk(m.type as HostType, lines))
         settled.push(sub)
@@ -145,7 +145,7 @@ export class CompositeHost implements HostProvider {
     ...args: Parameters<CapabilityMethods[K]>
   ): Promise<ReturnType<CapabilityMethods[K]>> {
     for (const m of this.members) {
-      if (!m.capabilities[capability]) continue
+      if (!m.capabilities.has(METHOD_TO_CAPABILITY[capability])) continue
       const fn = (m as unknown as Record<string, unknown>)[capability]
       if (typeof fn !== 'function') continue
       const result = await (fn as (...a: unknown[]) => unknown).apply(m, args)

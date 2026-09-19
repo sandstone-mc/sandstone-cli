@@ -2,15 +2,8 @@ import { Client as FtpClient } from 'basic-ftp'
 import { Writable, Readable } from 'node:stream'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
-import type {
-  FtpHostConfig,
-  HostCapabilities,
-  HostProvider,
-  LogChunkHandler,
-  LogSubscription,
-  ServerPath,
-} from '../types.js'
-import { ALL_CAPABILITIES_OFF } from '../types.js'
+import { Capability, type FtpHostConfig, type HostCapabilities, type HostProvider, type LogChunkHandler, type LogSubscription, type ServerPath } from '../types.js'
+
 
 /**
  * FTP provider — read/write files and poll-based log attachment. No
@@ -25,12 +18,11 @@ import { ALL_CAPABILITIES_OFF } from '../types.js'
 export class FtpHost implements HostProvider {
   readonly type = 'ftp' as const
   readonly displayName = 'FTP'
-  readonly capabilities: HostCapabilities = {
-    ...ALL_CAPABILITIES_OFF,
-    readFile: true,
-    writeFile: true,
-    attachLog: true,
-  }
+  readonly capabilities: HostCapabilities = new Set([
+    Capability.ReadFile,
+    Capability.WriteFile,
+    Capability.AttachLog,
+  ])
 
   private readonly client = new FtpClient()
   private readonly config: FtpHostConfig

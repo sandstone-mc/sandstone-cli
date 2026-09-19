@@ -17,6 +17,7 @@ import {
   type PingResult,
   type ReadFileResult,
   type RpcError,
+  type RpcMethod,
   type RpcRequest,
   type RpcResponse,
   type WelcomeEvent,
@@ -104,7 +105,7 @@ export async function connect(opts: ClientOptions): Promise<Client> {
   function call<T>(method: string, params?: unknown): Promise<T> {
     if (closed) return Promise.reject(new Error('connection closed'))
     const id = nextId++
-    const req: RpcRequest = { id, method, params }
+    const req: RpcRequest = { id, method: method as RpcMethod, params }
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         pending.delete(id)

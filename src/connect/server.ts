@@ -29,7 +29,8 @@ import {
   type RpcResponse,
   type WelcomeEvent,
 } from './rpc.js'
-import { ShutdownSignal, dispatch, withHost, type DispatchContext } from './dispatch.js'
+import { capabilitiesToRecord } from '../hosts/types.js'
+import { RpcHandlerError, ShutdownSignal, dispatch, narrowMethod, withHost, type DispatchContext } from './dispatch.js'
 import { SubscriptionRegistry } from './subscriptions.js'
 import type { HostProvider } from '../hosts/types.js'
 import type { SessionContext } from './types.js'
@@ -91,7 +92,7 @@ export function startServer(opts: ServerOptions): RunningServer {
         protocol: PROTOCOL_VERSION,
         hostType: opts.host.type,
         displayName: opts.host.displayName,
-        capabilities: { ...opts.host.capabilities },
+        capabilities: capabilitiesToRecord(opts.host.capabilities),
         pid: process.pid,
         startedAt: new Date(startedAt).toISOString(),
       }
@@ -145,9 +146,22 @@ export function startServer(opts: ServerOptions): RunningServer {
         startedAt,
       }
 
+      // Narrow the wire-string method to RpcMethod so `dispatch<M>` is
+      // typesafe end-to-end. Unknown methods throw here (caught below
+      // and treated as fatal).
+      const typedMethod = narrowMethod(parsed.method)
+
+      const startMs = Date.now()
+      console.error(
+        `[ws] ← ${parsed.method} id=${parsed.id}${parsed.params !== undefined ? ` params=${JSON.stringify(parsed.params)}` : ''}`,
+      )
+
       let response: RpcResponse
       try {
-        const result = await withHost(opts.host, () => dispatch(dispatchCtx, parsed))
+        const result = await withHost(opts.host, () =>
+          dispatch(dispatchCtx, { ...parsed, method: typedMethod }),
+        )
+        response = ok(parsed.id, result)
         response = ok(parsed.id, result)
       } catch (e) {
         if (e instanceof ShutdownSignal) {
@@ -155,17 +169,37 @@ export function startServer(opts: ServerOptions): RunningServer {
           ws.sendText(JSON.stringify(ok(parsed.id, null)))
           ws.sendText(JSON.stringify(event('daemonShutdown', { reason: 'shutdown-rpc' })))
           flushLogs(ctx, ws)
+          console.error(`[ws] → ${parsed.method} id=${parsed.id} shutdown-rpc (${Date.now() - startMs}ms)`)
           queueMicrotask(() => {
             void opts.onShutdown()
           })
           return
         }
-        response = err(parsed.id, {
+        // Handler error (RpcHandlerError) or unknown throw — fatal.
+        // Preserve the handler's typed RpcError if present, otherwise
+        // coerce to InternalError. Send the err, then shut the daemon
+        // down so the failure isn't masked by a transient-looking
+        // response.
+        const rpcErr = e instanceof RpcHandlerError ? e.rpc : {
           code: -32603,
           message: e instanceof Error ? e.message : String(e),
+        }
+        response = err(parsed.id, rpcErr)
+        ws.sendText(JSON.stringify(response))
+        const status = `err:${rpcErr.code}`
+        console.error(
+          `[ws] → ${parsed.method} id=${parsed.id} ${status} ${rpcErr.message} (${Date.now() - startMs}ms) — shutting down`,
+        )
+        queueMicrotask(() => {
+          void opts.onShutdown()
         })
+        return
       }
       ws.sendText(JSON.stringify(response))
+      const status = 'ok'
+      console.error(
+        `[ws] → ${parsed.method} id=${parsed.id} ${status} result=${JSON.stringify(response.result)} (${Date.now() - startMs}ms)`,
+      )
     },
 
     async close(ws) {

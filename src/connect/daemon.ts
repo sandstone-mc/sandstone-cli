@@ -21,11 +21,9 @@
  * RPC + another signal) collapse to one execution.
  */
 
-import { getProvider } from '../hosts/registry.js'
-// Side-effect import — registers every HostProvider factory. Without
-// this the daemon's `getProvider()` lookup returns undefined.
-import '../hosts/index.js'
-import type { HostProvider, HostType } from '../hosts/types.js'
+import chalk from 'chalk-template'
+import { capabilitiesToRecord, type HostConfigInput, type HostProvider, type HostType } from '../hosts/types.js'
+import { BootstrapError, bootstrapHosts } from './bootstrap.js'
 import { startServer } from './server.js'
 import {
   deleteEndpoint,
@@ -38,8 +36,10 @@ import {
 } from './endpoint-file.js'
 
 export interface DaemonOptions {
-  hostType: HostType
-  hostConfig: unknown
+  /** One or more host types. >1 triggers a {@link CompositeHost} wrap. */
+  hostTypes: HostType[]
+  /** Per-type config map. Same shape for single and composite (length-1 map is fine). */
+  perHostConfig: Partial<Record<HostType, HostConfigInput>>
   projectRoot: string
   /** Bind address. Default `127.0.0.1` (loopback only — never LAN). */
   bind?: string
@@ -70,7 +70,10 @@ export interface DaemonHandle {
 }
 
 export class DaemonError extends Error {
-  constructor(message: string, public readonly code: 'already-running' | 'no-factory' | 'host-failed') {
+  constructor(
+    message: string,
+    public readonly code: 'already-running' | 'no-factory' | 'host-failed' | 'start-failed',
+  ) {
     super(message)
     this.name = 'DaemonError'
   }
@@ -99,23 +102,37 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     await deleteEndpoint(opts.projectRoot)
   }
 
-  // 2. Resolve the provider factory.
-  const factory = getProvider(opts.hostType)
-  if (!factory) {
-    throw new DaemonError(`Unknown host type: ${opts.hostType}`, 'no-factory')
-  }
-
-  // 3. Instantiate + connect the host. Long-running (integrated can
-  // take 30s for Fabric install).
-  let host: HostProvider
+  // 2. Instantiate + connect + start via the shared bootstrap. The same
+  // path runs in `sand run` direct mode — both must agree on defaults
+  // (sandstone version, RCON port/password auto-derivation) and on
+  // member lifecycle order.
+  let bootstrapResult: Awaited<ReturnType<typeof bootstrapHosts>>
   try {
-    host = factory.create(opts.hostConfig)
-    await host.connect()
+    bootstrapResult = await bootstrapHosts({
+      hostTypes: opts.hostTypes,
+      perHostConfig: opts.perHostConfig,
+    })
   } catch (e) {
-    throw new DaemonError(
-      `Failed to connect host '${opts.hostType}': ${e instanceof Error ? e.message : String(e)}`,
-      'host-failed',
-    )
+    if (e instanceof BootstrapError) {
+      throw new DaemonError(e.message, e.code)
+    }
+    throw e
+  }
+  const host = bootstrapResult.host
+  const members = bootstrapResult.members
+
+  // 6b. Watch each member for unexpected liveness loss. If any member
+  // dies (JVM exit, RCON socket close, SSH connection drop, etc.), shut
+  // the whole daemon down — half a composite is worse than no daemon.
+  // `disconnect()` on the host clears its handler set, so we don't
+  // need to track unsubscribers.
+  for (const m of members) {
+    if (!m.onDisconnected) continue
+    m.onDisconnected((reason: string) => {
+      shutdownReason = 'host-lost'
+      console.error(`[connect] member '${m.type}' disconnected (${reason}) — shutting down`)
+      void handle.shutdown()
+    })
   }
 
   // 4. Start the WS server. We need the bound port to write the
@@ -147,8 +164,9 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     url: running.url,
     secret,
     hostType: host.type,
+    hostTypes: opts.hostTypes,
     displayName: host.displayName,
-    capabilities: { ...host.capabilities },
+    capabilities: capabilitiesToRecord(host.capabilities),
     pid: process.pid,
     startedAt: new Date().toISOString(),
     projectRoot: opts.projectRoot,
@@ -159,7 +177,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
 
   // 6. Register signal handlers.
   let shuttingDown = false
-  let shutdownReason: 'signal' | 'shutdown-rpc' = 'signal'
+  let shutdownReason: 'signal' | 'shutdown-rpc' | 'host-lost' = 'signal'
   let resolveDone!: () => void
   const done = new Promise<void>((r) => {
     resolveDone = r
@@ -200,17 +218,29 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
 
 async function teardown(
   host: HostProvider,
-  stopServer: () => Promise<void>,
+  stopWS: () => Promise<void>,
   projectRoot: string,
   reason: 'signal' | 'shutdown-rpc' | 'host-lost',
 ): Promise<void> {
-  // Order matters: stop accepting first (server), then disconnect host,
+  // Soft-stop the underlying server first so it gets a chance to save
+  // worlds + broadcast goodbye before we yank the transport. For
+  // composite `[rcon, integrated]` this dispatches to the rcon member,
+  // which sends `stop` via RCON. For single integrated, it sends
+  // SIGTERM + waits. Skipped on 'host-lost' — the host is already gone.
+  if (reason !== 'host-lost' && host.stopServer) {
+    try {
+      await host.stopServer()
+    } catch (err) {
+      console.error(`[connect] host stopServer failed:`, err)
+    }
+  }
+  // Order matters: stop accepting WS clients, then disconnect host,
   // then remove the endpoint file last so a new daemon doesn't try to
   // bind a port we still hold.
   try {
-    await stopServer()
+    await stopWS()
   } catch (err) {
-    console.error(`[connect] server stop failed:`, err)
+    console.error(`[connect] ws server stop failed:`, err)
   }
   try {
     await host.disconnect()

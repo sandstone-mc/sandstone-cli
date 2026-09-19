@@ -1,13 +1,6 @@
 import type { Subprocess } from 'bun'
 
-import type {
-  HostCapabilities,
-  HostProvider,
-  LocalClientHostConfig,
-  LogChunkHandler,
-  LogSubscription,
-} from '../types.js'
-import { ALL_CAPABILITIES_OFF } from '../types.js'
+import { Capability, type HostCapabilities, type HostProvider, type LocalClientHostConfig, type LogChunkHandler, type LogSubscription } from '../types.js'
 import { spawn as shellSpawn } from '../../utils/shell.js'
 
 /**
@@ -23,10 +16,7 @@ import { spawn as shellSpawn } from '../../utils/shell.js'
 export class LocalClientHost implements HostProvider {
   readonly type = 'local-client' as const
   readonly displayName = 'Local Client'
-  readonly capabilities: HostCapabilities = {
-    ...ALL_CAPABILITIES_OFF,
-    attachLog: true,
-  }
+  readonly capabilities: HostCapabilities = new Set([Capability.AttachLog])
 
   private readonly config: LocalClientHostConfig
   private connected = false

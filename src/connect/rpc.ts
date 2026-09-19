@@ -29,12 +29,41 @@ export const SUBPROTOCOL_PREFIX = 'sandstone-connect-v1.'
 /**
  * Client → server request. `id` can be any JSON-serializable scalar the
  * client chooses; the server echoes it back. `params` is method-specific.
+ *
+ * `method` is typed as the union {@link RpcMethod}; the server narrows
+ * wire-string methods to this type via {@link narrowMethod} before
+ * dispatching. The generic `M` parameter lets `dispatch<M>` propagate
+ * concrete result types from {@link RpcMethodResult}.
  */
-export interface RpcRequest {
+export interface RpcRequest<M extends RpcMethod = RpcMethod> {
   id: string | number
-  method: string
+  method: M
   params?: unknown
 }
+
+/** Every RPC method the daemon understands. */
+export type RpcMethod =
+  | 'ping'
+  | 'startServer'
+  | 'stopServer'
+  | 'readFile'
+  | 'writeFile'
+  | 'executeRawCommand'
+  | 'attachLog'
+  | 'unattach'
+  | 'shutdown'
+
+/**
+ * Union of every possible RPC handler return type. `dispatch` and
+ * `route` both return this; the server wraps the value in an
+ * `RpcResponse` envelope regardless of which member it is.
+ */
+export type RpcResult =
+  | PingResult
+  | ReadFileResult
+  | ExecuteRawCommandResult
+  | AttachLogResult
+  | void
 
 /**
  * Server → client response. Exactly one of `result` / `error` is set.
@@ -217,7 +246,9 @@ export function tryParseRequest(raw: string | ArrayBuffer | Uint8Array): RpcRequ
   if (typeof obj.id !== 'string' && typeof obj.id !== 'number') {
     return { code: RpcErrorCode.InvalidRequest, message: 'Missing id' }
   }
-  return { id: obj.id, method: obj.method, params: obj.params }
+  // `method` is a wire string here — the server validates against
+  // `RpcMethod` via `narrowMethod` before invoking `dispatch`.
+  return { id: obj.id, method: obj.method as RpcMethod, params: obj.params }
 }
 
 /**

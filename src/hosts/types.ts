@@ -23,15 +23,57 @@ export type HostType =
 /** Path on the host's filesystem. Provider-specific meaning. */
 export type ServerPath = string
 
-/** Declared at registration time so callers + composite can pick without probing. */
-export interface HostCapabilities {
-  startServer: boolean
-  stopServer: boolean
-  readFile: boolean
-  writeFile: boolean
-  attachLog: boolean
-  executeRawCommand: boolean
-}
+/**
+ * Canonical list of every capability the host system understands. New
+ * capabilities are added here AND in the {@link HostCapabilities} defaults
+ * — the const is the single source of truth for both provider
+ * declarations and runtime checks (`host.capabilities.has(Capability.X)`).
+ */
+export const Capability = {
+  StartServer: 'startServer',
+  StopServer: 'stopServer',
+  ReadFile: 'readFile',
+  WriteFile: 'writeFile',
+  AttachLog: 'attachLog',
+  ExecuteRawCommand: 'executeRawCommand',
+  /**
+   * True when `executeRawCommand` returns a non-empty response from the
+   * underlying server transport (RCON, MCSManager WS, etc.). False when
+   * the method is implemented but the response is unreliable / empty
+   * (e.g. integrated writes to a child stdin and gets no echo). Lets
+   * callers like `sand run --expect` skip the attach-and-await path
+   * when a built-in response already signals success.
+   */
+  ExecuteRawCommandHasResponse: 'executeRawCommandHasResponse',
+} as const
+
+/** Every valid host type literal. */
+export const HOST_TYPES = [
+  'ssh',
+  'rcon',
+  'ftp',
+  'local-client',
+  'integrated',
+  'mcsmanager-login',
+] as const satisfies readonly HostType[]
+
+/** Frozen set of valid host types — use for runtime validation. */
+export const KNOWN_HOST_TYPES: ReadonlySet<HostType> = new Set(HOST_TYPES)
+
+/** Union of every capability name string. */
+export type Capability = (typeof Capability)[keyof typeof Capability]
+
+/**
+ * A host's set of declared capabilities. Stored as a `Set<Capability>`
+ * so providers declare membership with a literal:
+ *
+ *   capabilities: new Set([Capability.StartServer, Capability.StopServer])
+ *
+ * and consumers check with `host.capabilities.has(Capability.X)`. Extensible
+ * by adding a new key to {@link Capability} — every check site gets the
+ * literal name back without touching call sites.
+ */
+export type HostCapabilities = Set<Capability>
 
 export interface LogSubscription {
   /** Stop receiving chunks, release the underlying stream. Idempotent. */
@@ -58,6 +100,13 @@ export interface HostProvider {
   connect(): Promise<void>
   disconnect(): Promise<void>
   isConnected(): boolean
+  /**
+   * Whether the underlying server/process is currently running. Lets
+   * `sand run` distinguish "we started it" (safe to send `stop` on
+   * exit) from "someone else started it" (don't touch their session).
+   * Optional — defaults to false if not implemented.
+   */
+  isRunning?(): boolean
 
   startServer?(): Promise<void>
   stopServer?(): Promise<void>
@@ -66,11 +115,34 @@ export interface HostProvider {
   attachLog?(onChunk: LogChunkHandler): Promise<LogSubscription>
   /** Minecraft console command only. RCON / MCSManager WS / server stdin. */
   executeRawCommand?(command: string): Promise<string>
+  /**
+   * Subscribe to unexpected liveness loss — the spawned child exited,
+   * the socket disconnected, etc. The daemon uses this to detect when
+   * any member of a composite has gone away and trigger a coordinated
+   * shutdown.
+   *
+   * `handler` receives a short reason string for logging. Returns an
+   * unsubscribe function. Not invoked for graceful `disconnect()`
+   * calls — only for unexpected exits.
+   */
+  onDisconnected?(handler: (reason: string) => void): () => void
 }
 
 /** Per-provider config shapes — exported from each provider module. */
 
-export interface SshHostConfig {
+/**
+ * Fields every host config shares. Concrete configs extend this so
+ * `HostConfigInput` (the CLI's parsed JSON type) carries `projectRoot`
+ * uniformly without per-provider unions.
+ */
+export interface BaseHostConfig {
+  /** Absolute path to the user's sandstone project root. Injected by `sand connect` / `sand run` from `--path`. */
+  projectRoot?: string
+  /** Set by `sand connect` so the integrated host prints lifecycle events. Ignored by other providers. */
+  verbose?: boolean
+}
+
+export interface SshHostConfig extends BaseHostConfig {
   host: string
   port?: number
   username: string
@@ -92,13 +164,13 @@ export interface SshHostConfig {
   logPath?: string
 }
 
-export interface RconHostConfig {
+export interface RconHostConfig extends BaseHostConfig {
   host: string
   port?: number
   password: string
 }
 
-export interface FtpHostConfig {
+export interface FtpHostConfig extends BaseHostConfig {
   host: string
   port?: number
   user: string
@@ -110,16 +182,42 @@ export interface FtpHostConfig {
   pollIntervalMs?: number
 }
 
-export interface LocalClientHostConfig {
+export interface LocalClientHostConfig extends BaseHostConfig {
   /** Path to the launcher-managed Minecraft dir (saves/, logs/, etc). Comes from MinecraftInstance.minecraftPath. */
   clientPath: string
   /** Override the default log location. Default: `${clientPath}/logs/latest.log`. */
   logPath?: string
 }
 
-export interface IntegratedHostConfig {
+export interface IntegratedHostConfig extends BaseHostConfig {
   /** Absolute path to the directory the CLI should manage the Fabric server inside. Default: `${projectRoot}/.sandstone/mc-server/`. */
   serverDir?: string
+  /**
+   * When true, the host logs lifecycle events to stdout
+   * ("Done (" detected, mod updates applied, etc.). Useful for long-
+   * running daemons where the operator wants to see the boot timeline;
+   * noisy for one-shot `sand run` invocations. Default false.
+   */
+  verbose?: boolean
+  /**
+   * Minecraft server port written to `server.properties` as
+   * `server-port=`. If `0` or omitted, the host scans starting at 25565
+   * and writes the first bindable port it finds. Pass an explicit value
+   * (e.g. 25565) to pin it.
+   */
+  serverPort?: number
+  /**
+   * RCON configuration. When enabled, the host writes `enable-rcon`,
+   * `rcon.port`, and `rcon.password` to `server.properties` so the
+   * JVM starts its RCON listener. Pair this with a separate `rcon`
+   * provider in a composite daemon to drive the console over RCON.
+   */
+  rcon?: {
+    enabled?: boolean
+    password?: string
+    /** Defaults to 25575 (Minecraft's standard RCON port). */
+    port?: number
+  }
   /**
    * Sandstone version (e.g. "1.2.5"). The MC version + Java major are
    * derived from this via `sandstoneToMcVersion` + `requiredJavaMajor`.
@@ -193,6 +291,7 @@ export interface IntegratedHostModsConfig {
   worldgenDevtools?: boolean
   quickPack?: boolean
   lithium?: boolean
+  krypton?: boolean
   ferriteCore?: boolean
   lazyDfu?: boolean
   scalablelux?: boolean
@@ -208,7 +307,7 @@ export interface IntegratedHostModsConfig {
   }>
 }
 
-export interface McsManagerHostConfig {
+export interface McsManagerHostConfig extends BaseHostConfig {
   /** e.g. https://panel.example.com */
   endpoint: string
   daemonId: string
@@ -229,31 +328,50 @@ export interface CapabilityMethods {
   executeRawCommand(command: string): Promise<string>
 }
 
-export const ALL_CAPABILITIES_OFF: HostCapabilities = {
-  startServer: false,
-  stopServer: false,
-  readFile: false,
-  writeFile: false,
-  attachLog: false,
-  executeRawCommand: false,
-}
+/**
+ * Union of every host config shape, all fields optional. Lets the CLI
+ * layer type `--host-config` JSON as a single value (`HostConfigInput`)
+ * without per-provider casting. Each provider's factory narrows to its
+ * own config type at the boundary.
+ */
+export type HostConfigInput = Partial<
+  | SshHostConfig
+  | RconHostConfig
+  | FtpHostConfig
+  | LocalClientHostConfig
+  | IntegratedHostConfig
+  | McsManagerHostConfig
+>
 
-export const ALL_CAPABILITIES_ON: HostCapabilities = {
-  startServer: true,
-  stopServer: true,
-  readFile: true,
-  writeFile: true,
-  attachLog: true,
-  executeRawCommand: true,
-}
+/**
+ * Composite host config — keyed map of host type to that type's config.
+ * Used by `sand connect --host-type ssh,rcon --host-config '{...}'` to
+ * instantiate multiple providers and wrap them in a {@link CompositeHost}.
+ * When `--host-type` lists only one provider, use the flat
+ * {@link HostConfigInput} instead — composite is for ≥2.
+ */
+export type CompositeHostConfigInput = Partial<Record<HostType, HostConfigInput>>
 
-/** Merge a list of capability sets with OR semantics. Used by CompositeHost. */
+export const ALL_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
+  Capability.StartServer,
+  Capability.StopServer,
+  Capability.ReadFile,
+  Capability.WriteFile,
+  Capability.AttachLog,
+  Capability.ExecuteRawCommand,
+  Capability.ExecuteRawCommandHasResponse,
+])
+
+/** Merge capability sets with OR semantics. Used by CompositeHost. */
 export function mergeCapabilities(sets: HostCapabilities[]): HostCapabilities {
-  const result: HostCapabilities = { ...ALL_CAPABILITIES_OFF }
-  for (const set of sets) {
-    for (const key of Object.keys(result) as Array<keyof HostCapabilities>) {
-      if (set[key]) result[key] = true
-    }
-  }
-  return result
+  const out = new Set<Capability>()
+  for (const set of sets) for (const cap of set) out.add(cap)
+  return out
+}
+
+/** Serialize a `Set<Capability>` to the wire `Record<string, boolean>`. */
+export function capabilitiesToRecord(caps: HostCapabilities): Record<string, boolean> {
+  const out: Record<string, boolean> = {}
+  for (const cap of ALL_CAPABILITIES) out[cap] = caps.has(cap)
+  return out
 }

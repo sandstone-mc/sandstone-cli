@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 import { Argument, Command } from 'commander'
 import chalk from 'chalk-template'
-import figlet from 'figlet'
 
 import { CLI_VERSION } from './version.js'
 import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand } from './commands/index.js'
@@ -14,8 +13,6 @@ if (Bun.which('bun') === null) {
 }
 
 const commander = new Command()
-
-console.log(figlet.textSync('Sandstone'));
 
 const CLI = commander
   .version(CLI_VERSION, '-v, --version')
@@ -142,12 +139,14 @@ CLI
 
 CLI
   .command('run')
-  .description('Run a Minecraft console command on the configured server. Uses the live sand connect daemon if one is running, otherwise connects directly. ⛏')
+  .description('Run a Minecraft console command on the configured server. Uses the live sand connect daemon if one is running, otherwise connects directly. With --expect, waits up to --timeout seconds for a log line matching the regex. ⛏')
   .addOption(BuildOptions.get('path'))
   .addOption(BuildOptions.get('hostType'))
   .addOption(BuildOptions.get('hostConfig'))
   .addOption(BuildOptions.get('hostConfigFile'))
-  .action((commandAndArgs: string[], opts: { path: string; hostType?: string; hostConfig?: string; hostConfigFile?: string }) => runCommand(opts, commandAndArgs))
+  .addOption(BuildOptions.get('expect'))
+  .addOption(BuildOptions.get('timeout'))
+  .action((commandAndArgs: string[], opts: { path: string; hostType?: string; hostConfig?: string; hostConfigFile?: string; expect?: string; timeout?: string }) => runCommand(opts, commandAndArgs))
   .addArgument(new Argument('<command...>', 'The Minecraft console command to run (e.g. "op MulverineX", "say Hello").'))
 
 

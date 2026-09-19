@@ -2,15 +2,7 @@ import { Readable } from 'node:stream'
 import { NodeSSH, type Config as NodeSshConfig } from 'node-ssh'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
-import type {
-  HostCapabilities,
-  HostProvider,
-  LogChunkHandler,
-  LogSubscription,
-  ServerPath,
-  SshHostConfig,
-} from '../types.js'
-import { ALL_CAPABILITIES_OFF } from '../types.js'
+import { Capability, type HostCapabilities, type HostProvider, type LogChunkHandler, type LogSubscription, type ServerPath, type SshHostConfig } from '../types.js'
 
 /**
  * SSH provider — file I/O (SFTP), shell exec, and log attachment via the
@@ -30,14 +22,13 @@ import { ALL_CAPABILITIES_OFF } from '../types.js'
 export class SshHost implements HostProvider {
   readonly type = 'ssh' as const
   readonly displayName = 'SSH'
-  readonly capabilities: HostCapabilities = {
-    ...ALL_CAPABILITIES_OFF,
-    startServer: true,
-    stopServer: true,
-    readFile: true,
-    writeFile: true,
-    attachLog: true,
-  }
+  readonly capabilities: HostCapabilities = new Set([
+    Capability.StartServer,
+    Capability.StopServer,
+    Capability.ReadFile,
+    Capability.WriteFile,
+    Capability.AttachLog,
+  ])
 
   private readonly ssh = new NodeSSH()
   private readonly config: SshHostConfig

@@ -11,9 +11,7 @@
 
 import {
   PROTOCOL_VERSION,
-  err,
   errorToRpc,
-  ok,
   type AttachLogParams,
   type AttachLogResult,
   type ExecuteRawCommandParams,
@@ -22,7 +20,9 @@ import {
   type ReadFileParams,
   type ReadFileResult,
   type RpcError,
+  type RpcMethod,
   type RpcRequest,
+  type RpcResult,
   type RpcResponse,
   type StopServerParams,
   type UnattachParams,
@@ -30,6 +30,7 @@ import {
 } from './rpc.js'
 import type { SubscriptionRegistry } from './subscriptions.js'
 import { RpcErrorCode } from './rpc.js'
+import { Capability, capabilitiesToRecord } from '../hosts/types.js'
 import type { HostProvider, LogChunkHandler, ServerPath } from '../hosts/types.js'
 
 export interface DispatchContext {
@@ -53,26 +54,75 @@ export class ShutdownSignal extends Error {
 }
 
 /**
- * Dispatch one parsed request. Returns the response envelope (always —
- * callers don't need to construct one). Throws {@link ShutdownSignal}
- * when the request was `shutdown` so the server can run its teardown
- * sequence (which can't fit inside a normal response).
+ * Wraps a typed RpcError that should be forwarded verbatim to the
+ * client. `dispatch` throws this for handler errors so the server can
+ * distinguish "bad request" from "internal bug" — the former surfaces
+ * with the handler's original code (e.g. -32602 InvalidParams), the
+ * latter as -32603.
  */
-export async function dispatch(ctx: DispatchContext, req: RpcRequest): Promise<RpcResponse> {
+export class RpcHandlerError extends Error {
+  constructor(public readonly rpc: RpcError) {
+    super(rpc.message)
+    this.name = 'RpcHandlerError'
+  }
+}
+
+/**
+ * Dispatch one parsed request. Returns the handler's result value
+ * (typed as the union {@link RpcResult}). Throws
+ * {@link ShutdownSignal} for the `shutdown` RPC and
+ * {@link RpcHandlerError} for any other handler error so the server
+ * can react (the policy is: any handler error → shut the daemon down).
+ */
+export async function dispatch(
+  ctx: DispatchContext,
+  req: RpcRequest,
+): Promise<RpcResult> {
   try {
-    const result = await route(ctx, req.method, req.params)
-    return ok(req.id, result)
+    return await route(ctx, req.method, req.params)
   } catch (e) {
     if (e instanceof ShutdownSignal) throw e
-    return err(req.id, errorToRpc(e))
+    throw new RpcHandlerError(errorToRpc(e))
   }
+}
+
+/** Set of every valid method name — used by the server to narrow a wire-string `method` to {@link RpcMethod}. */
+const KNOWN_METHODS: ReadonlySet<string> = new Set<RpcMethod>([
+  'ping',
+  'startServer',
+  'stopServer',
+  'readFile',
+  'writeFile',
+  'executeRawCommand',
+  'attachLog',
+  'unattach',
+  'shutdown',
+])
+
+/** Narrow a parsed-wire method string to {@link RpcMethod}, throwing on unknown. */
+export function narrowMethod(method: string): RpcMethod {
+  if (!KNOWN_METHODS.has(method)) {
+    throw rpcError(RpcErrorCode.MethodNotFound, `Unknown method: ${method}`)
+  }
+  return method as RpcMethod
 }
 
 // ---------------------------------------------------------------------------
 // Routing
 // ---------------------------------------------------------------------------
 
-async function route(ctx: DispatchContext, method: string, params: unknown): Promise<unknown> {
+/**
+ * Internal method→handler dispatch. Each case returns the typed result
+ * for that method; the union via `RpcMethodResult[M]` keeps the
+ * `dispatch<M>(req)` signature typesafe end-to-end.
+ */
+async function route(
+  ctx: DispatchContext,
+  method: RpcMethod,
+  params: unknown,
+): Promise<RpcResult> {
+  // Exhaustiveness check at the bottom catches new methods without a
+  // case here at compile time.
   switch (method) {
     case 'ping':
       return handlePing(ctx)
@@ -92,8 +142,11 @@ async function route(ctx: DispatchContext, method: string, params: unknown): Pro
       return handleUnattach(ctx, params)
     case 'shutdown':
       throw new ShutdownSignal()
-    default:
-      throw rpcError(RpcErrorCode.MethodNotFound, `Unknown method: ${method}`)
+    default: {
+      const _exhaustive: never = method
+      void _exhaustive
+      throw rpcError(RpcErrorCode.MethodNotFound, `Unknown method: ${method as string}`)
+    }
   }
 }
 
@@ -106,54 +159,54 @@ async function handlePing(ctx: DispatchContext): Promise<PingResult> {
     protocol: PROTOCOL_VERSION,
     hostType: ctx.host.type,
     displayName: ctx.host.displayName,
-    capabilities: { ...ctx.host.capabilities },
+    capabilities: capabilitiesToRecord(ctx.host.capabilities),
     pid: process.pid,
     uptimeMs: Date.now() - ctx.startedAt,
   }
 }
 
 async function handleStartServer(): Promise<void> {
-  if (!capable('startServer')) throw new UnsupportedCapabilityRpc('startServer')
-  await runHost((h) => (h.startServer ?? notImplemented('startServer')).bind(h)())
+  if (!capable(Capability.StartServer)) throw new UnsupportedCapabilityRpc(Capability.StartServer)
+  await runHost((h) => (h.startServer ?? notImplemented(Capability.StartServer)).bind(h)())
 }
 
 async function handleStopServer(params: unknown): Promise<void> {
-  if (!capable('stopServer')) throw new UnsupportedCapabilityRpc('stopServer')
+  if (!capable(Capability.StopServer)) throw new UnsupportedCapabilityRpc(Capability.StopServer)
   // Optional `{ timeoutSeconds?: number }`. We only forward it to the
   // provider if the config supports it — today no provider does, so the
   // field is parsed but ignored. Documented as a forward-compatible
   // hint.
   void (params as StopServerParams | undefined)
-  await runHost((h) => (h.stopServer ?? notImplemented('stopServer')).bind(h)())
+  await runHost((h) => (h.stopServer ?? notImplemented(Capability.StopServer)).bind(h)())
 }
 
 async function handleReadFile(params: unknown): Promise<ReadFileResult> {
-  if (!capable('readFile')) throw new UnsupportedCapabilityRpc('readFile')
+  if (!capable(Capability.ReadFile)) throw new UnsupportedCapabilityRpc(Capability.ReadFile)
   const { path } = parseParams<ReadFileParams>(params, ['path'])
   const buf = await runHost<Buffer>((h) =>
-    (h.readFile ?? notImplemented('readFile')).bind(h)(path as ServerPath),
+    (h.readFile ?? notImplemented(Capability.ReadFile)).bind(h)(path as ServerPath),
   )
   return { data: buf.toString('base64'), size: buf.length }
 }
 
 async function handleWriteFile(params: unknown): Promise<void> {
-  if (!capable('writeFile')) throw new UnsupportedCapabilityRpc('writeFile')
+  if (!capable(Capability.WriteFile)) throw new UnsupportedCapabilityRpc(Capability.WriteFile)
   const { path, data, encoding } = parseParams<WriteFileParams>(params, ['path', 'data'])
   const bytes = encoding === 'utf-8' ? Buffer.from(data, 'utf-8') : Buffer.from(data, 'base64')
-  await runHost((h) => (h.writeFile ?? notImplemented('writeFile')).bind(h)(path as ServerPath, bytes))
+  await runHost((h) => (h.writeFile ?? notImplemented(Capability.WriteFile)).bind(h)(path as ServerPath, bytes))
 }
 
 async function handleExecuteRawCommand(params: unknown): Promise<ExecuteRawCommandResult> {
-  if (!capable('executeRawCommand')) throw new UnsupportedCapabilityRpc('executeRawCommand')
+  if (!capable(Capability.ExecuteRawCommand)) throw new UnsupportedCapabilityRpc(Capability.ExecuteRawCommand)
   const { command } = parseParams<ExecuteRawCommandParams>(params, ['command'])
   const output = await runHost<string>((h) =>
-    (h.executeRawCommand ?? notImplemented('executeRawCommand')).bind(h)(command),
+    (h.executeRawCommand ?? notImplemented(Capability.ExecuteRawCommand)).bind(h)(command),
   )
   return { output }
 }
 
 async function handleAttachLog(ctx: DispatchContext, params: unknown): Promise<AttachLogResult> {
-  if (!capable('attachLog')) throw new UnsupportedCapabilityRpc('attachLog')
+  if (!capable(Capability.AttachLog)) throw new UnsupportedCapabilityRpc(Capability.AttachLog)
   const { regex } = parseParams<AttachLogParams>(params, [])
   const filter = regex ? new RegExp(regex) : null
 
@@ -186,9 +239,9 @@ async function handleUnattach(ctx: DispatchContext, params: unknown): Promise<vo
 // ---------------------------------------------------------------------------
 
 let currentHost: HostProvider | null = null
-function capable(cap: keyof HostProvider['capabilities']): boolean {
+function capable(cap: Capability): boolean {
   if (!currentHost) return false
-  return currentHost.capabilities[cap]
+  return currentHost.capabilities.has(cap)
 }
 
 /**

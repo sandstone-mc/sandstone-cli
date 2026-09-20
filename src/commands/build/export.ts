@@ -110,11 +110,15 @@ export async function createSymlink(
   folder: string,
   packName: string,
   newCache: SandstoneCache,
+  /** Root directory holding `allowed_symlinks.txt` — the `.minecraft` folder
+   *  for client exports, the server working directory for server exports. */
   minecraftPath: string,
   targetPath: string,
   linkPath: string
 ) {
-  // Update allowed_symlinks.txt for Minecraft
+  // Update allowed_symlinks.txt for Minecraft. Both the client launcher and
+  // the dedicated server read this file from their working directory to
+  // permit symlinked datapacks/resourcepacks.
   let rawPath = path.resolve(path.join(folder))
   let sep: string = path.sep
   if (process.platform === 'win32') {
@@ -331,6 +335,7 @@ export async function exportPack(
   destPath: string,
   packType: PackType,
   archivedOutput: boolean,
+  target: 'client' | 'server',
 ) {
   // Ensure the destination's parent directory exists. Fresh or lightly-used
   // .minecraft installs may not yet have a global `datapacks/` or
@@ -343,9 +348,13 @@ export async function exportPack(
     const archivePath = path.join(local.outputFolder, 'archives', `${local.packName}_${packType.type}.zip`)
     await local.fs.copyFile(archivePath, `${destPath}.zip`)
   } else if (getSymlinksAvailable()) {
-    // Create symlink (only if it doesn't already exist)
+    // Create symlink (only if it doesn't already exist). For server exports
+    // the allowlist lives in the server's working directory (same convention
+    // as the client launcher's `.minecraft/` folder); pass the matching root
+    // so `allowed_symlinks.txt` is updated there too.
     if (!local.oldCache?.symlinks?.includes(destPath)) {
-      await createSymlink(local.folder, local.packName, local.newCache!, local.clientPath!, path.join(local.outputFolder, packType.type), destPath)
+      const allowListRoot = target === 'server' ? local.serverPath! : local.clientPath!
+      await createSymlink(local.folder, local.packName, local.newCache!, allowListRoot, path.join(local.outputFolder, packType.type), destPath)
     }
   } else {
     // Copy files

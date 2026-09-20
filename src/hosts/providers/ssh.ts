@@ -208,10 +208,21 @@ export class SshHost implements HostProvider {
     onChunk: LogChunkHandler,
   ): Promise<LogSubscription> {
     const sftp = await this.ssh.requestSFTP()
-    let stream: Readable = sftp.createReadStream(logPath, { start: 0 })
+    // Prime: stat the file first so we start streaming from EOF —
+    // subscribers only see lines emitted after they subscribed. Same
+    // contract as the FTP poller's `lastSize` prime and the
+    // `tail -F -n 0` strategy.
+    const initialStat = await new Promise<{ size: number } | null>((resolve) => {
+      sftp.stat(logPath, (err: Error | null, stats?: { size: number }) => {
+        if (err || !stats) resolve(null)
+        else resolve({ size: stats.size })
+      })
+    })
+    const startAt = initialStat?.size ?? 0
+    let stream: Readable = sftp.createReadStream(logPath, { start: startAt })
     let buffer = ''
     let watcher: NodeJS.Timeout | null = null
-    let lastSize = 0
+    let lastSize = startAt
     let stopped = false
 
     const flushLines = () => {
@@ -306,9 +317,11 @@ export class SshHost implements HostProvider {
     }
 
     // Fire-and-forget; node-ssh does not expose a direct kill for an exec
-    // channel, so we let it run until disconnect().
+    // channel, so we let it run until disconnect(). `-n 0` skips existing
+    // content and starts at EOF — subscribers get only lines emitted
+    // after they subscribed (matches local-client + integrated).
     void this.ssh
-      .execCommand(`tail -F ${JSON.stringify(logPath)}`, {
+      .execCommand(`tail -F -n 0 ${JSON.stringify(logPath)}`, {
         cwd: this.config.serverDir,
         onStdout: (chunk: Buffer) => {
           if (stopped) return

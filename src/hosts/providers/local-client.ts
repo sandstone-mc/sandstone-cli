@@ -43,8 +43,11 @@ export class LocalClientHost implements HostProvider {
 
     // shellSpawn wraps Bun.spawn (returns Subprocess). Read stdout via
     // async iteration; stderr is drained silently (tail prints
-    // "file truncated" notices there).
-    const child: Subprocess = shellSpawn(['tail', '-F', logPath], {
+    // "file truncated" notices there). `-n 0` skips existing content
+    // and starts tailing from the current end-of-file — subscribers get
+    // only lines emitted after they subscribed (consistent with the
+    // integrated host, which streams live JVM stdout from spawn).
+    const child: Subprocess = shellSpawn(['tail', '-F', '-n', '0', logPath], {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 

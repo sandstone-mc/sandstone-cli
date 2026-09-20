@@ -16,17 +16,45 @@
  */
 
 import { randomBytes } from 'node:crypto'
+import path from 'path'
 import chalk from 'chalk-template'
 
 import { getAvailableSandstoneVersions } from '../versionDiscovery.js'
 import { getProvider } from '../../hosts/registry.js'
 import '../../hosts/index.js' // side-effect: register all providers
 import { CompositeHost } from '../../hosts/composite.js'
+import * as fs from '../../utils/fs.js'
+import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
+import type { SandstoneConfig } from 'sandstone'
 import type { HostConfigInput, HostProvider, HostType } from '../../hosts/types.js'
+
+/**
+ * Pure helper: pull `clientPath` out of an already-loaded
+ * `SandstoneConfig` for the `local-client` host's default config.
+ * Returns `null` when the config has no usable `saveOptions.clientPath`.
+ *
+ * Used by {@link bootstrapHosts} after it loads the project's
+ * `sandstone.config.ts` for `sandstoneConfig` injection — re-using the
+ * same load avoids a duplicate `import()` per invocation.
+ */
+export function localClientConfigFromSandstoneConfig(
+  cfg: SandstoneConfig | undefined,
+): HostConfigInput | null {
+  const clientPath = cfg?.saveOptions?.clientPath
+  if (typeof clientPath !== 'string' || clientPath.length === 0) return null
+  return { clientPath } as HostConfigInput
+}
 
 export interface BootstrapOptions {
   hostTypes: HostType[]
   perHostConfig: Partial<Record<HostType, HostConfigInput>>
+  /**
+   * When true, the caller passed explicit `--host-type` / `--host-config` /
+   * `--host-config-file`. Suppresses the auto-`local-client` augmentation
+   * (explicit settings always win — the user may have intentionally
+   * omitted `local-client`).
+   */
+  userProvidedHostSettings?: boolean
   /** When true, suppress the `[bootstrap]` informational logs (one-shot
    *  invocations like `sand run` shouldn't announce every default it
    *  derived). Errors and warnings still print. */
@@ -62,11 +90,48 @@ export class BootstrapError extends Error {
  * (which then issues the command).
  */
 export async function bootstrapHosts(opts: BootstrapOptions): Promise<BootstrapResult> {
-  const perHostConfig = await resolveDefaults(opts.hostTypes, opts.perHostConfig, opts.silent ?? false)
+  const hostTypes = [...opts.hostTypes]
+  const perHostConfig = await resolveDefaults(hostTypes, opts.perHostConfig, opts.silent ?? false)
+
+  // Auto-load the project's sandstone.config.ts (if any) and thread it
+  // through to every host so providers that care about the pack name,
+  // save options, etc. don't have to re-import the file themselves.
+  const autocfg = await loadSandstoneConfig(process.cwd())
+  if (autocfg) {
+    for (const type of hostTypes) {
+      const existing = perHostConfig[type]
+      if (!existing) continue
+      if (!('sandstoneConfig' in existing)) {
+        perHostConfig[type] = { ...existing, sandstoneConfig: autocfg }
+      }
+    }
+  }
+
+  // Auto-include `local-client` when the user passed no host settings and
+  // saveOptions.clientPath is set in the just-loaded config. Re-uses the
+  // load above so we don't `import()` the config twice per invocation.
+  // The `userProvidedHostSettings` flag is the gate; explicit host flags
+  // always win, even if they happen to mention `local-client`.
+  // NOTE: must mutate the LOCAL `hostTypes` / `perHostConfig` (resolved
+  // copies), not `opts.*` — `resolveDefaults` deep-copies the caller's
+  // perHostConfig and the local instance loop reads from `perHostConfig`,
+  // so writing to `opts.perHostConfig` would leave the new member with
+  // undefined config and the LocalClientHost would throw on attachLog.
+  if (!opts.userProvidedHostSettings) {
+    const localClientCfg = localClientConfigFromSandstoneConfig(autocfg ?? undefined)
+    if (localClientCfg) {
+      hostTypes.push('local-client')
+      const existing = perHostConfig['local-client']
+      perHostConfig['local-client'] = {
+        ...(existing ?? {}),
+        ...localClientCfg,
+      }
+    }
+  }
 
   // Instantiate every requested provider.
   const instances: Array<{ type: HostType; member: HostProvider }> = []
-  for (const type of opts.hostTypes) {
+  for (const type of hostTypes) {
     const factory = getProvider(type)
     if (!factory) {
       throw new BootstrapError(`Unknown host type: ${type}`, 'no-factory')
@@ -165,20 +230,38 @@ async function resolveDefaults(
   if (has('integrated')) {
     const integratedCfg = (out.integrated ?? {}) as Record<string, unknown>
     if (typeof integratedCfg.sandstoneVersion !== 'string') {
+      // Prefer the version actually installed in the project's
+      // node_modules — the user has already committed to one, defaulting
+      // to npm-latest would silently drift the server MC version. Only
+      // fall through to a network fetch when there's no installed copy.
+      let resolved = false
       try {
-        const versions = await getAvailableSandstoneVersions()
-        const top = versions[0]
-        if (top) {
-          const tag = `${top.major}.${top.minor}.0`
-          integratedCfg.sandstoneVersion = tag
-          log(chalk`{cyan [bootstrap]} sandstoneVersion not set -- using latest ${tag}`)
-        }
-      } catch (err) {
-        // Surface network errors even in silent mode — they affect
-        // correctness, not just chat.
-        console.error(
-          `[bootstrap] could not fetch latest sandstone version: ${err instanceof Error ? err.message : String(err)}`,
+        const pkg = await fs.readJSON<{ version?: string }>(
+          path.join(process.cwd(), 'node_modules', 'sandstone', 'package.json'),
         )
+        if (pkg.version) {
+          integratedCfg.sandstoneVersion = pkg.version
+          log(chalk`{cyan [bootstrap]} sandstoneVersion not set -- using installed ${pkg.version}`)
+          resolved = true
+        }
+      } catch { /* not installed locally — fall through to latest */ }
+
+      if (!resolved) {
+        try {
+          const versions = await getAvailableSandstoneVersions()
+          const top = versions[0]
+          if (top) {
+            const tag = `${top.major}.${top.minor}.0`
+            integratedCfg.sandstoneVersion = tag
+            log(chalk`{cyan [bootstrap]} sandstoneVersion not set -- using latest ${tag}`)
+          }
+        } catch (err) {
+          // Surface network errors even in silent mode — they affect
+          // correctness, not just chat.
+          console.error(
+            `[bootstrap] could not fetch latest sandstone version: ${err instanceof Error ? err.message : String(err)}`,
+          )
+        }
       }
       out.integrated = integratedCfg as HostConfigInput
     }

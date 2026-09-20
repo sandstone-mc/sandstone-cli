@@ -30,7 +30,7 @@ import {
   type WelcomeEvent,
 } from './rpc.js'
 import { capabilitiesToRecord } from '../../hosts/types.js'
-import { RpcHandlerError, ShutdownSignal, dispatch, narrowMethod, withHost, type DispatchContext } from './dispatch.js'
+import { RpcHandlerError, ShutdownSignal, dispatch, narrowMethod, withHost, attachLogsCapability, type DispatchContext } from './dispatch.js'
 import { SubscriptionRegistry } from './subscriptions.js'
 import type { HostProvider } from '../../hosts/types.js'
 import type { SessionContext } from './types.js'
@@ -65,12 +65,40 @@ export interface RunningServer {
   server: ReturnType<typeof Bun.serve>
   /** Gracefully stop. Returns when all handlers have exited. */
   stop(): Promise<void>
+  /**
+   * Send a server-pushed event to every open WS session. Also flips
+   * each session's `shuttingDown` flag so further RPCs from that client
+   * are answered with a synthetic `'daemon shutting down'` error. Used
+   * by the daemon during teardown so clients can flush + close cleanly
+   * before the WS is killed.
+   */
+  broadcast(eventName: string, data: unknown): void
 }
 
 export function startServer(opts: ServerOptions): RunningServer {
   const subscriptions = new SubscriptionRegistry()
   const startedAt = Date.now()
-  const sessions = new WeakMap<ServerWebSocket<WsData>, SessionContext>()
+  // Map (not WeakMap) so we can iterate for `broadcast` — teardown sends
+  // a `daemonShutdown` event to every open session before closing the
+  // WS so clients can flush state cleanly.
+  const sessions = new Map<ServerWebSocket<WsData>, SessionContext>()
+
+  // Hoisted helper used by both the shutdown-RPC path (below) and the
+  // returned `RunningServer.broadcast`. Flips each session's
+  // `shuttingDown` flag so further RPCs from that client are answered
+  // with the synthetic `'daemon shutting down'` error.
+  function broadcast(eventName: string, data: unknown): void {
+    const envelope = JSON.stringify(event(eventName, data))
+    for (const [ws, ctx] of sessions) {
+      ctx.shuttingDown = true
+      try {
+        ws.sendText(envelope)
+      } catch {
+        // Client may have just disconnected; ignore — `close` will
+        // clean up its session entry.
+      }
+    }
+  }
 
   const wsHandler: WebSocketHandler<WsData> = {
     maxPayloadLength: MAX_PAYLOAD,
@@ -82,17 +110,24 @@ export function startServer(opts: ServerOptions): RunningServer {
       const ctx: SessionContext = {
         host: opts.host,
         subscriptions: new Set<string>(),
-        pendingLines: [],
-        flushTimer: null,
+        pendingBySub: new Map(),
+        flushTimerBySub: new Map(),
         shuttingDown: false,
       }
       sessions.set(ws, ctx)
+      console.log(`[ws] connection opened (${ws.remoteAddress})`)
 
+      const welcomeCaps = capabilitiesToRecord(opts.host.capabilities)
+      // Same gating as the `ping` RPC handler — clients pick
+      // attachLog vs attachLogs based on this welcome.
+      if (attachLogsCapability(opts.host)) {
+        welcomeCaps.attachLogs = true
+      }
       const welcome: WelcomeEvent = {
         protocol: PROTOCOL_VERSION,
         hostType: opts.host.type,
         displayName: opts.host.displayName,
-        capabilities: capabilitiesToRecord(opts.host.capabilities),
+        capabilities: welcomeCaps,
         pid: process.pid,
         startedAt: new Date(startedAt).toISOString(),
       }
@@ -142,7 +177,7 @@ export function startServer(opts: ServerOptions): RunningServer {
         host: opts.host,
         subscriptions,
         ws,
-        pushLog: (lines) => pushLog(ctx, ws, lines),
+        pushLog: (lines, subscriptionId, hostType) => pushLog(ctx, ws, subscriptionId, lines, hostType),
         startedAt,
       }
 
@@ -165,10 +200,12 @@ export function startServer(opts: ServerOptions): RunningServer {
         response = ok(parsed.id, result)
       } catch (e) {
         if (e instanceof ShutdownSignal) {
-          ctx.shuttingDown = true
+          // Reply OK to the requester, then broadcast the shutdown
+          // event to every session (including this one) so all clients
+          // get a chance to flush + close cleanly.
           ws.sendText(JSON.stringify(ok(parsed.id, null)))
-          ws.sendText(JSON.stringify(event('daemonShutdown', { reason: 'shutdown-rpc' })))
-          flushLogs(ctx, ws)
+          for (const subId of ctx.pendingBySub.keys()) flushLogs(ctx, ws, subId)
+          broadcast('daemonShutdown', { reason: 'shutdown-rpc' })
           console.error(`[ws] → ${parsed.method} id=${parsed.id} shutdown-rpc (${Date.now() - startMs}ms)`)
           queueMicrotask(() => {
             void opts.onShutdown()
@@ -206,11 +243,10 @@ export function startServer(opts: ServerOptions): RunningServer {
       const ctx = sessions.get(ws)
       if (!ctx) return
       sessions.delete(ws)
-      if (ctx.flushTimer) {
-        clearTimeout(ctx.flushTimer)
-        ctx.flushTimer = null
-      }
+      for (const timer of ctx.flushTimerBySub.values()) clearTimeout(timer)
+      ctx.flushTimerBySub.clear()
       await subscriptions.dropAllForWs(ws)
+      console.log(`[ws] connection closed (${ws.remoteAddress})`)
     },
   }
 
@@ -258,6 +294,7 @@ export function startServer(opts: ServerOptions): RunningServer {
     async stop() {
       await server.stop()
     },
+    broadcast,
   }
 }
 
@@ -265,26 +302,43 @@ export function startServer(opts: ServerOptions): RunningServer {
 // Log coalescing
 // ---------------------------------------------------------------------------
 
-function pushLog(ctx: SessionContext, ws: ServerWebSocket<WsData>, lines: string[]): void {
-  ctx.pendingLines.push(...lines)
-  if (ctx.pendingLines.length > LOG_MAX_BATCH * 4) {
-    ctx.pendingLines.splice(0, ctx.pendingLines.length - LOG_MAX_BATCH * 4)
+function pushLog(ctx: SessionContext, ws: ServerWebSocket<WsData>, subscriptionId: string, lines: string[], hostType?: string): void {
+  // Fan-out batches carry a hostType so the client can attribute lines to
+  // their emitting member. Send them immediately without coalescing —
+  // batching multiple hostType-tagged batches would lose attribution
+  // if a second member pushes before the timer fires. Single-host
+  // batches (no hostType) keep the original coalescing for bandwidth.
+  if (hostType !== undefined) {
+    ws.sendText(JSON.stringify(event('log', { subscriptionId, lines, hostType })))
+    return
   }
-  if (ctx.flushTimer) return
-  ctx.flushTimer = setTimeout(() => {
-    ctx.flushTimer = null
-    flushLogs(ctx, ws)
-  }, LOG_FLUSH_MS)
+  let pending = ctx.pendingBySub.get(subscriptionId)
+  if (!pending) {
+    pending = []
+    ctx.pendingBySub.set(subscriptionId, pending)
+  }
+  pending.push(...lines)
+  if (pending.length > LOG_MAX_BATCH * 4) {
+    pending.splice(0, pending.length - LOG_MAX_BATCH * 4)
+  }
+  if (ctx.flushTimerBySub.has(subscriptionId)) return
+  ctx.flushTimerBySub.set(subscriptionId, setTimeout(() => {
+    ctx.flushTimerBySub.delete(subscriptionId)
+    flushLogs(ctx, ws, subscriptionId)
+  }, LOG_FLUSH_MS))
 }
 
-function flushLogs(ctx: SessionContext, ws: ServerWebSocket<WsData>): void {
-  if (ctx.pendingLines.length === 0) return
-  const batch = ctx.pendingLines.splice(0, LOG_MAX_BATCH)
-  ws.sendText(JSON.stringify(event('log', { lines: batch })))
-  if (ctx.pendingLines.length > 0) {
-    ctx.flushTimer = setTimeout(() => {
-      ctx.flushTimer = null
-      flushLogs(ctx, ws)
-    }, LOG_FLUSH_MS)
+function flushLogs(ctx: SessionContext, ws: ServerWebSocket<WsData>, subscriptionId: string): void {
+  const pending = ctx.pendingBySub.get(subscriptionId)
+  if (!pending || pending.length === 0) return
+  const batch = pending.splice(0, LOG_MAX_BATCH)
+  ws.sendText(JSON.stringify(event('log', { subscriptionId, lines: batch })))
+  if (pending.length > 0) {
+    ctx.flushTimerBySub.set(subscriptionId, setTimeout(() => {
+      ctx.flushTimerBySub.delete(subscriptionId)
+      flushLogs(ctx, ws, subscriptionId)
+    }, LOG_FLUSH_MS))
+  } else {
+    ctx.pendingBySub.delete(subscriptionId)
   }
 }

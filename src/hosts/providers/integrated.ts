@@ -692,16 +692,6 @@ export class IntegratedHost implements HostProvider {
     // (whether the child is already spawning or about to spawn) flow
     // through the shared line-splitter to every entry.
 
-    // Replay any lines the splitter has already buffered so callers
-    // that attach after spawn see the full boot log.
-    if (this.logBuffer.length > 0) {
-      try {
-        onChunk([...this.logBuffer])
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error('integrated logHandler threw during replay:', err)
-      }
-    }
     this.logHandlers.add(onChunk)
     const self = this
 
@@ -988,21 +978,35 @@ export class IntegratedHost implements HostProvider {
    * any keys we don't set.
    */
   private async writeServerProperties(): Promise<void> {
-    if (this.serverPort === null && this.config.rcon?.enabled !== true) {
+    if (this.serverPort === null && this.config.rcon?.enabled !== true && this.config.world === undefined) {
       return
     }
 
     const propsPath = pathJoin(this.serverDir, 'server.properties')
     const isFlat = this.config.world !== 'overworld'
+    // Owned keys we control. Anything else in server.properties is left
+    // alone — the user can edit it freely between runs.
     const owned = new Set([
+      // World generator
       'level-type',
       'generator-settings',
       'level-name',
       'level-seed',
+      'generate-structures',
+      // Network
       'server-port',
+      // RCON
       'enable-rcon',
       'rcon.port',
       'rcon.password',
+      // Defaults we always apply
+      'gamemode',
+      'allow-flight',
+      'spawn-protection',
+      'view-distance',
+      'function-permission-level',
+      'pause-when-empty-seconds',
+      'motd',
     ])
 
     let lines: string[] = []
@@ -1020,11 +1024,17 @@ export class IntegratedHost implements HostProvider {
     })
 
     if (this.config.world !== 'overworld') {
+      const worldName = this.config.world ?? 'void'
       lines.push(`level-type=${isFlat ? 'minecraft:flat' : 'minecraft:normal'}`)
       if (isFlat) {
         lines.push(`generator-settings=${this.generatorSettings()}`)
       }
       lines.push(`level-name=world`)
+      // generate-structures is opt-out for void specifically — flat
+      // overworld still wants villages/dungeons etc. spawned in.
+      if (worldName === 'void') {
+        lines.push('generate-structures=false')
+      }
     }
     if (this.serverPort !== null) {
       lines.push(`server-port=${this.serverPort}`)
@@ -1035,6 +1045,23 @@ export class IntegratedHost implements HostProvider {
       lines.push(`rcon.port=${rcon.port ?? 25575}`)
       lines.push(`rcon.password=${rcon.password ?? ''}`)
     }
+
+    // Always-on defaults. Dev-server UX: creative mode + flight, no
+    // spawn-protection near origin (so functions can build freely),
+    // generous render distance, full op-level for `/function`, no
+    // auto-pause when the player list empties.
+    lines.push('gamemode=creative')
+    lines.push('allow-flight=true')
+    lines.push('spawn-protection=0')
+    lines.push('view-distance=20')
+    lines.push('function-permission-level=4')
+    lines.push('pause-when-empty-seconds=0')
+    // MOTD includes the pack name when SandstoneConfig was wired
+    // through to the host; otherwise a generic message.
+    const motd = this.config.sandstoneConfig?.name
+      ? `Integrated ${this.config.sandstoneConfig.name} Sandstone Server`
+      : 'Integrated Sandstone Server'
+    lines.push(`motd=${motd}`)
 
     await fs.writeText(propsPath, lines.join('\n') + '\n')
   }

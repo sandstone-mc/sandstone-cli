@@ -145,9 +145,40 @@ export async function endpointStatus(projectRoot: string): Promise<EndpointStatu
   return ageMs > STALE_AFTER_MS ? 'stale' : 'live-recent'
 }
 
-/** Best-effort delete. Throws only on unexpected errors (not ENOENT). */
-export async function deleteEndpoint(projectRoot: string): Promise<void> {
+/**
+ * Best-effort delete. Throws only on unexpected errors (not ENOENT).
+ *
+ * When `ourPid` is provided, refuses to delete a file owned by a
+ * different daemon — protects against two concurrent `sand connect`
+ * instances racing on the same project root. If A and B both pass the
+ * `endpointStatus='missing'` check, B's writeEndpoint may overwrite
+ * A's file. When A's teardown later calls deleteEndpoint, it must NOT
+ * clobber B's file. Comparing the on-disk `pid` to `ourPid` makes the
+ * delete owner-scoped; the loser silently leaves the winner's file
+ * alone.
+ *
+ * Exception: if the file's owner pid is NOT alive (e.g. a previous
+ * daemon was SIGKILL'd before it could clean up), we treat the file as
+ * orphaned and delete it anyway — letting it linger would block the
+ * next `sand connect` until `STALE_AFTER_MS` expires.
+ */
+export async function deleteEndpoint(projectRoot: string, ourPid?: number): Promise<void> {
   const path = endpointPath(projectRoot)
+  if (ourPid !== undefined) {
+    try {
+      const existing = await readEndpoint(projectRoot)
+      if (existing && existing.pid !== ourPid) {
+        // Another daemon owns this file. Only leave it alone if that
+        // pid is genuinely alive; a dead owner means the file is
+        // orphaned and safe to remove.
+        const alive = await pidAlive(existing.pid)
+        if (alive) return
+      }
+    } catch {
+      // Unreadable for some reason — proceed with the unlink attempt;
+      // it'll either succeed or throw ENOENT, both fine.
+    }
+  }
   try {
     await unlink(path)
   } catch (err) {

@@ -29,7 +29,18 @@ export class SubscriptionRegistry {
    * will hand to the consumer in the `attachLog` response).
    */
   register(ws: unknown, unattach: () => Promise<void>): string {
-    const subscriptionId = randomUUID()
+    return this.registerWithId(randomUUID(), ws, unattach)
+  }
+
+  /**
+   * Register with an explicit subscription id. Used when the handler
+   * closure needs to reference the id before the underlying provider
+   * subscription is created (so its pushLog calls can tag batches).
+   */
+  registerWithId(subscriptionId: string, ws: unknown, unattach: () => Promise<void>): string {
+    if (this.byId.has(subscriptionId)) {
+      throw new Error(`subscription id collision: ${subscriptionId}`)
+    }
     const record: SubscriptionRecord = { subscriptionId, ws, unattach }
     this.byId.set(subscriptionId, record)
     const key = ws as object
@@ -45,6 +56,19 @@ export class SubscriptionRegistry {
   /** Look up a subscription by id. Returns null when unknown. */
   get(subscriptionId: string): SubscriptionRecord | null {
     return this.byId.get(subscriptionId) ?? null
+  }
+
+  /**
+   * Swap the unattach thunk for a registered subscription. Used by
+   * `attachLog` / `attachLogs` which register a placeholder before
+   * calling the host (so the handler closure can reference the id) and
+   * then replace it with the real provider unattach once it resolves.
+   * No-op if the id isn't registered.
+   */
+  replaceUnattach(subscriptionId: string, unattach: () => Promise<void>): void {
+    const record = this.byId.get(subscriptionId)
+    if (!record) return
+    record.unattach = unattach
   }
 
   /**
@@ -83,7 +107,7 @@ export class SubscriptionRegistry {
       try {
         await record.unattach()
       } catch {
-        // ignore
+        // provider is already gone; nothing to do
       }
     }
   }

@@ -12,6 +12,8 @@
  * file access only.
  */
 
+import type { SandstoneConfig } from 'sandstone'
+
 export type HostType =
   | 'ssh'
   | 'rcon'
@@ -140,6 +142,13 @@ export interface BaseHostConfig {
   projectRoot?: string
   /** Set by `sand connect` so the integrated host prints lifecycle events. Ignored by other providers. */
   verbose?: boolean
+  /**
+   * The full `sandstone.config.ts` payload, auto-loaded by `sand connect`
+   * and `sand run` from the project root. Optional — providers that
+   * don't care about it can ignore the field. `undefined` means no
+   * config was found at runtime (e.g. CLI invoked outside a project).
+   */
+  sandstoneConfig?: SandstoneConfig
 }
 
 export interface SshHostConfig extends BaseHostConfig {

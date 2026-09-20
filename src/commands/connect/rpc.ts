@@ -50,6 +50,7 @@ export type RpcMethod =
   | 'writeFile'
   | 'executeRawCommand'
   | 'attachLog'
+  | 'attachLogs'
   | 'unattach'
   | 'shutdown'
 
@@ -101,10 +102,26 @@ export interface WelcomeEvent {
   startedAt: string
 }
 
+/**
+ * Sent to every open WS session when the daemon begins teardown — for
+ * any reason (SIGINT, EOF, `--shutdown` RPC, host member disconnected).
+ * Clients should flush pending state and close promptly; the daemon
+ * proceeds with the rest of teardown regardless. `reason` is one of
+ * `'signal' | 'shutdown-rpc' | 'host-lost'` so clients can log a
+ * sensible message.
+ */
+export interface DaemonShutdownEvent {
+  reason: 'signal' | 'shutdown-rpc' | 'host-lost'
+}
+
 /** Pushed when a subscribed log session emits lines. */
 export interface LogEvent {
   subscriptionId: string
   lines: string[]
+  /** Set when the batch originated from a composite `attachLogs`
+   *  subscription — identifies which member emitted the lines. Omitted
+   *  for `attachLog` subscriptions (single-host daemons). */
+  hostType?: string
 }
 
 /** Pushed when the host's connection state transitions. */

@@ -139,7 +139,16 @@ CLI
 
 CLI
   .command('run')
-  .description('Run a Minecraft console command on the configured server. Uses the live sand connect daemon if one is running, otherwise connects directly. With --expect, waits up to --timeout seconds for a log line matching the regex. ⛏')
+  .description('Run Minecraft console commands on the configured server. By default sends a single raw command (e.g. "op MulverineX"). If the argument ends in `.mcfunction`, runs each non-empty, non-comment line in order (a trailing `\\` joins lines). If the argument ends in `.ts`, dynamically imports the file, calls its `export default function`, and runs the Sandstone commands it emits (a single connection is reused for the whole batch). Uses the live `sand connect` daemon if one is running, otherwise connects directly. With `--expect`, waits up to `--timeout` seconds for a log line matching the regex; applies to the LAST emitted command in file mode. ⛏')
+  .addHelpText('after', `
+Examples:
+  $ sand run "op MulverineX"
+  $ sand run scripts/welcome.mcfunction
+  $ sand run scripts/test.ts --expect "Welcome, .*")
+
+If the .ts script creates any child resource (a nested MCFunction,
+Advancement, Recipe, Tag, …), sand run throws — only inline commands
+are supported. Use \`sand build\` to write resources to disk.`)
   .addOption(BuildOptions.get('path'))
   .addOption(BuildOptions.get('hostType'))
   .addOption(BuildOptions.get('hostConfig'))
@@ -147,7 +156,7 @@ CLI
   .addOption(BuildOptions.get('expect'))
   .addOption(BuildOptions.get('timeout'))
   .action((commandAndArgs: string[], opts: { path: string; hostType?: string; hostConfig?: string; hostConfigFile?: string; expect?: string; timeout?: string }) => runCommand(opts, commandAndArgs))
-  .addArgument(new Argument('<command...>', 'The Minecraft console command to run (e.g. "op MulverineX", "say Hello").'))
+  .addArgument(new Argument('<command...>', 'A console command (e.g. "op MulverineX", "say Hello"), or a path to a .mcfunction / .ts file.'))
 
 
 CLI.parse(process.argv)

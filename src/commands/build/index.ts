@@ -34,6 +34,7 @@ import {
 
 import type * as sandstone from 'sandstone'
 import type { handlerReadFile, PackType } from 'sandstone/pack'
+import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
 
 type SandstoneContext = ReturnType<typeof sandstone['getSandstoneContext']>
 
@@ -167,9 +168,10 @@ export async function loadBuildContext(
 ): Promise<BuildContext> {
   const folder = path.resolve(_folder)
 
-  const configPath = path.join(folder, 'sandstone.config.ts')
-  const configUrl = pathToFileURL(configPath).toString()
-  const sandstoneConfig = (await import(configUrl)).default
+  const sandstoneConfig = await loadSandstoneConfig(folder)
+  if (!sandstoneConfig) {
+    throw new Error(`Could not load "${path.join(folder, 'sandstone.config.ts')}"`)
+  }
 
   const namespace = cliOptions.namespace || sandstoneConfig.namespace
   const conflictStrategies: NonNullable<SandstoneContext['conflictStrategies']> = {}
@@ -190,7 +192,7 @@ export async function loadBuildContext(
     packUid: sandstoneConfig.packUid,
     packOptions: sandstoneConfig.packs,
     conflictStrategies,
-    loadVersion: sandstoneConfig.loadVersion,
+    loadVersion: (sandstoneConfig as { loadVersion?: number }).loadVersion,
   }
 
   const sandstonePack = createSandstonePack(context)
@@ -513,11 +515,11 @@ async function _buildProject(
 
       // Export to destinations
       if (clientDest) {
-        await local.exportPack(local, clientDest, packType, archivedOutput)
+        await local.exportPack(local, clientDest, packType, archivedOutput, 'client')
         await local.runExportHandler(local, packType, 'client', clientDest)
       }
       if (serverDest) {
-        await local.exportPack(local, serverDest, packType, archivedOutput)
+        await local.exportPack(local, serverDest, packType, archivedOutput, 'server')
         await local.runExportHandler(local, packType, 'server', serverDest)
       }
     }

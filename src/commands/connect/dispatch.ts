@@ -37,8 +37,11 @@ export interface DispatchContext {
   host: HostProvider
   subscriptions: SubscriptionRegistry
   ws: unknown
-  /** Coalesce handler pushed by `attachLog`. Created per ws connection. */
-  pushLog: (lines: string[]) => void
+  /** Coalesce handler pushed by `attachLog`. Created per ws connection.
+   *  `subscriptionId` tags the wire batch so the client can route to the
+   *  matching subscription's `onLines` callback. `hostType` is set only
+   *  by fan-out (`attachLogs`) handlers. */
+  pushLog: (lines: string[], subscriptionId: string, hostType?: string) => void
   startedAt: number
 }
 
@@ -95,6 +98,7 @@ const KNOWN_METHODS: ReadonlySet<string> = new Set<RpcMethod>([
   'writeFile',
   'executeRawCommand',
   'attachLog',
+  'attachLogs',
   'unattach',
   'shutdown',
 ])
@@ -138,6 +142,8 @@ async function route(
       return handleExecuteRawCommand(params)
     case 'attachLog':
       return handleAttachLog(ctx, params)
+    case 'attachLogs':
+      return handleAttachLogs(ctx, params)
     case 'unattach':
       return handleUnattach(ctx, params)
     case 'shutdown':
@@ -155,14 +161,44 @@ async function route(
 // ---------------------------------------------------------------------------
 
 async function handlePing(ctx: DispatchContext): Promise<PingResult> {
+  const caps = capabilitiesToRecord(ctx.host.capabilities)
+  if (attachLogsCapability(ctx.host)) {
+    caps.attachLogs = true
+  }
   return {
     protocol: PROTOCOL_VERSION,
     hostType: ctx.host.type,
     displayName: ctx.host.displayName,
-    capabilities: capabilitiesToRecord(ctx.host.capabilities),
+    capabilities: caps,
     pid: process.pid,
     uptimeMs: Date.now() - ctx.startedAt,
   }
+}
+
+/**
+ * Surface `attachLogs` as an ad-hoc capability only when the host can
+ * actually fan out across multiple logging members. Single-host daemons
+ * and composites with one attachLog-capable member don't get the
+ * capability — there's nothing to fan out to. Not in the Capability
+ * enum because only the wire cares about it.
+ *
+ * Used by both the `ping` RPC handler and the `welcome` event sent at
+ * WS connect time — clients decide between `attachLog` and `attachLogs`
+ * based on the welcome, so both paths must agree.
+ */
+export function attachLogsCapability(host: HostProvider): boolean {
+  const members = (host as unknown as { members?: readonly unknown[] }).members
+  if (!Array.isArray(members)) return false
+  if (typeof (host as unknown as { attachLogs?: unknown }).attachLogs !== 'function') return false
+  let loggingCount = 0
+  for (const m of members) {
+    const member = m as { capabilities?: { has: (c: Capability) => boolean }; attachLog?: unknown }
+    if (member.capabilities?.has(Capability.AttachLog) && typeof member.attachLog === 'function') {
+      loggingCount++
+      if (loggingCount >= 2) return true
+    }
+  }
+  return false
 }
 
 async function handleStartServer(): Promise<void> {
@@ -210,21 +246,87 @@ async function handleAttachLog(ctx: DispatchContext, params: unknown): Promise<A
   const { regex } = parseParams<AttachLogParams>(params, [])
   const filter = regex ? new RegExp(regex) : null
 
+  // Generate the wire subscription id BEFORE wiring the handler so the
+  // handler's pushLog calls can tag batches with it. The host's attachLog
+  // returns its own subscription handle, but the wire identifier the
+  // client sees comes from our registry.
+  const subscriptionId = ctx.subscriptions.registerWithId(
+    crypto.randomUUID(),
+    ctx.ws,
+    // Placeholder — replaced once attachLog resolves. If unattach is
+    // called before then (extremely unlikely), the registry will just
+    // try to no-op the dangling record.
+    async () => {},
+  )
+
   // We hand the host a handler that pushes through the per-ws coalescer.
   // That way every consumer gets the same coalesced + filtered stream
   // and the host stays oblivious to N subscribers.
   const handler: LogChunkHandler = (lines) => {
     if (filter) {
       const matched = lines.filter((l) => filter.test(l))
-      if (matched.length > 0) ctx.pushLog(matched)
+      if (matched.length > 0) ctx.pushLog(matched, subscriptionId)
     } else {
-      ctx.pushLog(lines)
+      ctx.pushLog(lines, subscriptionId)
     }
   }
   const subscription = await runHost((h) =>
     (h.attachLog ?? notImplemented('attachLog')).bind(h)(handler),
   )
-  const subscriptionId = ctx.subscriptions.register(ctx.ws, () => subscription.unattach())
+  // Replace the placeholder unattach with the real provider thunk so the
+  // ws close cascade (dropAllForWs) and explicit `unattach` RPCs both
+  // reach the host's subscription.
+  ctx.subscriptions.replaceUnattach(subscriptionId, () => subscription.unattach())
+  return { subscriptionId }
+}
+
+/**
+ * Fan-out variant of `attachLog`. Composite hosts with two or more
+ * attachLog-capable members implement `attachLogs` to subscribe to every
+ * member under one subscription; the fanout handler reports each
+ * emitting host type so clients can label output.
+ *
+ * Only exists on fan-out daemons — a daemon with a single logging host
+ * doesn't advertise the `attachLogs` capability and this handler is
+ * never invoked. Lines are passed through unchanged; `hostType` rides
+ * on the wire batch so the client can choose how (or whether) to label.
+ */
+async function handleAttachLogs(ctx: DispatchContext, params: unknown): Promise<AttachLogResult> {
+  const { regex } = parseParams<AttachLogParams>(params, [])
+  const filter = regex ? new RegExp(regex) : null
+
+  const fanout = (ctx.host as unknown as {
+    attachLogs?: (onChunk: (hostType: string, lines: string[]) => void) => Promise<{ unattach(): Promise<void> }>
+  }).attachLogs
+
+  if (!fanout) {
+    // The `attachLogs` capability is only advertised by daemons that
+    // actually fan out, so getting here means the capability record was
+    // stale (daemon reconfigured mid-session). Reject with a stable RPC
+    // code so the client falls back to `attachLog`.
+    throw rpcError(RpcErrorCode.UnsupportedCapability, 'attachLogs not supported by this host')
+  }
+
+  const subscriptionId = ctx.subscriptions.registerWithId(
+    crypto.randomUUID(),
+    ctx.ws,
+    async () => {},
+  )
+
+  const fanoutHandler = (hostType: string, lines: string[]) => {
+    if (filter) {
+      const matched = lines.filter((l) => filter.test(l))
+      if (matched.length > 0) ctx.pushLog(matched, subscriptionId, hostType)
+    } else {
+      ctx.pushLog(lines, subscriptionId, hostType)
+    }
+  }
+  const subscription = await runHost((h) =>
+    ((h as unknown as { attachLogs?: typeof fanout }).attachLogs ?? notImplemented('attachLogs')).bind(h)(fanoutHandler),
+  )
+  // Wire the real unattach so the ws close cascade (dropAllForWs) tears
+  // down the composite's fan-out subscription, not a no-op placeholder.
+  ctx.subscriptions.replaceUnattach(subscriptionId, () => subscription.unattach())
   return { subscriptionId }
 }
 

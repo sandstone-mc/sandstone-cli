@@ -16,9 +16,13 @@ export interface SessionContext {
   host: HostProvider
   /** Owns subscriptions for THIS ws; cleared on disconnect. */
   subscriptions: Set<string>
-  /** Per-connection log line coalescer state. */
-  pendingLines: string[]
-  flushTimer: ReturnType<typeof setTimeout> | null
+  /** Per-subscription log line coalescer state. The wire `log` event
+   *  carries the subscriptionId so the client can route the batch to the
+   *  right `onLines` callback — multiple subscriptions in one session
+   *  (e.g. attachLog + attachLogs) must stay separated, even within the
+   *  same coalescer window. */
+  pendingBySub: Map<string, string[]>
+  flushTimerBySub: Map<string, ReturnType<typeof setTimeout>>
   /** True after `daemonShutdown` was sent — stops accepting requests. */
   shuttingDown: boolean
 }

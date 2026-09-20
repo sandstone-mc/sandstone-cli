@@ -14,6 +14,13 @@ import type { TrackedChange, ChangeCategory } from '../ui/types.js'
 import { resolveStackTrace } from '../utils/source-map.js'
 import * as fs from '../utils/fs.js'
 import { run, spawn } from '../utils/shell.js'
+import { connect as openDaemonClient, type Client as DaemonClient } from './connect/client.js'
+import { endpointStatus, readEndpoint } from './connect/endpoint-file.js'
+
+// Minecraft prefixes every stdout line with `[HH:MM:SS] [Thread/LEVEL]: `.
+// Strip just the timestamp — keep `[Server thread/INFO]: ` (and friends)
+// so the thread/level context survives into the watch log.
+const MinecraftTimestampRegex = /^\[\d{2}:\d{2}:\d{2}\] /
 
 // Console capture for watch mode - wraps console to redirect output to our log file
 const originalConsole = globalThis.console
@@ -108,14 +115,14 @@ export async function watchCommand(opts: WatchOptions) {
       onManualRebuild: handleManualRebuild,
       cwd: opts.path,
       // Since this isn't SIGINT, its fine that we don't await this
-      exit: () => exit(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers),
+      exit: () => exit(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient),
       // Cancels the watcher + unmounts the UI, runs the update commands,
       // then exits the process.
       onRunUpdates: async (commands) => {
         // Fully stop the FS watcher + ink BEFORE running commands — file
         // system changes from the update commands shouldn't re-trigger a
         // rebuild or cause the UI to flicker.
-        await cleanup(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers)
+        await cleanup(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
         // Pick a shell that runs the user's command natively per platform.
         // POSIX: `sh -c <cmd>`; Windows: `cmd /c <cmd>`.
         const shellCmd = process.platform === 'win32' ? 'cmd' : 'sh'
@@ -256,6 +263,19 @@ export async function watchCommand(opts: WatchOptions) {
     if (result.success) {
       log(`Build successful: ${result.resourceCounts.functions} functions, ${result.resourceCounts.other} others`)
       lastBuildFailed = false
+      // If a daemon is connected, ask it to run `/reload` so the running
+      // server picks up the rebuilt datapacks without a restart. Skipped
+      // during the very first build (daemon hasn't connected yet) and
+      // when no daemon is running for this project.
+      if (daemonClient) {
+        // Fire-and-forget: `reload` blocks the server until datapacks
+        // finish reloading, which can take seconds. Awaiting it stalls
+        // the watcher (and any subsequent rebuilds queued behind it).
+        log('Sent /reload to host daemon')
+        daemonClient.executeRawCommand({ command: 'reload' }).catch((err) => {
+          logWarn(`[watch] daemon reload failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
+      }
     } else {
       logError(result.error)
       lastBuildFailed = true
@@ -385,6 +405,90 @@ export async function watchCommand(opts: WatchOptions) {
 
   log('Watch started')
 
+  // Poll for a running `sand connect` daemon every 5s. When one appears,
+  // open a WS client to it and keep it alive for the watcher's lifetime;
+  // future iterations can use the client (currently a no-op hold — just
+  // logged + cleaned up on exit). Stops polling once connected; restarts
+  // when the daemon sends a `daemonShutdown` event so a subsequent
+  // `sand connect` reconnects without restarting `sand watch`.
+  let daemonClient: DaemonClient | undefined
+  let daemonConnected = false
+  let daemonPoll: ReturnType<typeof setInterval> | undefined
+  // Active log subscription + its unsubscribe + the daemonShutdown
+  // unsubscribe — held so the shutdown handler (and `cleanup`) can
+  // release them in one place.
+  let activeLogSub: { unattach(): Promise<void> } | undefined
+  let offDaemonShutdown: (() => void) | undefined
+  const tryConnectDaemon = async () => {
+    if (daemonConnected) return
+    try {
+      if (await endpointStatus(opts.path) !== 'live') return
+      const endpoint = await readEndpoint(opts.path)
+      if (!endpoint) return
+      try {
+        daemonClient = await openDaemonClient({ endpoint })
+        daemonConnected = true
+        log('Connected to host daemon')
+        // Subscribe to every host's log stream so the running server's
+        // output shows up alongside the rebuild messages in the watch
+        // log. Composite daemons advertise an `attachLogs` capability —
+        // prefer it so we get every member's stream under one
+        // subscription instead of just the first dispatchable member.
+        try {
+          // Pick the right subscription RPC by capability. `attachLogs`
+          // fans out across every logging member of a composite and tags
+          // each batch with its hostType; single-host daemons don't
+          // advertise it, so fall back to `attachLog`.
+          if (daemonClient.welcome.capabilities.attachLogs) {
+            const sub = await daemonClient.attachLogs()
+            activeLogSub = sub
+            sub.onLines((lines, hostType) => {
+              for (const line of lines) log(`[connect@${hostType}] ${line.replace(MinecraftTimestampRegex, '')}`)
+            })
+          } else {
+            const sub = await daemonClient.attachLog()
+            activeLogSub = sub
+            sub.onLines((lines) => {
+              for (const line of lines) log(`[connect] ${line.replace(MinecraftTimestampRegex, '')}`)
+            })
+          }
+        } catch (err) {
+          logWarn(`[watch] attachLog failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        // Graceful shutdown: daemon broadcasts `daemonShutdown` before
+        // closing the WS. React by logging, releasing the log
+        // subscription, dropping the client, and restarting polling so a
+        // subsequent `sand connect` reconnects automatically.
+        offDaemonShutdown = daemonClient.onShutdown((reason) => {
+          log(`Host daemon is shutting down (${reason}) — watching for a new daemon`)
+          void activeLogSub?.unattach().catch(() => {})
+          activeLogSub = undefined
+          offDaemonShutdown = undefined
+          daemonClient?.close()
+          daemonClient = undefined
+          daemonConnected = false
+          if (!daemonPoll) daemonPoll = setInterval(tryConnectDaemon, 5_000)
+        })
+        // Stop polling — connection succeeded. The onShutdown handler
+        // re-arms the poll if the daemon later disappears.
+        clearInterval(daemonPoll)
+        daemonPoll = undefined
+      } catch {
+        // Endpoint looked live but the WS handshake failed (port just
+        // closed, secret rotated, etc.). Keep polling — a retry might
+        // succeed, and the next status check will see the file as
+        // stale-recent and skip.
+      }
+    } catch {
+      // Status/read errors shouldn't kill the watcher — try again next tick.
+    }
+  }
+  // Try once immediately so an already-running daemon links without
+  // waiting for the first 5s tick. If that succeeds the interval is
+  // cleared inside `tryConnectDaemon`; otherwise it keeps ticking.
+  tryConnectDaemon()
+  daemonPoll = setInterval(tryConnectDaemon, 5_000)
+
   // Initial build
   await onFilesChange([])
 
@@ -431,11 +535,11 @@ export async function watchCommand(opts: WatchOptions) {
   // process.off() it. Previously every watchCommand invocation stacked a
   // new SIGINT listener that never got removed; on SIGINT they all fired
   // against the wrong subscription.
-  const sigintHandler = async () => await exit(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers)
+  const sigintHandler = async () => await exit(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
   process.on('SIGINT', sigintHandler)
 }
 
-async function cleanup(subscription: ParcelWatcher.AsyncSubscription, unmountInk?: () => void, closeLogger?: () => Promise<void>, sigintHandler?: () => Promise<void>, linkVersionWatchers?: { file: string }[]) {
+async function cleanup(subscription: ParcelWatcher.AsyncSubscription, unmountInk?: () => void, closeLogger?: () => Promise<void>, sigintHandler?: () => Promise<void>, linkVersionWatchers?: { file: string }[], daemonPoll?: ReturnType<typeof setInterval>, daemonClient?: DaemonClient) {
   // Stops the parcel FS watcher + unmounts ink. Does NOT exit the process —
   // callers that want to run more code (e.g. update commands) should chain
   // their own logic before exiting.
@@ -445,6 +549,12 @@ async function cleanup(subscription: ParcelWatcher.AsyncSubscription, unmountInk
   if (linkVersionWatchers) {
     for (const w of linkVersionWatchers) unwatchFile(w.file)
   }
+  // Stop the daemon-polling interval and close any live WS client. The
+  // daemon-side `close` handler cascades-unattach every subscription on
+  // this connection, so the log stream ends on its own without the
+  // watcher having to track subscription handles.
+  if (daemonPoll) clearInterval(daemonPoll)
+  daemonClient?.close()
   // Detach our SIGINT handler so a stale watch can't intercept the next
   // process's Ctrl+C.
   if (sigintHandler) process.off('SIGINT', sigintHandler)
@@ -458,9 +568,11 @@ async function exit(
   closeLogger?: () => Promise<void>,
   sigintHandler?: () => Promise<void>,
   linkVersionWatchers?: { file: string }[],
+  daemonPoll?: ReturnType<typeof setInterval>,
+  daemonClient?: DaemonClient,
 ) {
   log('Watch stopped')
-  await cleanup(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers)
+  await cleanup(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
   process.exit(0)
 }
 

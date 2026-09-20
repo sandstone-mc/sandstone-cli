@@ -1,5 +1,5 @@
 import path from 'path'
-import { pathToFileURL } from 'url'
+import { loadSandstoneConfig } from '../utils/sandstoneConfig.js'
 import chalk from 'chalk'
 
 import { log, initLoggerNoFile } from '../ui/logger.js'
@@ -36,13 +36,9 @@ export async function cleanCommand(opts: CleanOptions) {
   const folder = opts.path
 
   // Load the user's sandstone config to discover packName + saveOptions.
-  const configPath = path.join(folder, 'sandstone.config.ts')
-  let sandstoneConfig: sandstone.SandstoneConfig
-  try {
-    const configUrl = pathToFileURL(configPath).toString()
-    sandstoneConfig = (await import(configUrl)).default as sandstone.SandstoneConfig
-  } catch (e: any) {
-    throw new Error(`Could not load "${configPath}": ${e.message || e}`)
+  const sandstoneConfig = await loadSandstoneConfig(folder)
+  if (!sandstoneConfig) {
+    throw new Error(`Could not load "${path.join(folder, 'sandstone.config.ts')}"`)
   }
 
   const saveOptions = sandstoneConfig.saveOptions || {}

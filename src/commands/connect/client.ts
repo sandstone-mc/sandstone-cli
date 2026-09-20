@@ -12,7 +12,6 @@ import {
   SUBPROTOCOL_PREFIX,
   err,
   ok,
-  type AttachLogResult,
   type ExecuteRawCommandResult,
   type PingResult,
   type ReadFileResult,
@@ -23,6 +22,36 @@ import {
   type WelcomeEvent,
 } from './rpc.js'
 import type { EndpointFile } from './endpoint-file.js'
+
+/**
+ * Handle returned by `attachLog`. Each call to `onLines` registers a
+ * listener for lines from this subscription only; `hostType` is never
+ * surfaced because the underlying RPC (`attachLog`) only routes to one
+ * member.
+ */
+export interface AttachLogSubscription {
+  readonly subscriptionId: string
+  /** Register a listener for line batches from this subscription. Lines
+   *  are passed through verbatim — no hostType. */
+  onLines(fn: (lines: string[]) => void): void
+  /** Release the server-side subscription. Safe to call multiple times. */
+  unattach(): Promise<void>
+}
+
+/**
+ * Handle returned by `attachLogs`. The fan-out variant tags every batch
+ * with the emitting member's host type so callers can label output.
+ * Only available when the daemon advertises the `attachLogs`
+ * capability.
+ */
+export interface AttachLogsSubscription {
+  readonly subscriptionId: string
+  /** Register a listener for line batches from this subscription. Each
+   *  batch carries the host type of its emitting composite member. */
+  onLines(fn: (lines: string[], hostType: string) => void): void
+  /** Release the server-side subscription. Safe to call multiple times. */
+  unattach(): Promise<void>
+}
 
 export interface ClientOptions {
   /** The endpoint file payload (URL + secret) — read by `--shutdown`. */
@@ -60,7 +89,16 @@ export async function connect(opts: ClientOptions): Promise<Client> {
   })
 
   const pending = new Map<string | number, { resolve: (r: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>()
-  const logListeners = new Set<(subscriptionId: string, lines: string[]) => void>()
+  // Per-subscriptionId listener set. Each `attachLog` / `attachLogs` call
+  // produces a LogSubscription whose `onLines` registers here; the
+  // websocket log event dispatches by subscriptionId so a hostType-aware
+  // fan-out subscription never leaks its tag onto a single-host listener.
+  type InternalListener = (lines: string[], hostType: string | undefined) => void
+  const listenersBySub = new Map<string, Set<InternalListener>>()
+  // Shutdown listeners registered via `Client.onShutdown`. Fired once
+  // when the daemon broadcasts `daemonShutdown`, then cleared. Each
+  // call returns an unsubscribe closure so callers can detach.
+  const shutdownHandlers = new Set<(reason: string) => void>()
   let nextId = 1
   let closed = false
 
@@ -68,17 +106,34 @@ export async function connect(opts: ClientOptions): Promise<Client> {
     const data = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data as ArrayBuffer)
     const parsed = JSON.parse(data) as RpcResponse | { event: string; data: unknown }
     if ('event' in parsed && parsed.event === 'log') {
-      const data = parsed.data as { subscriptionId: string; lines: string[] }
-      for (const fn of logListeners) fn(data.subscriptionId, data.lines)
+      const logData = parsed.data as { subscriptionId: string; lines: string[]; hostType?: string }
+      const subs = listenersBySub.get(logData.subscriptionId)
+      if (!subs) return
+      for (const fn of subs) fn(logData.lines, logData.hostType)
       return
     }
     if ('event' in parsed && parsed.event === 'daemonShutdown') {
-      closed = true
+      const reason = (parsed.data as { reason?: string } | undefined)?.reason ?? 'unknown'
       for (const { reject, timer } of pending.values()) {
         clearTimeout(timer)
         reject(new Error('daemon shutting down'))
       }
       pending.clear()
+      // Fire-and-forget — handler errors shouldn't block the close path.
+      for (const h of shutdownHandlers) {
+        try { h(reason) } catch { /* swallow */ }
+      }
+      shutdownHandlers.clear()
+      // Close the WS from our side so the daemon's `server.stop()`
+      // doesn't hang waiting for our close frame. Setting `closed` here
+      // makes the later `close` WS-event handler a no-op and keeps
+      // explicit `client.close()` calls idempotent.
+      closed = true
+      try {
+        ws.close(1001, 'daemon shutting down')
+      } catch {
+        // already closed / never opened
+      }
       return
     }
     if ('id' in parsed && (parsed as RpcResponse).id !== undefined) {
@@ -116,6 +171,55 @@ export async function connect(opts: ClientOptions): Promise<Client> {
     })
   }
 
+  function buildSingle(subscriptionId: string): AttachLogSubscription {
+    let detached = false
+    const set = new Set<InternalListener>()
+    listenersBySub.set(subscriptionId, set)
+    return {
+      subscriptionId,
+      onLines(fn: (lines: string[]) => void) {
+        set.add((lines) => fn(lines))
+      },
+      async unattach() {
+        if (detached) return
+        detached = true
+        listenersBySub.delete(subscriptionId)
+        try {
+          await call<void>('unattach', { subscriptionId })
+        } catch {
+          // Daemon may already be gone; the server-side subscription
+          // will cascade-clean via ws close. Swallow.
+        }
+      },
+    }
+  }
+
+  function buildFanout(subscriptionId: string): AttachLogsSubscription {
+    let detached = false
+    const set = new Set<InternalListener>()
+    listenersBySub.set(subscriptionId, set)
+    return {
+      subscriptionId,
+      onLines(fn: (lines: string[], hostType: string) => void) {
+        // Every fan-out batch carries a hostType. If the server ever
+        // omits it (legacy single-host fallback path), label with
+        // 'unknown' to keep the public contract — listeners can always
+        // trust the second arg.
+        set.add((lines, hostType) => fn(lines, hostType ?? 'unknown'))
+      },
+      async unattach() {
+        if (detached) return
+        detached = true
+        listenersBySub.delete(subscriptionId)
+        try {
+          await call<void>('unattach', { subscriptionId })
+        } catch {
+          // Daemon may already be gone; cascade-clean will fire.
+        }
+      },
+    }
+  }
+
   return {
     welcome,
     ping: () => call<PingResult>('ping'),
@@ -124,11 +228,20 @@ export async function connect(opts: ClientOptions): Promise<Client> {
     readFile: (params) => call<ReadFileResult>('readFile', params),
     writeFile: (params) => call<void>('writeFile', params),
     executeRawCommand: (params) => call<ExecuteRawCommandResult>('executeRawCommand', params),
-    attachLog: (params) => call<AttachLogResult>('attachLog', params),
-    unattach: (params) => call<void>('unattach', params),
+    async attachLog(params) {
+      const res = await call<{ subscriptionId: string }>('attachLog', params)
+      return buildSingle(res.subscriptionId)
+    },
+    async attachLogs(params) {
+      const res = await call<{ subscriptionId: string }>('attachLogs', params)
+      return buildFanout(res.subscriptionId)
+    },
     shutdown: () => call<void>('shutdown'),
-    onLog(fn) {
-      logListeners.add(fn)
+    onShutdown(handler: (reason: string) => void): () => void {
+      shutdownHandlers.add(handler)
+      return () => {
+        shutdownHandlers.delete(handler)
+      }
     },
     close() {
       if (closed) return
@@ -146,10 +259,21 @@ export interface Client {
   readFile(params: { path: string }): Promise<ReadFileResult>
   writeFile(params: { path: string; data: string; encoding?: 'utf-8' | 'base64' }): Promise<void>
   executeRawCommand(params: { command: string }): Promise<ExecuteRawCommandResult>
-  attachLog(params?: { regex?: string }): Promise<AttachLogResult>
-  unattach(params: { subscriptionId: string }): Promise<void>
+  /** Subscribe to a single host's log stream. */
+  attachLog(params?: { regex?: string }): Promise<AttachLogSubscription>
+  /** Subscribe to a fan-out of every attachLog-capable member of a
+   *  composite daemon. Only available when the daemon advertises the
+   *  `attachLogs` capability. */
+  attachLogs(params?: { regex?: string }): Promise<AttachLogsSubscription>
   shutdown(): Promise<void>
-  onLog(fn: (subscriptionId: string, lines: string[]) => void): void
+  /**
+   * Register a one-shot listener for the daemon's `daemonShutdown`
+   * event. The handler fires once when the daemon begins teardown
+   * (any reason — signal, EOF, `--shutdown` RPC, host member
+   * disconnected). Returns an unsubscribe function. Listeners are
+   * auto-cleared after firing.
+   */
+  onShutdown(handler: (reason: string) => void): () => void
   close(): void
 }
 

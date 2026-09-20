@@ -45,6 +45,12 @@ export interface DaemonOptions {
   bind?: string
   /** Bind port. `0` lets the OS pick. */
   port?: number
+  /**
+   * Forwarded to {@link BootstrapOptions.userProvidedHostSettings}.
+   * When true, the caller passed explicit `--host-type` / `--host-config`
+   * / `--host-config-file` — suppresses the auto-`local-client` default.
+   */
+  userProvidedHostSettings?: boolean
 }
 
 /** Result of a successful daemon start. */
@@ -98,8 +104,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   }
   if (status === 'stale' || status === 'live-recent') {
     // Stale (pid dead + old file) → safe to clear. live-recent is
-    // ambiguous; clear it too — the new daemon will win.
-    await deleteEndpoint(opts.projectRoot)
+    // ambiguous; clear it too — the new daemon will win. Pass our pid
+    // so deleteEndpoint refuses to remove a file owned by a still-live
+    // different daemon (the previous owner's pid is gone in 'stale'
+    // and usually gone in 'live-recent', but be defensive).
+    await deleteEndpoint(opts.projectRoot, process.pid)
   }
 
   // 2. Instantiate + connect + start via the shared bootstrap. The same
@@ -111,6 +120,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     bootstrapResult = await bootstrapHosts({
       hostTypes: opts.hostTypes,
       perHostConfig: opts.perHostConfig,
+      userProvidedHostSettings: opts.userProvidedHostSettings,
     })
   } catch (e) {
     if (e instanceof BootstrapError) {
@@ -193,8 +203,22 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       shuttingDown = true
       // `server.stop` must keep its `this` — Bun's stop throws
       // ERR_INVALID_THIS otherwise.
-      await teardown(host, () => running.server.stop(), opts.projectRoot, shutdownReason)
-      resolveDone()
+      try {
+        await teardown(
+          host,
+          () => running.server.stop(),
+          (event, data) => running.broadcast(event, data),
+          endpoint,
+          shutdownReason,
+        )
+      } finally {
+        // resolveDone MUST run even if teardown throws — otherwise the
+        // caller's `await handle.done` hangs forever and process.exit(0)
+        // never fires, leaving the daemon (and the endpoint) alive
+        // indefinitely. deleteEndpoint already ran inside teardown if it
+        // got that far; this is the safety net for the throw case.
+        resolveDone()
+      }
     },
   }
 
@@ -203,10 +227,24 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     shutdownReason = 'signal'
     void handle.shutdown()
   }
-  process.on('SIGINT', onSignal)
-  process.on('SIGTERM', onSignal)
-  if (process.platform === 'win32') {
-    process.on('SIGBREAK', onSignal as (s: NodeJS.Signals) => void)
+  try {
+    process.on('SIGINT', onSignal)
+    process.on('SIGTERM', onSignal)
+    if (process.platform === 'win32') {
+      process.on('SIGBREAK', onSignal as (s: NodeJS.Signals) => void)
+    }
+  } catch (err) {
+    // Signal registration failed (extremely unlikely on POSIX). Clean up
+    // the endpoint and re-throw so the caller knows startup failed —
+    // leaving the file behind with a half-initialized daemon would be
+    // worse than a clean error.
+    console.error('[connect] failed to register signal handlers:', err)
+    try {
+      await deleteEndpoint(opts.projectRoot, process.pid)
+    } catch (cleanupErr) {
+      console.error('[connect] endpoint cleanup after signal-register failure failed:', cleanupErr)
+    }
+    throw err
   }
 
   return handle
@@ -219,9 +257,20 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
 async function teardown(
   host: HostProvider,
   stopWS: () => Promise<void>,
-  projectRoot: string,
+  broadcast: (event: string, data: unknown) => void,
+  endpoint: EndpointFile,
   reason: 'signal' | 'shutdown-rpc' | 'host-lost',
 ): Promise<void> {
+  // Tell every open client we're shutting down BEFORE we touch the WS
+  // transport. Clients use this signal to flush pending state (close
+  // subscriptions, log a goodbye line) before the socket is yanked.
+  // The 100ms grace is short enough to feel instant but long enough
+  // for the event envelope to land in the client. Any client that's
+  // not actively reading (idle watcher) still benefits — once they do
+  // read, they see `daemonShutdown` and exit instead of treating the
+  // close as an error.
+  broadcast('daemonShutdown', { reason })
+  await new Promise<void>((r) => setTimeout(r, 100))
   // Soft-stop the underlying server first so it gets a chance to save
   // worlds + broadcast goodbye before we yank the transport. For
   // composite `[rcon, integrated]` this dispatches to the rcon member,
@@ -234,9 +283,21 @@ async function teardown(
       console.error(`[connect] host stopServer failed:`, err)
     }
   }
-  // Order matters: stop accepting WS clients, then disconnect host,
-  // then remove the endpoint file last so a new daemon doesn't try to
-  // bind a port we still hold.
+  // Delete the endpoint file BEFORE the rest of teardown. Once the JVM
+  // is dead (above), the daemon's role as "the daemon for this project"
+  // is over — even if `stopWS()` or `host.disconnect()` hang below on
+  // a stuck Bun.spawn stream or stalled WS handshake, the endpoint is
+  // already gone so the next `sand connect` won't see this dying
+  // daemon as live. Pass our pid so deleteEndpoint refuses to remove
+  // a file owned by a different daemon (see endpoint-file.ts).
+  try {
+    await deleteEndpoint(endpoint.projectRoot, endpoint.pid)
+  } catch (err) {
+    console.error(`[connect] endpoint delete failed:`, err)
+  }
+  // Now tear down the WS server and disconnect the host. Either may
+  // hang on stuck Bun internals; the endpoint is already gone, so the
+  // worst case is the process not exiting promptly, NOT an orphan file.
   try {
     await stopWS()
   } catch (err) {
@@ -247,13 +308,14 @@ async function teardown(
   } catch (err) {
     console.error(`[connect] host disconnect failed:`, err)
   }
+  // Surface the reason in stderr for log scrapers. Wrapped in
+  // try/catch so a closed-stdout EPIPE on this write can't propagate
+  // out of teardown and leave the caller's `await handle.done` hanging.
   try {
-    await deleteEndpoint(projectRoot)
-  } catch (err) {
-    console.error(`[connect] endpoint delete failed:`, err)
+    console.error(`[connect] shutdown complete (${reason})`)
+  } catch {
+    // ignore
   }
-  // Surface the reason in stderr for log scrapers.
-  console.error(`[connect] shutdown complete (${reason})`)
 }
 
 async function readEndpointSafe(projectRoot: string) {

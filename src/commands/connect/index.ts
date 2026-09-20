@@ -73,6 +73,11 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     }
   }
 
+  // Auto-include `local-client` is handled inside startDaemon → bootstrap
+  // once the project config has been loaded. Forward whether the user
+  // passed any host-setting flag so the bootstrap knows when to skip.
+  const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
+
   if (opts.hostConfig && opts.hostConfigFile) {
     console.error(chalk`{red Error:} Pass either --host-config or --host-config-file, not both`)
     process.exit(2)
@@ -117,6 +122,7 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     projectRoot,
     bind: opts.bind,
     port,
+    userProvidedHostSettings,
   })
 
   // Print a single line with the URL + pid so the user knows where to

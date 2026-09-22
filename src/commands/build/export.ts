@@ -14,7 +14,7 @@ export type SandstoneCache = {
   canUseSymlinks?: boolean
   symlinks?: string[]
   // For destinations that are themselves existing directories (e.g. the
-  // world's pre-existing `datapacks/` folder into which Smithed dependency
+  // world's pre-existing `datapacks/` folder into which vanilla dependency
   // zips are symlinked individually): per destination path, the names of
   // the children currently generated for that destination by this build.
   // Used by `preserveSymlink` to know which old per-child symlinks are still

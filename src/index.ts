@@ -86,7 +86,7 @@ const install = CLI
   .command('install')
   .alias('add')
   .alias('i')
-  .description('Install Native Sandstone or Vanilla Smithed libraries. ⛏')
+  .description('Install Native Sandstone or Vanilla libraries. ⛏')
 install
   .command('native')
   .description('Install Native Sandstone libraries. ⛏')
@@ -94,21 +94,20 @@ install
   .addArgument(new Argument('[libraries...]', 'Optional. Libraries to install. When unlisted, a selector will appear.'))
 install
   .command('vanilla')
-  .alias('smithed')
-  .description('Install Vanilla Smithed libraries. ⛏')
+  .description('Install Vanilla libraries. ⛏')
   .action(installVanillaCommand)
   .addArgument(new Argument('[libraries...]', 'Optional. Libraries to install. When unlisted, a selector will appear.'))
 
 CLI
   .command('uninstall')
   .alias('remove')
-  .description('Uninstall Vanilla Smithed libraries. ⛏')
+  .description('Uninstall Vanilla libraries. ⛏')
   .action(uninstallVanillaCommand)
   .addArgument(new Argument('[libraries...]', 'Optional. Libraries to uninstall. When unlisted, a selector will appear.'))
 
 CLI
   .command('refresh')
-  .description('Clear & update cached Smithed libraries. ⛏')
+  .description('Clear & update cached Vanilla libraries. ⛏')
   .action(refreshCommand)
 
 CLI

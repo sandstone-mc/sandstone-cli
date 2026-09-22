@@ -9,8 +9,6 @@ Command-line interface for Sandstone projects. Provides `sand` (project commands
 | `sand create <name>` | Create a new Sandstone project |
 | `sand build` | Build the datapack/resourcepack |
 | `sand watch` | Build and rebuild on file changes |
-| `sand install` | Install Smithed libraries |
-| `sand uninstall` | Remove Smithed libraries |
 | `sand refresh` | Clear library cache |
 
 ## Project Structure

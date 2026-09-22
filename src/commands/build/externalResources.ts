@@ -59,7 +59,7 @@ export async function autoRegisterPackTypes(
 
   // Register datapack_dependencies / resourcepack_dependencies pack types when
   // any zips or folders are present under resources/<type>_dependencies/.
-  // These pack types export Smithed-style dependency archives alongside the
+  // These pack types export Vanilla dependency archives alongside the
   // generated pack output.
   const datapackDepsPath = path.join(resourcesFolder, 'datapack_dependencies')
   if (await local.fs.pathExists(datapackDepsPath)) {

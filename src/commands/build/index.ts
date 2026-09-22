@@ -469,7 +469,7 @@ async function _buildProject(
         ? local.getExportPath(local, packType, 'server')
         : undefined
 
-      // For per-child symlinking (Smithed dep zips placed individually into
+      // For per-child symlinking (Vanilla dep zips placed individually into
       // an existing destination directory), record the active child names
       // per destination path so `preserveSymlink` and `createSymlink` can
       // look them up directly. Only populated when the destination is itself

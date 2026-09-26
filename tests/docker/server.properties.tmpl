@@ -1,0 +1,22 @@
+# Test harness server.properties — written at container startup from
+# this template (placeholders are sed-substituted). Defaults match
+# what the integrated host writes to a freshly-managed server.
+# RCON is enabled so future tests can drive the MC console.
+__SERVER_PORT__=25565
+level-type=minecraft:flat
+generator-settings={}
+gamemode=survival
+difficulty=normal
+max-players=10
+white-list=false
+enforce-whitelist=false
+enable-rcon=true
+rcon.port=25575
+rcon.password=__RCON_PASSWORD__
+broadcast-console-to-ops=true
+broadcast-rcon-to-ops=true
+view-distance=10
+simulation-distance=8
+spawn-protection=0
+online-mode=false
+motd=Sandstone CLI host provider test harness

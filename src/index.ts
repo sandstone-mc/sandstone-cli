@@ -3,7 +3,7 @@ import { Argument, Command } from 'commander'
 import chalk from 'chalk-template'
 
 import { CLI_VERSION } from './version.js'
-import { buildCommand, createCommand, watchCommand, installNativeCommand, installVanillaCommand, uninstallVanillaCommand, refreshCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand } from './commands/index.js'
+import { buildCommand, createCommand, watchCommand, installNativeCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand } from './commands/index.js'
 import { BuildOptions } from './utils/commander.js'
 
 if (Bun.which('bun') === null) {
@@ -92,24 +92,6 @@ install
   .description('Install Native Sandstone libraries. ⛏')
   .action(installNativeCommand)
   .addArgument(new Argument('[libraries...]', 'Optional. Libraries to install. When unlisted, a selector will appear.'))
-install
-  .command('vanilla')
-  .description('Install Vanilla libraries. ⛏')
-  .action(installVanillaCommand)
-  .addArgument(new Argument('[libraries...]', 'Optional. Libraries to install. When unlisted, a selector will appear.'))
-
-CLI
-  .command('uninstall')
-  .alias('remove')
-  .description('Uninstall Vanilla libraries. ⛏')
-  .action(uninstallVanillaCommand)
-  .addArgument(new Argument('[libraries...]', 'Optional. Libraries to uninstall. When unlisted, a selector will appear.'))
-
-CLI
-  .command('refresh')
-  .description('Clear & update cached Vanilla libraries. ⛏')
-  .action(refreshCommand)
-
 CLI
   .command('link')
   .description('Pack the current library (no args) or link a local library into this project. ⛏')

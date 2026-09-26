@@ -1,0 +1,10 @@
+#%PAM-1.0
+# Minimal PAM config for vsftpd in the host-test harness. The
+# alpine package ships pam_unix.so in /usr/lib/security/ but no
+# /etc/pam.d/ skeleton, so vsftpd's default `pam_service_name=vsftpd`
+# makes the child process die with "500 OOPS: child died" on every
+# login attempt. Authenticate via the unix password database — no
+# account limits, no env, no cracklib.
+auth       required   pam_unix.so
+account    required   pam_unix.so
+session    required   pam_unix.so

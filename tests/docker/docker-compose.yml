@@ -1,0 +1,31 @@
+# Single-service harness: sshd + vsftpd + a real Minecraft server all
+# in one container. The SSH/FTP host providers talk to this container
+# via the host-mapped ports; the MC JVM runs as the foreground process
+# so the container stays alive for as long as MC does.
+#
+# RCON (25575) is enabled inside MC's server.properties but no
+# rcon.test.ts ships in this pass — the port stays exposed so a future
+# pass can add RCON / composite-host tests without re-templating.
+services:
+  mc:
+    build:
+      context: .
+      args:
+        MC_VERSION: "1.21.1"
+    image: sandstone-cli-host-test:latest
+    container_name: sandstone-cli-host-test
+    ports:
+      - "2222:22"                 # SSH (host -> container)
+      - "8235:8235"               # FTP control (high port inside container to dodge NET_BIND_SERVICE in rootless podman)
+      - "40000-40009:40000-40009" # FTP passive range
+      - "25565:25565"             # Minecraft (sanity-check only)
+      - "25575:25575"             # RCON
+    # Healthcheck = RCON port. RCON binds only after MC finishes booting
+    # (~30-60s on first run due to asset download + world gen), so this
+    # doubles as the "MC is ready" signal.
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "25575"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+      start_period: 90s

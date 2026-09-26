@@ -167,8 +167,6 @@ export interface SshHostConfig extends BaseHostConfig {
   gracefulStopTimeoutSeconds?: number
   /** screen/tmux session name. Drives `stop` internally during graceful stop — NOT exposed via `executeRawCommand`. */
   consoleSession?: string
-  /** Which strategy `attachLog` uses. Default: 'sftp-stream'. */
-  attachStrategy?: 'sftp-stream' | 'tail'
   /** Path to the log file. Default: `${serverDir}/logs/latest.log`. */
   logPath?: string
 }

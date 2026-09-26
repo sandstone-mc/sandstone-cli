@@ -111,10 +111,9 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
   }
 
   // For >1 host types, --host-config must be a keyed map of HostType → config.
-  // For 1 type, accept the flat shape (legacy back-compat).
-  const perHostConfig = hostTypes.length === 1
-    ? normalizeSingleConfig(rawConfig, hostTypes[0]!, projectRoot)
-    : normalizeCompositeConfig(rawConfig, hostTypes, projectRoot)
+  // For 1 type, accept the flat shape (legacy back-compat). Either way
+  // we shape-detect the input — keyed composite, or flat single.
+  const perHostConfig = normalizeConfig(rawConfig, hostTypes, projectRoot)
 
   const handle = await startDaemon({
     hostTypes,
@@ -158,38 +157,72 @@ function parseHostTypes(raw: string | undefined): HostType[] {
 }
 
 /**
- * Accept the flat single-config shape used when `--host-type` lists one
- * provider. Inject `projectRoot` + `verbose` defaults so callers can
- * omit them.
+ * Shape-detect the `--host-config` JSON and split into per-host-type
+ * entries. Two shapes are accepted:
+ *
+ *   - **Flat** (single-host-type or "this is my one provider's config"):
+ *     `{"host":"...","port":...,...}` — the keys are config fields.
+ *   - **Composite** (N host types, keyed by host type):
+ *     `{"ssh":{...},"rcon":{...}}` — top-level keys are host type names.
+ *
+ * Detection: if any top-level key is a known `HostType`, treat the
+ * object as composite. Anything else is treated as a single config
+ * assigned to the only requested `--host-type`.
+ *
+ * Errors out clearly when:
+ *   - Composite shape is used but `--host-type` lists only one
+ *     provider AND the composite key doesn't match that provider
+ *     (caller almost certainly meant `--host-type <other>`).
+ *   - Single-host-type with composite shape AND the key matches →
+ *     silently accept (caller wrote the composite shape out of habit).
  */
-function normalizeSingleConfig(
-  raw: HostConfigInput,
-  type: HostType,
-  projectRoot: string,
-): Partial<Record<HostType, HostConfigInput>> {
-  const cfg = { ...raw }
-  if (cfg.projectRoot === undefined) cfg.projectRoot = projectRoot
-  cfg.verbose = true
-  return { [type]: cfg } as Partial<Record<HostType, HostConfigInput>>
-}
-
-/**
- * Accept the keyed composite shape used when `--host-type` lists multiple
- * providers. Each member's config is normalized independently.
- */
-function normalizeCompositeConfig(
+function normalizeConfig(
   raw: HostConfigInput,
   hostTypes: HostType[],
   projectRoot: string,
 ): Partial<Record<HostType, HostConfigInput>> {
   if (!isObject(raw)) {
     console.error(
-      chalk`{red Error:} With multiple --host-type values, --host-config must be a JSON object keyed by type (e.g. '{"ssh":{...},"rcon":{...}}')`,
+      chalk`{red Error:} --host-config must be a JSON object`,
     )
     process.exit(2)
   }
+  const keys = Object.keys(raw)
+  const isCompositeShape = keys.some((k) => KNOWN_HOST_TYPES.has(k as HostType))
+
+  if (isCompositeShape) {
+    return normalizeCompositeShape(raw as Record<string, unknown>, hostTypes, projectRoot)
+  }
+  // Flat shape: must be a single-host-type call.
+  if (hostTypes.length !== 1) {
+    console.error(
+      chalk`{red Error:} --host-config is a flat config but --host-type lists multiple providers ` +
+        `(${hostTypes.join(', ')}). Pass a composite config: ` +
+        `'{"${hostTypes[0]}":{...},"${hostTypes[1] ?? '?'}":{...},...}'`,
+    )
+    process.exit(2)
+  }
+  return normalizeSingleFlat(raw, hostTypes[0]!, projectRoot)
+}
+
+/** Apply per-host defaults (projectRoot, verbose) to a flat config. */
+function normalizeSingleFlat(
+  raw: Record<string, unknown>,
+  type: HostType,
+  projectRoot: string,
+): Partial<Record<HostType, HostConfigInput>> {
+  const cfg = { ...raw, verbose: true } as HostConfigInput
+  if (cfg.projectRoot === undefined) cfg.projectRoot = projectRoot
+  return { [type]: cfg }
+}
+
+/** Validate the keyed composite shape and apply per-host defaults. */
+function normalizeCompositeShape(
+  keyed: Record<string, unknown>,
+  hostTypes: HostType[],
+  projectRoot: string,
+): Partial<Record<HostType, HostConfigInput>> {
   const out: Partial<Record<HostType, HostConfigInput>> = {}
-  const keyed = raw as Record<string, unknown>
   for (const type of hostTypes) {
     const member = keyed[type]
     if (!member) {
@@ -206,6 +239,9 @@ function normalizeCompositeConfig(
   }
   return out
 }
+
+// `normalizeCompositeConfig` was folded into `normalizeConfig` above —
+// the shape-detect happens in one place now.
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return !!v && typeof v === 'object' && !Array.isArray(v)

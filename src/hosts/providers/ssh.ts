@@ -1,4 +1,3 @@
-import { Readable } from 'node:stream'
 import { NodeSSH, type Config as NodeSshConfig } from 'node-ssh'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
@@ -16,8 +15,8 @@ import { Capability, type HostCapabilities, type HostProvider, type LogChunkHand
  *  - `stopServer`: if `consoleSession` is set, drives `stop` through the
  *    screen/tmux session internally as a graceful first attempt, then
  *    falls back to `stopCommand` after `gracefulStopTimeoutSeconds`.
- *  - `attachLog`: SFTP streaming (default) or `tail -F` shell streaming
- *    (opt-in via `attachStrategy: 'tail'`).
+ *  - `attachLog`: runs `tail -F -n 0` over SSH and forwards each new
+ *    line.
  */
 export class SshHost implements HostProvider {
   readonly type = 'ssh' as const
@@ -138,12 +137,15 @@ export class SshHost implements HostProvider {
 
   async attachLog(onChunk: LogChunkHandler): Promise<LogSubscription> {
     this.requireConnected('ssh')
-    const strategy = this.config.attachStrategy ?? 'sftp-stream'
     const logPath = this.config.logPath ?? `${this.config.serverDir}/logs/latest.log`
-
-    if (strategy === 'sftp-stream') {
-      return await this.attachLogViaSftp(logPath, onChunk)
-    }
+    // The ssh2 SFTP ReadStream built-in streaming is the right tool
+    // for very fast logs with proper metadata (size/mtime for
+    // rotation). It only works when the consumer keeps the read
+    // stream fed — any quiescent second kills the subscription via
+    // EOF. Minecraft's `logs/latest.log` is bursty, not chatty,
+    // so the ssh stream dies between writes and the consumer sees
+    // nothing. `tail -F` follows the inode and survives bursts +
+    // rotation, which is what MC logs actually need.
     return await this.attachLogViaTail(logPath, onChunk)
   }
 
@@ -201,101 +203,6 @@ export class SshHost implements HostProvider {
       await new Promise((r) => setTimeout(r, intervalMs))
     }
     return false
-  }
-
-  private async attachLogViaSftp(
-    logPath: string,
-    onChunk: LogChunkHandler,
-  ): Promise<LogSubscription> {
-    const sftp = await this.ssh.requestSFTP()
-    // Prime: stat the file first so we start streaming from EOF —
-    // subscribers only see lines emitted after they subscribed. Same
-    // contract as the FTP poller's `lastSize` prime and the
-    // `tail -F -n 0` strategy.
-    const initialStat = await new Promise<{ size: number } | null>((resolve) => {
-      sftp.stat(logPath, (err: Error | null, stats?: { size: number }) => {
-        if (err || !stats) resolve(null)
-        else resolve({ size: stats.size })
-      })
-    })
-    const startAt = initialStat?.size ?? 0
-    let stream: Readable = sftp.createReadStream(logPath, { start: startAt })
-    let buffer = ''
-    let watcher: NodeJS.Timeout | null = null
-    let lastSize = startAt
-    let stopped = false
-
-    const flushLines = () => {
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      if (lines.length > 0) onChunk(lines)
-    }
-
-    const onData = (chunk: Buffer | string) => {
-      buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-      flushLines()
-    }
-    const onError = (err: Error) => {
-      if (stopped) return
-      // Swallow after-stop errors silently — the consumer has already
-      // moved on by the time unattach() resolves.
-      // eslint-disable-next-line no-console
-      console.error('ssh attachLog stream error:', err)
-    }
-
-    stream.on('data', onData)
-    stream.on('error', onError)
-
-    // Poll for rotation: Minecraft renames `latest.log` to `latest.log.1`
-    // when the current file grows; if `stat.size` shrinks below what we've
-    // read, destroy + reopen from offset 0.
-    const lastStat = (): Promise<{ size: number } | null> =>
-      new Promise((resolve) => {
-        sftp.stat(logPath, (err: Error | null, stats?: { size: number }) => {
-          if (err || !stats) resolve(null)
-          else resolve({ size: stats.size })
-        })
-      })
-
-    watcher = setInterval(async () => {
-      if (stopped) return
-      const stat = await lastStat()
-      if (stat && stat.size < lastSize) {
-        // Rotation — close + reopen.
-        stream.removeListener('data', onData)
-        stream.removeListener('error', onError)
-        stream.destroy()
-        buffer = ''
-        try {
-          const reopened = sftp.createReadStream(logPath, { start: 0 })
-          reopened.on('data', onData)
-          reopened.on('error', onError)
-          stream = reopened
-          lastSize = 0
-        } catch {
-          // If reopen fails, give up; consumer will see no further chunks.
-        }
-      } else if (stat) {
-        lastSize = stat.size
-      }
-    }, 2000)
-
-    return {
-      async unattach() {
-        if (stopped) return
-        stopped = true
-        if (watcher) clearInterval(watcher)
-        watcher = null
-        stream.removeListener('data', onData)
-        stream.removeListener('error', onError)
-        stream.destroy()
-        // Flush any trailing partial line as-is (no newline = incomplete).
-        if (buffer.length > 0) {
-          onChunk([buffer])
-          buffer = ''
-        }
-      },
-    }
   }
 
   private async attachLogViaTail(

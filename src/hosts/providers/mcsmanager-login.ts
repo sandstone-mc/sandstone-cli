@@ -64,6 +64,15 @@ export class McsManagerLoginHost implements HostProvider {
     socket: Socket
   }> = []
 
+  /**
+   * Set of liveness-loss listeners. Fired when the panel's daemon WS
+   * drops or fails to handshake — NOT for our own `disconnect()`
+   * call. The daemon subscribes via {@link HostProvider.onDisconnected}
+   * to detect when a composite member has gone away and trigger a
+   * coordinated shutdown.
+   */
+  private disconnectHandlers = new Set<(reason: string) => void>()
+
   constructor(config: McsManagerHostConfig) {
     this.config = config
   }
@@ -79,6 +88,9 @@ export class McsManagerLoginHost implements HostProvider {
 
   async disconnect(): Promise<void> {
     if (!this.connected) return
+    // Detach the disconnect-listener set BEFORE killing so the close
+    // event fired by our own disconnect doesn't trigger our own handler.
+    this.disconnectHandlers.clear()
     // Drop all attachLog listeners on their respective sockets.
     for (const sub of this.stdoutSubscriptions) {
       sub.socket.off('instance/stdout', sub.handler)
@@ -93,6 +105,26 @@ export class McsManagerLoginHost implements HostProvider {
 
   isConnected(): boolean {
     return this.connected
+  }
+
+  /**
+   * Whether the panel-managed MC server is reachable — true while
+   * we have a live authenticated session with the panel.
+   */
+  isRunning(): boolean {
+    return this.connected && this.socket?.connected === true
+  }
+
+  /**
+   * Subscribe to panel-side WS liveness loss. Returns an unsubscribe
+   * function. The daemon uses this to detect when a composite member
+   * has gone away and trigger a coordinated shutdown.
+   */
+  onDisconnected(handler: (reason: string) => void): () => void {
+    this.disconnectHandlers.add(handler)
+    return () => {
+      this.disconnectHandlers.delete(handler)
+    }
   }
 
   async readFile(path: ServerPath): Promise<Buffer> {
@@ -378,6 +410,18 @@ export class McsManagerLoginHost implements HostProvider {
       transports: ['websocket'],
       path: (channel.data.prefix ? channel.data.prefix.replace(/\/$/, '') : '') + '/socket.io',
     })
+
+    // Fire the onDisconnected handlers whenever the panel's WS dies
+    // or the initial handshake fails. The daemon's composite-shutdown
+    // path subscribes to this so an `[ftp, mcsmanager-login]`
+    // composite doesn't keep trying to dispatch into a dead socket.
+    sock.on('disconnect', (reason: string) => {
+      for (const h of this.disconnectHandlers) h(`MCSManager daemon disconnected: ${reason}`)
+    })
+    sock.on('connect_error', (err: Error) => {
+      for (const h of this.disconnectHandlers) h(`MCSManager daemon connect_error: ${err.message}`)
+    })
+
     await new Promise<void>((resolve, reject) => {
       sock.once('connect', () => resolve())
       sock.once('connect_error', (err: Error) => reject(err))

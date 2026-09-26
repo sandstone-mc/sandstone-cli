@@ -130,6 +130,17 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   }
   const host = bootstrapResult.host
   const members = bootstrapResult.members
+  // `integrated` is the only host type whose lifecycle the daemon
+  // actually owns (it spawns and supervises the MC JVM). For every
+  // other provider — ssh, ftp, rcon, local-client, mcsmanager-login
+  // — the daemon just connects to a server the user started
+  // externally. Threaded into `teardown()` so handle.shutdown()
+  // knows whether it's allowed to call host.stopServer(). Without
+  // this gate, an `onDisconnected` blip on any member of e.g.
+  // `[ftp, rcon]` would route stopServer to the rcon member and
+  // `stop` a server the daemon doesn't own — which is what used to
+  // kill the harness MC mid-suite.
+  const ownsServer = members.some((m) => m.type === 'integrated')
 
   // 6b. Watch each member for unexpected liveness loss. If any member
   // dies (JVM exit, RCON socket close, SSH connection drop, etc.), shut
@@ -210,6 +221,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
           (event, data) => running.broadcast(event, data),
           endpoint,
           shutdownReason,
+          ownsServer,
         )
       } finally {
         // resolveDone MUST run even if teardown throws — otherwise the
@@ -260,6 +272,7 @@ async function teardown(
   broadcast: (event: string, data: unknown) => void,
   endpoint: EndpointFile,
   reason: 'signal' | 'shutdown-rpc' | 'host-lost',
+  ownsServer: boolean,
 ): Promise<void> {
   // Tell every open client we're shutting down BEFORE we touch the WS
   // transport. Clients use this signal to flush pending state (close
@@ -275,8 +288,14 @@ async function teardown(
   // worlds + broadcast goodbye before we yank the transport. For
   // composite `[rcon, integrated]` this dispatches to the rcon member,
   // which sends `stop` via RCON. For single integrated, it sends
-  // SIGTERM + waits. Skipped on 'host-lost' — the host is already gone.
-  if (reason !== 'host-lost' && host.stopServer) {
+  // SIGTERM + waits.
+  //
+  // Only call this when the daemon actually owns the server — i.e.
+  // `integrated` is among the members. Everything else (ssh, ftp,
+  // rcon, local-client, mcsmanager-login) is connection-only and
+  // points at user-started servers; `stop`ing them would be
+  // destructive.
+  if (ownsServer && host.stopServer) {
     try {
       await host.stopServer()
     } catch (err) {

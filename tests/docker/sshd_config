@@ -1,0 +1,37 @@
+# Minimal sshd config for the host-test harness.
+# All options that don't matter for tests are at their alpine defaults.
+Port 22
+ListenAddress 0.0.0.0
+Protocol 2
+
+# alpine's openssh-server package doesn't ship a separate sftp-server
+# binary; use the in-process internal-sftp so the SshHost provider can
+# actually open SFTP channels.
+Subsystem sftp internal-sftp
+
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+PidFile /run/sshd.pid
+
+# Test user is a non-root, password+key auth account.
+PermitRootLogin no
+PasswordAuthentication yes
+PermitEmptyPasswords no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+# Disable everything we don't need — keeps the test surface tight.
+# `UsePAM` is intentionally omitted: the alpine openssh-server build
+# is built without PAM support and rejects the option outright.
+AllowAgentForwarding no
+AllowTcpForwarding no
+X11Forwarding no
+PermitUserEnvironment no
+PrintMotd no
+
+# Keep tests reproducible: avoid stale-key prompts when the container
+# is rebuilt. StrictHostKeyChecking=accept-new on the client side is
+# enough; here we just don't ship a host key to the client.

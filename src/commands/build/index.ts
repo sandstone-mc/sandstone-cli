@@ -350,11 +350,11 @@ async function _buildProject(
   }
 
   // Add dependencies if specified
-  if (cliOptions.dependencies) {
-    for (const dependency of cliOptions.dependencies) {
-      sandstonePack.core.depend(...dependency)
-    }
-  }
+  // NOTE: `sandstonePack.core.depend(...)` was removed when the
+  // vanilla install pipeline was deleted. The `cliOptions.dependencies`
+  // surface is intentionally left intact so existing JSON configs
+  // don't fail to parse, but the values are ignored at runtime —
+  // a follow-up will wire a replacement once the new dep story lands.
 
   // Setup cache
   local.cacheFile = path.join(local.folder, '.sandstone', 'cache.json')

@@ -1,70 +1,123 @@
 #!/usr/bin/env bun
 /**
- * Test runner for `tests/hosts/` — assumes the Docker harness
- * (`tests/docker/`) is already up and the SSH key is at
- * `.temp/test-harness/ssh-key`.
+ * Manual harness control + thin test runner for `tests/hosts/`.
  *
- * The container lifecycle (up/down/key-copy/healthcheck) is
- * currently managed out-of-band so this script can stay simple
- * and fast. To bring the harness up from scratch, run the
- * snippets documented in the README / CLAUDE.md — the user is
- * iterating on the harness itself, so we avoid destroying it on
- * every test run.
+ * Subcommands:
+ *   up      bring the harness up via `docker compose up -d --build`
+ *           and wait for it to be healthy
+ *   down    tear the harness down via `docker compose down -v`
+ *   status  print whether the harness is up + healthy
+ *   test    run `bun test tests/hosts/` against the harness
+ *           (the test itself auto-detects whether it needs to
+ *           bring the harness up — see `ensureHarnessUp` in
+ *           `tests/hosts/_daemon.ts`)
  *
- * Usage:
- *   bun run scripts/test-docker.ts
+ * The test harness (`host.test.ts::beforeAll`) automatically:
+ *   - skips harness bringup when the container is already running
+ *     (so `bun test` after `bun scripts/test-docker.ts up` is a no-op
+ *     for the harness)
+ *   - brings the harness up + tears it down if it wasn't already
+ *     running (so `bun test` works standalone too)
+ *
+ * Run:
+ *   bun scripts/test-docker.ts test
+ *
+ * Or directly (no script needed):
+ *   bun test tests/hosts/
  */
-import { $ } from 'bun'
+const COMPOSE_FILE = 'tests/docker/docker-compose.yml'
+const CONTAINER = 'sandstone-cli-host-test'
 
 function log(step: string, msg = ''): void {
   const ts = new Date().toISOString().slice(11, 19)
   process.stdout.write(`[test-docker ${ts}] ${step}${msg ? `: ${msg}` : ''}\n`)
 }
 
-const env = {
-  TEST_SSH_HOST: 'localhost',
-  TEST_SSH_PORT: '2222',
-  TEST_SSH_USER: 'mctest',
-  TEST_SSH_PASSWORD: 'testpass',
-  TEST_SSH_KEY_PATH: '.temp/test-harness/ssh-key',
-  TEST_FTP_HOST: 'localhost',
-  TEST_FTP_PORT: '8235',
-  TEST_FTP_USER: 'mctest',
-  TEST_FTP_PASSWORD: 'testpass',
-  // RCON env vars are NOT consumed by tests in this pass; they are
-  // set here so a future pass can add rcon.test.ts and/or composite
-  // ssh+rcon / ftp+rcon tests without re-templating this script.
-  TEST_RCON_HOST: 'localhost',
-  TEST_RCON_PORT: '25575',
-  TEST_RCON_PASSWORD: 'testpass',
-  TEST_SERVER_DIR: '/home/mctest/server',
-}
-
-async function runTests(): Promise<number> {
-  log('tests', 'spawning bun test tests/hosts/')
-  const proc = Bun.spawn(['bun', 'test', 'tests/hosts/'], {
-    env: { ...process.env, ...env },
+async function dockerCompose(...args: string[]): Promise<void> {
+  const proc = Bun.spawn(['docker', 'compose', '-f', COMPOSE_FILE, ...args], {
     stdout: 'inherit',
     stderr: 'inherit',
   })
   const code = await proc.exited
-  log('tests', `bun test exited ${code}`)
-  return code
+  if (code !== 0) {
+    throw new Error(`docker compose ${args.join(' ')} exited ${code}`)
+  }
 }
 
-async function main(): Promise<void> {
-  let exitCode = 1
-  try {
-    exitCode = await runTests()
-  } catch (err) {
-    log('error', err instanceof Error ? err.message : String(err))
-    exitCode = 1
+async function containerStatus(): Promise<'missing' | 'stopped' | 'starting' | 'healthy' | 'unhealthy'> {
+  const proc = Bun.spawn(
+    ['docker', 'inspect', '--format', '{{.State.Health.Status}}|{{.State.Status}}', CONTAINER],
+    { stdout: 'pipe', stderr: 'pipe' },
+  )
+  const out = await new Response(proc.stdout).text()
+  await proc.exited
+  const [health, state] = out.trim().split('|')
+  if (state === 'exited' || state === 'dead' || state === 'removing') return 'stopped'
+  if (!state) return 'missing'
+  if (health === 'healthy') return 'healthy'
+  if (health === 'unhealthy') return 'unhealthy'
+  return 'starting'
+}
+
+async function waitForHealthy(timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let poll = 0
+  while (Date.now() < deadline) {
+    poll++
+    const s = await containerStatus()
+    log('health', `poll ${poll}: status=${s}`)
+    if (s === 'healthy') return
+    if (s === 'unhealthy') {
+      throw new Error(`harness container is unhealthy`)
+    }
+    await new Promise((r) => setTimeout(r, 2_000))
   }
-  log('exit', String(exitCode))
-  process.exit(exitCode)
+  throw new Error(`harness did not become healthy within ${timeoutMs}ms`)
+}
+
+async function up(): Promise<number> {
+  log('up', `docker compose -f ${COMPOSE_FILE} up -d --build`)
+  await dockerCompose('up', '-d', '--build')
+  await waitForHealthy(180_000) // MC cold start + asset download
+  return 0
+}
+
+async function down(): Promise<number> {
+  log('down', `docker compose -f ${COMPOSE_FILE} down -v`)
+  try {
+    await dockerCompose('down', '-v', '--remove-orphans')
+  } catch {
+    // Already gone — fine.
+  }
+  return 0
+}
+
+async function printStatus(): Promise<number> {
+  const s = await containerStatus()
+  log('status', s)
+  return s === 'healthy' ? 0 : 1
+}
+
+async function main(): Promise<number> {
+  const cmd = process.argv[2]
+  switch (cmd) {
+    case 'up':
+      return await up()
+    case 'down':
+      return await down()
+    case 'status':
+      return await printStatus()
+    case undefined:
+      console.error('Usage: bun scripts/test-docker.ts <up|down|status>')
+      return 2
+    default:
+      console.error(`Unknown subcommand: ${cmd}`)
+      return 2
+  }
 }
 
 process.on('SIGINT', () => process.exit(130))
 process.on('SIGTERM', () => process.exit(143))
 
-await main()
+export {}
+process.exit(await main())

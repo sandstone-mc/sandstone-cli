@@ -8,9 +8,9 @@
  * imports of the host providers themselves — everything goes
  * through the bundled CLI as a subprocess.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { mkdir, rm } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 // Imported from `src/` (with type declarations) rather than the
@@ -18,6 +18,9 @@ import { fileURLToPath } from 'node:url'
 // runs the same TypeScript directly, so this exercises the same
 // client code the daemon uses internally.
 import { connect as openClient, type Client } from '../../src/commands/connect/client.ts'
+import type { HarnessConfig } from './_harness.ts'
+
+export type { HarnessConfig }
 
 const __dirname = join(fileURLToPath(import.meta.url), '..', '..', '..')
 export const CLI_ROOT = __dirname
@@ -173,4 +176,174 @@ export async function openDaemonClient(daemon: RunningDaemon): Promise<Client> {
   const endpointRaw = readFileSync(daemon.endpointPath, 'utf8').trim()
   const endpoint = JSON.parse(endpointRaw) as Parameters<typeof openClient>[0]['endpoint']
   return await openClient({ endpoint })
+}
+
+// ---------------------------------------------------------------------------
+// Docker harness lifecycle (tests/hosts/host.test.ts imports these)
+// ---------------------------------------------------------------------------
+
+export const COMPOSE_FILE = 'tests/docker/docker-compose.yml'
+export const CONTAINER = 'sandstone-cli-host-test'
+export const SSH_KEY_HOST_PATH = '/home/mctest/.ssh/id_ed25519'
+export const SSH_KEY_TEST_PATH = resolve('.temp/test-harness/ssh-key')
+
+function log(step: string, msg = ''): void {
+  const ts = new Date().toISOString().slice(11, 19)
+  process.stdout.write(`[host.test ${ts}] ${step}${msg ? `: ${msg}` : ''}\n`)
+}
+
+async function dockerCompose(...args: string[]): Promise<void> {
+  const proc = Bun.spawn(['docker', 'compose', '-f', COMPOSE_FILE, ...args], {
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
+  const code = await proc.exited
+  if (code !== 0) {
+    throw new Error(`docker compose ${args.join(' ')} exited ${code}`)
+  }
+}
+
+/** Poll until the harness healthcheck flips to healthy or the deadline hits. */
+export async function waitForHealthy(timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let poll = 0
+  while (Date.now() < deadline) {
+    poll++
+    const proc = Bun.spawn(
+      ['docker', 'inspect', '--format', '{{.State.Health.Status}}', 'sandstone-cli-host-test'],
+      { stdout: 'pipe', stderr: 'pipe' },
+    )
+    const out = await new Response(proc.stdout).text()
+    await proc.exited
+    const status = out.trim()
+    log('health', `poll ${poll}: status=${status || 'unknown'}`)
+    if (status === 'healthy') return
+    if (status && status !== 'starting') {
+      throw new Error(`harness container is unhealthy: ${status}`)
+    }
+    await new Promise((r) => setTimeout(r, 2_000))
+  }
+  throw new Error(`harness did not become healthy within ${timeoutMs}ms`)
+}
+
+/** Poll MC's logs for the "Done (" line so the JVM is truly ready. */
+export async function waitForMcBoot(timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const proc = Bun.spawn(
+      ['docker', 'compose', '-f', COMPOSE_FILE, 'logs', '--no-color', '--no-log-prefix', 'mc'],
+      { stdout: 'pipe', stderr: 'pipe' },
+    )
+    const out = await new Response(proc.stdout).text()
+    await proc.exited
+    if (/Done \(/.test(out)) {
+      log('mc-boot', 'detected "Done (" — booted')
+      return
+    }
+    await new Promise((r) => setTimeout(r, 2_000))
+  }
+  throw new Error(`Minecraft did not finish booting within ${timeoutMs}ms`)
+}
+
+/** Pull the SSH private key out of the harness into `.temp/test-harness/`. */
+export async function copySshKey(): Promise<void> {
+  mkdirSync(dirname(SSH_KEY_TEST_PATH), { recursive: true })
+  await dockerCompose('cp', `mc:${SSH_KEY_HOST_PATH}`, SSH_KEY_TEST_PATH)
+  await Bun.spawn(['chmod', '600', SSH_KEY_TEST_PATH]).exited
+}
+
+/**
+ * Suite-scoped flag set by `ensureHarnessUp`. When `true`, we
+ * brought the harness up ourselves and are responsible for tearing
+ * it down — `teardownHarnessIfOurs` will honor that. When `false`,
+ * the harness was already running (or we skipped entirely) and we
+ * leave it alone.
+ */
+export let harnessBroughtUp = false
+export function setHarnessBroughtUp(value: boolean): void {
+  harnessBroughtUp = value
+}
+
+/**
+ * Bring the harness up. Auto-detects whether it's already running:
+ *
+ * - `TEST_SKIP_HARNESS=1` → assume up, don't touch anything. Used for
+ *   fast local iteration against a harness the user is managing
+ *   manually.
+ * - Already healthy → leave alone, don't tear down later.
+ * - Anything else (missing / stopped / starting) → bring it up from
+ *   scratch + set `harnessBroughtUp = true` so `teardownHarness`
+ *   cleans up.
+ *
+ * Throws on build / start failures.
+ */
+export async function ensureHarnessUp(): Promise<void> {
+  if (process.env.TEST_SKIP_HARNESS === '1') {
+    log('harness', 'TEST_SKIP_HARNESS=1 — assuming harness is already up')
+    return
+  }
+  const state = await probeHarnessState()
+  if (state === 'healthy') {
+    log('harness', `already ${state} — leaving alone`)
+    return
+  }
+  log('harness', `state=${state}, bringing up`)
+  await dockerCompose('up', '-d', '--build')
+  await waitForHealthy(180_000) // MC cold start + asset download
+  await waitForMcBoot(30_000)
+  await copySshKey()
+  setHarnessBroughtUp(true)
+}
+
+/**
+ * Teardown counterpart to `ensureHarnessUp`. Only tears down when
+ * `harnessBroughtUp` is true (i.e. we brought it up — so we own
+ * the lifecycle). If the harness was user-managed or TEST_SKIP_HARNESS
+ * was set, this is a no-op.
+ */
+export async function teardownHarness(): Promise<void> {
+  if (process.env.TEST_SKIP_HARNESS === '1') return
+  if (!harnessBroughtUp) {
+    log('teardown', 'skipped (we did not start the harness)')
+    return
+  }
+  log('teardown', `docker compose -f ${COMPOSE_FILE} down -v`)
+  try {
+    await dockerCompose('down', '-v', '--remove-orphans')
+  } catch {
+    // Already gone — fine.
+  }
+}
+
+/**
+ * Probe the harness container's state via `docker inspect`. Returns a
+ * string the suite uses to decide whether `ensureHarnessUp` should
+ * actually bring it up or treat it as user-managed.
+ *
+ * - `missing`  → no container (or `docker inspect` errored)
+ * - `stopped`  → container exists but the JVM exited / was removed
+ * - `healthy`  → up + healthcheck passed
+ * - `starting` / `unhealthy` → mid-startup or failed healthcheck
+ */
+export async function probeHarnessState(): Promise<
+  'missing' | 'stopped' | 'starting' | 'healthy' | 'unhealthy'
+> {
+  const proc = Bun.spawn(
+    [
+      'docker',
+      'inspect',
+      '--format',
+      '{{.State.Health.Status}}|{{.State.Status}}',
+      CONTAINER,
+    ],
+    { stdout: 'pipe', stderr: 'pipe' },
+  )
+  const out = await new Response(proc.stdout).text()
+  await proc.exited
+  const [health, state] = out.trim().split('|')
+  if (state === 'exited' || state === 'dead' || state === 'removing') return 'stopped'
+  if (!state) return 'missing'
+  if (health === 'healthy') return 'healthy'
+  if (health === 'unhealthy') return 'unhealthy'
+  return 'starting'
 }

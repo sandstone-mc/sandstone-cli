@@ -17,7 +17,7 @@ import { ghFetchText } from '../../utils/github.js'
 import { spawn as shellSpawn } from '../../utils/shell.js'
 import { Capability, type HostCapabilities, type HostProvider, type IntegratedHostConfig, type IntegratedHostModsConfig, type LogChunkHandler, type LogSubscription, type ServerPath } from '../types.js'
 import { ChildProcessWithoutNullStreams } from 'node:child_process'
-import { MINECRAFT_LOG_PREFIX } from 'src/commands/run.js';
+import { MINECRAFT_LOG_PREFIX } from '../../commands/run.js'
 
 /** sha512 file hash of a tracked mod (Modrinth-installed or URL-installed). */
 type ModSha512 = string

@@ -30,7 +30,9 @@ import {
   type WelcomeEvent,
 } from './rpc.js'
 import { capabilitiesToRecord } from '../../hosts/types.js'
-import { RpcHandlerError, ShutdownSignal, dispatch, narrowMethod, withHost, attachLogsCapability, type DispatchContext } from './dispatch.js'
+import { RpcHandlerError, ShutdownSignal, dispatch, narrowMethod, withHost, attachLogsCapability, handleSessionClose, type DispatchContext } from './dispatch.js'
+import type { ActiveConfig } from './active-config.js'
+import { type RebuildState, type WatcherStatus, notification } from './rpc.js'
 import { SubscriptionRegistry } from './subscriptions.js'
 import type { HostProvider } from '../../hosts/types.js'
 import type { SessionContext } from './types.js'
@@ -57,6 +59,54 @@ export interface ServerOptions {
   port: number
   /** Invoked when the first client sends `shutdown` RPC. */
   onShutdown: () => void | Promise<void>
+  /**
+   * Live `sandstone.config.ts` state. Seeded by the daemon at boot from
+   * disk (`loadActiveConfigFromDisk`) and refreshed whenever the
+   * watcher pushes a new snapshot via `publishConfig`. Threaded into
+   * every dispatch context so the read-only RPC handlers
+   * (`getActiveConfig`, `getBuildOutputTree`, `readBuildLog`) can answer
+   * from in-memory state without disk I/O per call.
+   *
+   * `undefined` only when the daemon was started without a project
+   * root (unusual; handlers surface that as `NotConnected`).
+   */
+  activeConfig?: ActiveConfig
+  /**
+   * Mutator for the live snapshot. The daemon holds the source of
+   * truth and supplies this closure so `publishConfig` can atomically
+   * swap the state. Future dispatch contexts pick up the new value
+   * via the same closure.
+   */
+  setActiveConfig?: (cfg: ActiveConfig) => void
+  /**
+   * Snapshot read of the latest build state the watcher pushed via
+   * `publishRebuild`. `undefined` until the first push. Used by MCP
+   * `sandstone://rebuild-state` resource handler.
+   */
+  getRebuildState?: () => RebuildState | undefined
+  /** Mutator for the latest build state. */
+  setRebuildState?: (state: RebuildState) => void
+  /** Snapshot read of the current watcher status. */
+  getWatcherStatus?: () => WatcherStatus | null
+  /** Mutator for the current watcher status. */
+  setWatcherStatus?: (status: WatcherStatus, ws: unknown) => void
+  /** Append log entries to one of the daemon's bounded buffers. */
+  appendLogLines?: (entries: { line: string; ts: number }[], target: 'build' | 'test') => void
+  /** Snapshot read of a named log buffer with filtering. */
+  readLogBuffer?: (target: 'build' | 'test', opts?: {
+    tail?: number | null
+    maxLines?: number | null
+    range?: { from: number; to: number } | null
+    since?: number | null
+    until?: number | null
+  }) => {
+    lines: string[]
+    totalLines: number
+    matchedLines: number
+    oldestTs: string | null
+    newestTs: string | null
+    truncated: boolean
+  }
 }
 
 export interface RunningServer {
@@ -87,10 +137,18 @@ export function startServer(opts: ServerOptions): RunningServer {
   // returned `RunningServer.broadcast`. Flips each session's
   // `shuttingDown` flag so further RPCs from that client are answered
   // with the synthetic `'daemon shutting down'` error.
+  //
+  // IMPORTANT: only sets `shuttingDown` when the event is the
+  // `daemonShutdown` notification. Other events (`configChanged`,
+  // `log`, future `rebuildComplete`) must NOT mark sessions as
+  // shutting-down — the watcher sends several RPCs in rapid succession
+  // (publishLog, publishConfig, publishWatcherStatus) and any
+  // broadcast between them would falsely reject the later ones.
   function broadcast(eventName: string, data: unknown): void {
     const envelope = JSON.stringify(event(eventName, data))
+    const isShutdown = eventName === 'daemonShutdown'
     for (const [ws, ctx] of sessions) {
-      ctx.shuttingDown = true
+      if (isShutdown) ctx.shuttingDown = true
       try {
         ws.sendText(envelope)
       } catch {
@@ -179,6 +237,31 @@ export function startServer(opts: ServerOptions): RunningServer {
         ws,
         pushLog: (lines, subscriptionId, hostType) => pushLog(ctx, ws, subscriptionId, lines, hostType),
         startedAt,
+        activeConfig: opts.activeConfig,
+        setActiveConfig: opts.setActiveConfig,
+        getRebuildState: opts.getRebuildState,
+        setRebuildState: opts.setRebuildState,
+        getWatcherStatus: opts.getWatcherStatus,
+        setWatcherStatus: opts.setWatcherStatus,
+        appendLogLines: opts.appendLogLines,
+        readLogBuffer: opts.readLogBuffer,
+        broadcast,
+        notifyResourceUpdated: (uri) => {
+          console.error(`[notify-debug] notifyResourceUpdated(${uri}) sessions=${sessions.size}`)
+          // Fire `notifications/resources/updated` to every connected
+          // session. Uses the JSON-RPC notification envelope (not the
+          // legacy `{event, data}` shape that `broadcast` uses for
+          // custom events). Clients without a subscription for `uri`
+          // ignore the notification per spec.
+          const envelope = JSON.stringify(notification(
+            'notifications/resources/updated',
+            { uri },
+          ))
+          for (const [ws, ctx] of sessions) {
+            console.error(`[notify-debug]   sending to ws shuttingDown=${ctx.shuttingDown}`)
+            try { ws.sendText(envelope) } catch { /* disconnected */ }
+          }
+        },
       }
 
       // Narrow the wire-string method to RpcMethod so `dispatch<M>` is
@@ -246,6 +329,24 @@ export function startServer(opts: ServerOptions): RunningServer {
       for (const timer of ctx.flushTimerBySub.values()) clearTimeout(timer)
       ctx.flushTimerBySub.clear()
       await subscriptions.dropAllForWs(ws)
+      // Daemon-supplied hook — used to detect watcher disconnects and
+      // flip `connected: false` on the cached `WatcherStatus`.
+      // Build a minimal dispatchCtx with only the hooks
+      // `handleSessionClose` needs. The full ctx isn't available here
+      // because session close happens outside any request.
+      handleSessionClose(ws, {
+        setWatcherStatus: opts.setWatcherStatus,
+        getWatcherStatus: opts.getWatcherStatus,
+        notifyResourceUpdated: (uri: string) => {
+          const envelope = JSON.stringify(notification(
+            'notifications/resources/updated',
+            { uri },
+          ))
+          for (const [session] of sessions) {
+            try { session.sendText(envelope) } catch { /* disconnected */ }
+          }
+        },
+      } as unknown as DispatchContext)
       console.log(`[ws] connection closed (${ws.remoteAddress})`)
     },
   }

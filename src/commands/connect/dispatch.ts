@@ -9,17 +9,32 @@
  * wires this in per-connection.
  */
 
+import { resolve as resolvePath } from 'node:path'
+
+import * as fs from '../../utils/fs.js'
+
 import {
   PROTOCOL_VERSION,
   errorToRpc,
   type AttachLogParams,
   type AttachLogResult,
+  type BuildOutputEntry,
   type ExecuteRawCommandParams,
   type ExecuteRawCommandResult,
+  type GetActiveConfigResult,
+  type GetBuildOutputTreeParams,
+  type GetBuildOutputTreeResult,
+  type GetWatchedFilesResult,
   type PingResult,
+  type ReadBuildLogParams,
+  type ReadBuildLogResult,
+  type ReadTestLogResult,
   type ReadFileParams,
   type ReadFileResult,
+  type RebuildState,
   type RpcError,
+  type TriggerBuildEvent,
+  type WatcherStatus,
   type RpcMethod,
   type RpcRequest,
   type RpcResult,
@@ -32,6 +47,12 @@ import type { SubscriptionRegistry } from './subscriptions.js'
 import { RpcErrorCode } from './rpc.js'
 import { Capability, capabilitiesToRecord } from '../../hosts/types.js'
 import type { HostProvider, LogChunkHandler, ServerPath } from '../../hosts/types.js'
+import {
+  loadActiveConfigFromDisk,
+  type ActiveConfig,
+} from './active-config.js'
+import type { ActiveSaveConfig } from '../../utils/activeSaveConfig.js'
+import type { LogStreamTarget } from './rpc.js'
 
 export interface DispatchContext {
   host: HostProvider
@@ -43,6 +64,92 @@ export interface DispatchContext {
    *  by fan-out (`attachLogs`) handlers. */
   pushLog: (lines: string[], subscriptionId: string, hostType?: string) => void
   startedAt: number
+  /**
+   * Live in-memory `sandstone.config.ts` snapshot, seeded at daemon
+   * boot from disk and refreshed whenever the watcher pushes a new
+   * one via `publishConfig`. `undefined` only when the daemon was
+   * started without a project root (unusual; surfaced as
+   * `NotConnected` by handlers).
+   */
+  activeConfig?: ActiveConfig
+  /**
+   * Push a server-side event to every connected client. Used by
+   * `publishConfig` to broadcast `configChanged` after the in-memory
+   * state is updated. Optional so dispatch can be invoked without
+   * broadcast in tests; in production it's always set by the server
+   * layer.
+   */
+  broadcast?: (eventName: string, data: unknown) => void
+  /**
+   * Push `notifications/resources/updated` for a specific resource URI
+   * to every connected client. Used by `publishRebuild` to fan out
+   * start/finish events on `sandstone://rebuild-state`. Optional for
+   * the same reason as `broadcast`.
+   */
+  notifyResourceUpdated?: (uri: string) => void
+  /**
+   * Called by the server when ANY WS session closes. Used by the
+   * daemon to detect watcher disconnects — if the closing ws is the
+   * one that published `WatcherStatus`, flip `connected: false` and
+   * fire a resource notification.
+   */
+  onSessionClose?: (ws: unknown) => void
+  /**
+   * Mutator for the live snapshot. Called by `publishConfig` to atomically
+   * swap in the new state; subsequent reads (via the same `dispatchCtx`
+   * or any future one) see the new value. Holds a single closure-side
+   * ref so the daemon's state is the single source of truth for all
+   * connections.
+   */
+  setActiveConfig?: (cfg: ActiveConfig) => void
+  /**
+   * Snapshot read of the latest build state the watcher pushed.
+   * `undefined` until the first build completes. MCP server reads this
+   * when serving `resources/read sandstone://rebuild-state`.
+   */
+  getRebuildState?: () => RebuildState | undefined
+  /**
+   * Mutator for the latest build state. Set by `publishRebuild` after
+   * parsing the params; subsequent reads via `getRebuildState` see the
+   * new value.
+   */
+  setRebuildState?: (state: RebuildState) => void
+  /**
+   * Snapshot read of the current watcher status. `null` until the
+   * first `publishWatcherStatus` lands; flipped back to `null` when
+   * the watcher's WS session closes.
+   */
+  getWatcherStatus?: () => WatcherStatus | null
+  /** Mutator for the current watcher status. */
+  setWatcherStatus?: (status: WatcherStatus, ws: unknown) => void
+  /**
+   * Append log entries to one of the daemon's bounded circular
+   * buffers. The watcher/test-runner calls this every time it emits
+   * a log line; MCP reads the buffer via `readBuildLog`/`readTestLog`.
+   * The buffer is the canonical source — the on-disk log file (e.g.
+   * `watch.log`) is only kept for humans tailing it directly.
+   */
+  appendLogLines?: (entries: { line: string; ts: number }[], target: LogStreamTarget) => void
+  /**
+   * Snapshot read of a named log buffer with filtering. Returns the
+   * filtered lines, the buffer's total length (pre-filter), the number
+   * of matching entries (post-filter, pre-truncation), and the oldest
+   * and newest timestamps in the returned slice.
+   */
+  readLogBuffer?: (target: LogStreamTarget, opts?: {
+    tail?: number | null
+    maxLines?: number | null
+    range?: { from: number; to: number } | null
+    since?: number | null
+    until?: number | null
+  }) => {
+    lines: string[]
+    totalLines: number
+    matchedLines: number
+    oldestTs: string | null
+    newestTs: string | null
+    truncated: boolean
+  }
 }
 
 /**
@@ -101,6 +208,18 @@ const KNOWN_METHODS: ReadonlySet<string> = new Set<RpcMethod>([
   'attachLogs',
   'unattach',
   'shutdown',
+  'getActiveConfig',
+  'getBuildOutputTree',
+  'readBuildLog',
+  'readTestLog',
+  'getWatchedFiles',
+  'publishConfig',
+  'publishLog',
+  'publishRebuild',
+  'getRebuildState',
+  'publishWatcherStatus',
+  'getWatcherStatus',
+  'publishTriggerBuild',
 ])
 
 /** Narrow a parsed-wire method string to {@link RpcMethod}, throwing on unknown. */
@@ -146,6 +265,30 @@ async function route(
       return handleAttachLogs(ctx, params)
     case 'unattach':
       return handleUnattach(ctx, params)
+    case 'getActiveConfig':
+      return handleGetActiveConfig(ctx)
+    case 'getBuildOutputTree':
+      return handleGetBuildOutputTree(ctx, params)
+    case 'readBuildLog':
+      return handleReadBuildLog(ctx, params)
+    case 'readTestLog':
+      return handleReadTestLog(ctx, params)
+    case 'getWatchedFiles':
+      return handleGetWatchedFiles(ctx)
+    case 'publishConfig':
+      return handlePublishConfig(ctx, params)
+    case 'publishLog':
+      return handlePublishLog(ctx, params)
+    case 'publishRebuild':
+      return handlePublishRebuild(ctx, params)
+    case 'getRebuildState':
+      return handleGetRebuildState(ctx)
+    case 'publishWatcherStatus':
+      return handlePublishWatcherStatus(ctx, params)
+    case 'getWatcherStatus':
+      return handleGetWatcherStatus(ctx)
+    case 'publishTriggerBuild':
+      return handlePublishTriggerBuild(ctx)
     case 'shutdown':
       throw new ShutdownSignal()
     default: {
@@ -337,6 +480,236 @@ async function handleUnattach(ctx: DispatchContext, params: unknown): Promise<vo
 }
 
 // ---------------------------------------------------------------------------
+// Project-state handlers (consumed by `sand mcp` and other observers)
+// ---------------------------------------------------------------------------
+
+async function requireActiveConfig(ctx: DispatchContext): Promise<ActiveConfig> {
+  if (!ctx.activeConfig) {
+    throw rpcError(
+      RpcErrorCode.NotConnected,
+      'No active `sandstone.config.ts`. Run `sand connect` from a Sandstone project, or start `sand watch` to publish one.',
+    )
+  }
+  return ctx.activeConfig
+}
+
+async function handleGetActiveConfig(ctx: DispatchContext): Promise<GetActiveConfigResult> {
+  const cfg = await requireActiveConfig(ctx)
+  return {
+    mode: cfg.mode,
+    configPath: cfg.configPath,
+    saveConfig: cfg.saveConfig,
+    outputDir: cfg.outputDir,
+    projectRoot: cfg.projectRoot,
+    loadedAt: cfg.loadedAt,
+  }
+}
+
+async function handleGetBuildOutputTree(
+  ctx: DispatchContext,
+  params: unknown,
+): Promise<GetBuildOutputTreeResult> {
+  const cfg = await requireActiveConfig(ctx)
+  const { path: subpath = '', limit = 1000 } = parseParams<GetBuildOutputTreeParams>(params, [])
+  return listDirectory(cfg.outputDir, subpath, limit)
+}
+
+async function handleReadBuildLog(
+  ctx: DispatchContext,
+  params: unknown,
+): Promise<ReadBuildLogResult> {
+  const cfg = await requireActiveConfig(ctx)
+  // All six params are present in every wire call (URI template
+  // matching requires it). `null` is the wire shape for "no filter"
+  // — the MCP resource layer already translated the URI's `-1`
+  // sentinel before sending.
+  const { tail, maxLines, range, since, until } = parseParams<ReadBuildLogParams>(
+    params,
+    ['tail', 'maxLines', 'range', 'since', 'until'],
+  )
+  if (!ctx.readLogBuffer) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon has no log buffer configured')
+  }
+  const buf = ctx.readLogBuffer('build', { tail, maxLines, range, since, until })
+  return {
+    path: cfg.logPath,
+    lines: buf.lines,
+    totalLines: buf.totalLines,
+    matchedLines: buf.matchedLines,
+    oldestTs: buf.oldestTs,
+    newestTs: buf.newestTs,
+    truncated: buf.truncated,
+  }
+}
+
+async function handleReadTestLog(
+  ctx: DispatchContext,
+  params: unknown,
+): Promise<ReadTestLogResult> {
+  const { tail, maxLines, range, since, until } = parseParams<ReadBuildLogParams>(
+    params,
+    ['tail', 'maxLines', 'range', 'since', 'until'],
+  )
+  if (!ctx.readLogBuffer) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon has no log buffer configured')
+  }
+  const buf = ctx.readLogBuffer('test', { tail, maxLines, range, since, until })
+  // No canonical file path for the test log — return a placeholder so
+  // consumers can display a useful hint.
+  return {
+    path: '<test-runner-buffer>',
+    lines: buf.lines,
+    totalLines: buf.totalLines,
+    matchedLines: buf.matchedLines,
+    oldestTs: buf.oldestTs,
+    newestTs: buf.newestTs,
+    truncated: buf.truncated,
+  }
+}
+
+async function handlePublishLog(
+  ctx: DispatchContext,
+  params: unknown,
+): Promise<void> {
+  if (!ctx.appendLogLines) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to accept log lines')
+  }
+  const { entries, target } = parseParams<{
+    entries: Array<{ line: string; ts: number }>
+    target?: LogStreamTarget
+  }>(params, ['entries'])
+  ctx.appendLogLines(entries, target ?? 'build')
+}
+
+async function handlePublishRebuild(
+  ctx: DispatchContext,
+  params: unknown,
+): Promise<void> {
+  if (!ctx.setRebuildState) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to track rebuild state')
+  }
+  if (!ctx.notifyResourceUpdated) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to broadcast resource notifications')
+  }
+  const p = parseParams<RebuildState>(
+    params,
+    ['state', 'fileCount', 'errorCount', 'warningCount', 'at'],
+  )
+  // The watcher stamps `at`; trust it. If absent, fall back to "now".
+  const state: RebuildState = {
+    state: p.state,
+    fileCount: p.fileCount,
+    errorCount: p.errorCount,
+    warningCount: p.warningCount,
+    at: p.at ?? new Date().toISOString(),
+    ...(p.message !== undefined ? { message: p.message } : {}),
+  }
+  ctx.setRebuildState(state)
+  ctx.notifyResourceUpdated('sandstone://rebuild-state')
+}
+
+async function handleGetRebuildState(ctx: DispatchContext): Promise<{ state: RebuildState | null }> {
+  if (!ctx.getRebuildState) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to expose rebuild state')
+  }
+  return { state: ctx.getRebuildState() ?? null }
+}
+
+async function handlePublishWatcherStatus(
+  ctx: DispatchContext,
+  params: unknown,
+): Promise<void> {
+  if (!ctx.setWatcherStatus) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to track watcher status')
+  }
+  if (!ctx.notifyResourceUpdated) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to broadcast resource notifications')
+  }
+  const p = parseParams<{
+    connected: boolean
+    mode: 'pack' | 'library' | null
+    manual: boolean
+    path: string
+    pid: number
+    at: string
+  }>(params, ['connected', 'mode', 'manual', 'path', 'pid', 'at'])
+  ctx.setWatcherStatus({
+    connected: p.connected,
+    mode: p.mode,
+    manual: p.manual,
+    path: p.path,
+    pid: p.pid,
+    at: p.at ?? new Date().toISOString(),
+  }, ctx.ws)
+  ctx.notifyResourceUpdated('sandstone://watcher-status')
+}
+
+async function handleGetWatcherStatus(ctx: DispatchContext): Promise<{ status: WatcherStatus | null }> {
+  if (!ctx.getWatcherStatus) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to expose watcher status')
+  }
+  const status = ctx.getWatcherStatus()
+  return { status: status ?? null }
+}
+
+async function handlePublishTriggerBuild(ctx: DispatchContext): Promise<{ triggered: boolean }> {
+  // Fan a `triggerBuild` event out to every connected session. The
+  // watcher subscribes (via `client.onTriggerBuild`) and runs its
+  // rebuild path; MCP clients ignore the event.
+  if (!ctx.broadcast) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to broadcast events')
+  }
+  ctx.broadcast('triggerBuild', { at: new Date().toISOString() })
+  return { triggered: true }
+}
+
+async function handlePublishConfig(
+  ctx: DispatchContext,
+  params: unknown,
+): Promise<void> {
+  const p = parseParams<{
+    mode: 'pack' | 'library'
+    configPath: string
+    saveConfig: ActiveSaveConfig | undefined
+    outputDir: string
+    projectRoot: string
+    loadedAt: string
+  }>(params, ['mode', 'configPath', 'saveConfig', 'outputDir', 'projectRoot', 'loadedAt'])
+  if (!ctx.setActiveConfig) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to accept published configs')
+  }
+  if (!ctx.broadcast) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to broadcast events')
+  }
+  const next: ActiveConfig = {
+    mode: p.mode,
+    configPath: p.configPath,
+    saveConfig: p.saveConfig,
+    outputDir: p.outputDir,
+    // Watcher always logs at the project root, not under `test/`.
+    logPath: `${p.projectRoot}/.sandstone/watch.log`,
+    projectRoot: p.projectRoot,
+    loadedAt: p.loadedAt,
+  }
+  ctx.setActiveConfig(next)
+  ctx.broadcast('configChanged', {
+    saveConfig: next.saveConfig,
+    mode: next.mode,
+    configPath: next.configPath,
+    detectedAt: new Date().toISOString(),
+  })
+}
+
+async function handleGetWatchedFiles(_ctx: DispatchContext): Promise<GetWatchedFilesResult> {
+  // The daemon doesn't track per-file watcher state itself — the watcher
+  // pushes `rebuildComplete` events, not per-file deltas. Return an
+  // empty list rather than 501-ing; clients that want fine-grained
+  // events should subscribe to `rebuildComplete` and diff the output
+  // tree themselves.
+  return { files: [] }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -394,3 +767,93 @@ function rpcError(code: number, message: string): RpcError {
 function notImplemented(method: string): never {
   throw new Error(`Host advertises capability but does not implement: ${method}`)
 }
+
+/**
+ * Module-level watcher-ws tracking. Dispatch tracks which WS session is
+ * the watcher so `onSessionClose` (called from server.ts's session
+ * close hook) can detect disconnects and flip `connected: false`
+ * atomically. Lives outside `DispatchContext` because the tracking
+ * outlives any single request — the watcher connects once and may
+ * publish multiple `publishRebuild` events over its lifetime.
+ */
+let watcherWs: unknown = undefined
+
+/**
+ * Called by the server when ANY WS session closes. If the closing ws
+ * is the one that published `WatcherStatus`, flip `connected: false`
+ * via `setWatcherStatus(undefined_ws)` and fire a resource notification.
+ *
+ * Exported so server.ts's session-close handler can call it
+ * (the session close happens outside any request — no dispatchCtx).
+ */
+export function handleSessionClose(ws: unknown, ctx: DispatchContext): void {
+  if (watcherWs !== ws) return
+  watcherWs = undefined
+  if (!ctx.setWatcherStatus || !ctx.getWatcherStatus || !ctx.notifyResourceUpdated) return
+  const prev = ctx.getWatcherStatus()
+  if (prev === null) return
+  ctx.setWatcherStatus({ ...prev, connected: false }, undefined)
+  ctx.notifyResourceUpdated('sandstone://watcher-status')
+}
+
+// ---------------------------------------------------------------------------
+// Project-state helpers (used by the read-only RPC handlers above)
+// ---------------------------------------------------------------------------
+
+const MAX_LOG_BYTES_DEFAULT = 256 * 1024
+const MAX_LOG_TAIL_DEFAULT = 200
+const MAX_DIR_ENTRIES_DEFAULT = 1000
+
+/**
+ * List one level of a build output directory. Returns `{path, size, mtime, isDirectory}`
+ * for each direct child; non-recursive. `path` is the requested subpath
+ * relative to `baseDir` (empty string = the base). `truncated` is set when
+ * the result was capped by `limit` so callers can prompt for more.
+ *
+ * Missing directories return `{entries: [], truncated: false}` — the
+ * `sandstone build`/`sand watch` daemon may legitimately have no output
+ * yet (first run, clean state).
+ */
+async function listDirectory(
+  baseDir: string,
+  subpath: string,
+  limit: number,
+): Promise<GetBuildOutputTreeResult> {
+  const target = resolvePath(baseDir, subpath)
+  if (!(await fs.pathExists(target))) {
+    return { baseDir, entries: [], truncated: false }
+  }
+  const cap = Math.max(1, limit ?? MAX_DIR_ENTRIES_DEFAULT)
+  const dirents = await fs.readDirEntries(target)
+  const entries: BuildOutputEntry[] = []
+  for (const d of dirents) {
+    if (entries.length >= cap) {
+      return { baseDir, entries, truncated: true }
+    }
+    const full = resolvePath(target, d.name)
+    let size = 0
+    let mtime: Date
+    try {
+      const s = await fs.fileStat(full)
+      size = d.isDirectory ? 0 : s.size
+      mtime = s.mtime
+    } catch {
+      // File deleted between readdir and stat — skip with a sentinel
+      // mtime so the entry still surfaces (caller decides what to do).
+      mtime = new Date(0)
+    }
+    entries.push({
+      path: d.name,
+      size,
+      mtime: mtime.toISOString(),
+      isDirectory: d.isDirectory,
+    })
+  }
+  return { baseDir, entries, truncated: false }
+}
+
+/**
+ * Default cap for the daemon's in-memory build-log buffer.
+ * Bound so a long-running watcher doesn't blow up daemon memory.
+ */
+const MAX_LOG_BUFFER_LINES = 1000

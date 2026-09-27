@@ -13,14 +13,30 @@ import {
   err,
   ok,
   type ExecuteRawCommandResult,
+  type GetActiveConfigResult,
+  type GetBuildOutputTreeResult,
+  type GetRebuildStateResult,
+  type GetWatchedFilesResult,
+  type LogLineEntry,
+  type PublishConfigParams,
+  type PublishLogParams,
+  type PublishRebuildParams,
+  type PublishTriggerBuildResult,
+  type PublishWatcherStatusParams,
   type PingResult,
+  type ReadBuildLogParams,
+  type ReadBuildLogResult,
+  type GetWatcherStatusResult,
+  type ReadTestLogResult,
   type ReadFileResult,
   type RpcError,
   type RpcMethod,
   type RpcRequest,
   type RpcResponse,
+  type TriggerBuildEvent,
   type WelcomeEvent,
 } from './rpc.js'
+import type { ActiveSaveConfig } from '../../utils/activeSaveConfig.js'
 import type { EndpointFile } from './endpoint-file.js'
 
 /**
@@ -99,6 +115,19 @@ export async function connect(opts: ClientOptions): Promise<Client> {
   // when the daemon broadcasts `daemonShutdown`, then cleared. Each
   // call returns an unsubscribe closure so callers can detach.
   const shutdownHandlers = new Set<(reason: string) => void>()
+  // Config-change listeners registered via `Client.onConfigChanged`. Fired
+  // every time the daemon pushes a `configChanged` event (i.e. whenever
+  // the watcher publishes a new snapshot). Each call returns an
+  // unsubscribe closure so callers can detach.
+  const configChangedHandlers = new Set<(event: { saveConfig: ActiveSaveConfig | undefined; mode: 'pack' | 'library'; configPath: string; detectedAt: string }) => void>()
+  // Trigger-build listeners registered via `Client.onTriggerBuild`.
+  // Fired when the daemon broadcasts a `triggerBuild` event (after
+  // MCP `runWorkspaceBuild` calls `publishTriggerBuild`).
+  const triggerBuildHandlers = new Set<(event: TriggerBuildEvent) => void>()
+  // Catch-all fallback for WS-received notifications that don't match
+  // any typed handler. Used by MCP to bridge daemon pushes
+  // (e.g. `notifications/resources/updated`) to the stdio transport.
+  let fallbackNotificationHandler: ((notif: { method: string; params?: unknown }) => Promise<void> | void) | undefined
   let nextId = 1
   let closed = false
 
@@ -134,6 +163,26 @@ export async function connect(opts: ClientOptions): Promise<Client> {
       } catch {
         // already closed / never opened
       }
+      return
+    }
+    if ('event' in parsed && parsed.event === 'configChanged') {
+      for (const h of configChangedHandlers) {
+        try { h(parsed.data as { saveConfig: ActiveSaveConfig | undefined; mode: 'pack' | 'library'; configPath: string; detectedAt: string }) } catch { /* swallow */ }
+      }
+      return
+    }
+    if ('event' in parsed && parsed.event === 'triggerBuild') {
+      for (const h of triggerBuildHandlers) {
+        try { h(parsed.data as TriggerBuildEvent) } catch { /* swallow */ }
+      }
+      return
+    }
+    // Any other server-pushed event (e.g. `notifications/resources/updated`,
+    // `notifications/message`). Fire the fallback handler if installed —
+    // MCP uses this to re-emit on the stdio transport.
+    if (fallbackNotificationHandler && 'event' in parsed) {
+      Promise.resolve(fallbackNotificationHandler({ method: parsed.event, params: parsed.data }))
+        .catch(() => { /* swallow */ })
       return
     }
     if ('id' in parsed && (parsed as RpcResponse).id !== undefined) {
@@ -236,11 +285,40 @@ export async function connect(opts: ClientOptions): Promise<Client> {
       const res = await call<{ subscriptionId: string }>('attachLogs', params)
       return buildFanout(res.subscriptionId)
     },
+    getActiveConfig: () => call<GetActiveConfigResult>('getActiveConfig'),
+    getBuildOutputTree: (params) => call<GetBuildOutputTreeResult>('getBuildOutputTree', params),
+    readBuildLog: (params: ReadBuildLogParams) => call<ReadBuildLogResult>('readBuildLog', params),
+    readTestLog: (params: ReadBuildLogParams) => call<ReadTestLogResult>('readTestLog', params),
+    getWatchedFiles: () => call<GetWatchedFilesResult>('getWatchedFiles'),
+    getRebuildState: () => call<GetRebuildStateResult>('getRebuildState'),
+    getWatcherStatus: () => call<GetWatcherStatusResult>('getWatcherStatus'),
+    publishConfig: (params: PublishConfigParams) => call<void>('publishConfig', params),
+    publishLog: (params: PublishLogParams) => call<void>('publishLog', params),
+    publishRebuild: (params: PublishRebuildParams) => call<void>('publishRebuild', params),
+    publishWatcherStatus: (params: PublishWatcherStatusParams) => call<void>('publishWatcherStatus', params),
+    publishTriggerBuild: () => call<PublishTriggerBuildResult>('publishTriggerBuild'),
     shutdown: () => call<void>('shutdown'),
     onShutdown(handler: (reason: string) => void): () => void {
       shutdownHandlers.add(handler)
       return () => {
         shutdownHandlers.delete(handler)
+      }
+    },
+    onConfigChanged(handler: (event: { saveConfig: ActiveSaveConfig | undefined; mode: 'pack' | 'library'; configPath: string; detectedAt: string }) => void): () => void {
+      configChangedHandlers.add(handler)
+      return () => {
+        configChangedHandlers.delete(handler)
+      }
+    },
+    setFallbackNotificationHandler(handler) {
+      fallbackNotificationHandler = async (n) => {
+        await handler(n)
+      }
+    },
+    onTriggerBuild(handler: (event: TriggerBuildEvent) => void): () => void {
+      triggerBuildHandlers.add(handler)
+      return () => {
+        triggerBuildHandlers.delete(handler)
       }
     },
     close() {
@@ -265,6 +343,80 @@ export interface Client {
    *  composite daemon. Only available when the daemon advertises the
    *  `attachLogs` capability. */
   attachLogs(params?: { regex?: string }): Promise<AttachLogsSubscription>
+  /**
+   * Return the daemon's current `sandstone.config.ts` snapshot. The
+   * daemon seeds this from disk at boot and refreshes it whenever the
+   * `sand watch` process publishes a new one via `publishConfig`.
+   */
+  getActiveConfig(): Promise<GetActiveConfigResult>
+  /** List one level of the build output directory. */
+  getBuildOutputTree(params?: { path?: string; limit?: number }): Promise<GetBuildOutputTreeResult>
+  /** Tail the watcher's log buffer with optional line/range/time filtering. */
+  readBuildLog(params?: ReadBuildLogParams): Promise<ReadBuildLogResult>
+  /**
+   * Tail the test-runner's log buffer. Returns empty lines today — the
+   * test runner backend hasn't been wired yet. Same filtering shape as
+   * `readBuildLog` so the MCP resource can offer identical query
+   * semantics once data starts flowing.
+   */
+  readTestLog(params?: ReadBuildLogParams): Promise<ReadTestLogResult>
+  /**
+   * List files the watcher is tracking. Currently a stub — returns
+   * `{files: []}` because the daemon doesn't track per-file state.
+   * Clients that want fine-grained events should listen for
+   * `configChanged` and `rebuildComplete` (the latter when the watcher
+   * starts pushing it).
+   */
+  getWatchedFiles(): Promise<GetWatchedFilesResult>
+  /**
+   * Watcher → daemon push of the current config snapshot. Called by
+   * `sand watch` on boot and after every hot-reload of
+   * `sandstone.config.ts`. Other connected clients (notably `sand mcp`)
+   * receive a `configChanged` event in response.
+   */
+  publishConfig(params: PublishConfigParams): Promise<void>
+  /**
+   * Read the latest build state the watcher pushed via
+   * `publishRebuild`. Returns `null` if no watcher has pushed one
+   * yet. MCP server reads this when serving
+   * `resources/read sandstone://rebuild-state`.
+   */
+  getRebuildState(): Promise<GetRebuildStateResult>
+  /**
+   * Push log lines to the daemon's bounded buffer. The watcher calls
+   * this for every line it would have written to its `watch.log` file;
+   * MCP reads the buffer via {@link readBuildLog}. Each entry
+   * includes the timestamp the watcher stamped when the line was
+   * emitted — daemon stores verbatim, no re-stamping on receipt.
+   */
+  publishLog(params: PublishLogParams): Promise<void>
+  /**
+   * Push the current build's lifecycle state to the daemon. Watcher
+   * calls this at build start (`state: 'started'`) and at completion
+   * (`'complete'` or `'failed'`). Daemon caches the latest snapshot
+   * and fires `notifications/resources/updated` for
+   * `sandstone://rebuild-state` so subscribed MCP clients see live
+   * start/finish events.
+   */
+  publishRebuild(params: PublishRebuildParams): Promise<void>
+  /**
+   * Push the watcher's runtime status. Called by `sand watch` on
+   * connect (after attaching the log subscription). The daemon caches
+   * the snapshot, flips `connected: false` when this WS session ends,
+   * and exposes it via `getWatcherStatus` to MCP's
+   * `sandstone://watcher-status` resource.
+   */
+  publishWatcherStatus(params: PublishWatcherStatusParams): Promise<void>
+  /**
+   * Tell the daemon to fan out a `triggerBuild` event to the
+   * connected watcher. Returns `{triggered: true}` if accepted.
+   */
+  publishTriggerBuild(): Promise<PublishTriggerBuildResult>
+  /**
+   * Read the current watcher status. Returns `null` if no watcher has
+   * connected since the daemon started.
+   */
+  getWatcherStatus(): Promise<GetWatcherStatusResult>
   shutdown(): Promise<void>
   /**
    * Register a one-shot listener for the daemon's `daemonShutdown`
@@ -274,6 +426,25 @@ export interface Client {
    * auto-cleared after firing.
    */
   onShutdown(handler: (reason: string) => void): () => void
+  /**
+   * Register a listener for the daemon's `configChanged` events. The
+   * handler fires every time the watcher publishes a new snapshot.
+   * Returns an unsubscribe function.
+   */
+  onConfigChanged(handler: (event: { saveConfig: ActiveSaveConfig | undefined; mode: 'pack' | 'library'; configPath: string; detectedAt: string }) => void): () => void
+  /**
+   * Register a listener for the daemon's `triggerBuild` events. Watcher
+   * subscribes to react to MCP `runWorkspaceBuild` calls; the daemon
+   * fans the event out after a `publishTriggerBuild` RPC.
+   */
+  onTriggerBuild(handler: (event: { at: string }) => void): () => void
+  /**
+   * Set a catch-all handler for WS-received notifications that don't
+   * match a typed `onXxx` method. Used by the MCP server to bridge
+   * every daemon-pushed notification (e.g. `resources/updated`) to its
+   * own MCP client over stdio.
+   */
+  setFallbackNotificationHandler(handler: (notification: { method: string; params?: unknown }) => Promise<void> | void): void
   close(): void
 }
 

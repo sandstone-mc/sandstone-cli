@@ -3,7 +3,7 @@ import { Argument, Command } from 'commander'
 import chalk from 'chalk-template'
 
 import { CLI_VERSION } from './version.js'
-import { buildCommand, createCommand, watchCommand, installNativeCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand } from './commands/index.js'
+import { buildCommand, createCommand, watchCommand, installNativeCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand, mcpCommand } from './commands/index.js'
 import { BuildOptions } from './utils/commander.js'
 
 if (Bun.which('bun') === null) {
@@ -138,6 +138,22 @@ are supported. Use \`sand build\` to write resources to disk.`)
   .addOption(BuildOptions.get('timeout'))
   .action((commandAndArgs: string[], opts: { path: string; hostType?: string; hostConfig?: string; hostConfigFile?: string; expect?: string; timeout?: string }) => runCommand(opts, commandAndArgs))
   .addArgument(new Argument('<command...>', 'A console command (e.g. "op MulverineX", "say Hello"), or a path to a .mcfunction / .ts file.'))
+
+CLI
+  .command('mcp')
+  .description('Start a stdio MCP server exposing the project state (resources + tools) to LLM agents. Speak JSON-RPC over stdio per the Model Context Protocol spec. Designed to be invoked by an MCP-aware host (Claude Code, Cursor, etc.) as a subprocess. ⛏')
+  .addHelpText('after', `
+Examples:
+  # Register with Claude Code:
+  $ claude mcp add sandstone-cli sand mcp -- --path /abs/path/to/project
+
+  # Run ad-hoc (talks JSON-RPC over stdio):
+  $ sand mcp --path .
+
+Logging output goes to stderr (never stdout) so the MCP protocol on
+stdout stays valid.`)
+  .addOption(BuildOptions.get('path'))
+  .action(mcpCommand)
 
 
 CLI.parse(process.argv)

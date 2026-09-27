@@ -1,14 +1,23 @@
 import type { Subprocess } from 'bun'
+import { join } from 'node:path'
 
-import { Capability, type HostCapabilities, type HostProvider, type LocalClientHostConfig, type LogChunkHandler, type LogSubscription } from '../types.js'
+import { Capability, type HostCapabilities, type HostProvider, type LocalClientHostConfig, type LogChunkHandler, type LogSubscription, type ServerPath } from '../types.js'
 import { spawn as shellSpawn } from '../../utils/shell.js'
+import { readBytes } from '../../utils/fs.js'
 
 /**
  * LocalClient provider — passive log observer of a launcher-managed
  * Minecraft client. Tails `${clientPath}/logs/latest.log` (or `logPath`
  * override) via `tail -F` (POSIX) or PowerShell `Get-Content -Wait`
- * (Windows). No start/stop/exec/files capability — the external
- * launcher owns the client process.
+ * (Windows). No start/stop/exec capability — the external launcher owns
+ * the client process.
+ *
+ * Also exposes `ReadFile` for one-shot reads of files under the
+ * client's directory — notably the log file itself, which MCP's
+ * `readClientLog` resource uses. `relativePath` is interpreted relative
+ * to `clientPath`; pass `logs/latest.log` to read the standard log
+ * file. When the user configured a custom `logPath`, the caller should
+ * pass its absolute path instead (and we read it directly).
  *
  * `connect()`/`disconnect()` are no-ops for the log-tail itself (no
  * session to establish), but the interface still requires them, so they
@@ -17,7 +26,10 @@ import { spawn as shellSpawn } from '../../utils/shell.js'
 export class LocalClientHost implements HostProvider {
   readonly type = 'local-client' as const
   readonly displayName = 'Local Client'
-  readonly capabilities: HostCapabilities = new Set([Capability.AttachLog])
+  readonly capabilities: HostCapabilities = new Set([
+    Capability.AttachLog,
+    Capability.ReadFile,
+  ])
 
   private readonly config: LocalClientHostConfig
   private connected = false
@@ -116,6 +128,34 @@ export class LocalClientHost implements HostProvider {
         }
       },
     }
+  }
+
+  /**
+   * Read a file from the client's filesystem.
+   *
+   * Resolution rules:
+   *   - Absolute `path` — read directly (caller knows the location,
+   *     typically the configured `logPath`).
+   *   - Relative `path` — join with `clientPath` (e.g. pass
+   *     `logs/latest.log` for the default client log location).
+   *
+   * Files outside `clientPath` are rejected when the path is relative;
+   * absolute paths are read as-given (the caller has explicitly chosen
+   * the location).
+   */
+  async readFile(path: ServerPath): Promise<Buffer> {
+    const abs = path.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(path)
+    const full = abs ? path : join(this.config.clientPath, path)
+    if (!abs) {
+      // Light bounds check: a relative path must resolve under
+      // clientPath. Compare prefix after normalising separators.
+      const client = this.config.clientPath.replace(/\\/g, '/').replace(/\/$/, '')
+      const target = full.replace(/\\/g, '/')
+      if (!target.startsWith(client + '/') && target !== client) {
+        throw new Error(`readFile path escapes clientPath: ${path}`)
+      }
+    }
+    return await readBytes(full)
   }
 }
 

@@ -7,6 +7,7 @@ import type { BuildResult, ResourceCounts } from '../../ui/types.js'
 import { log, logDebug, logError, logInfo, logWarn, initLoggerNoFile, initBuildLogger, setSilent } from '../../ui/logger.js'
 import { hash } from '../../utils/index.js'
 import * as fs from '../../utils/fs.js'
+import type { ActiveSaveConfig } from '../../utils/activeSaveConfig.js'
 import { resolveStackTrace } from '../../utils/source-map.js'
 import { syncLinkedLibraries } from '../link.js'
 import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../../utils/updateCheck.js'
@@ -70,6 +71,34 @@ export interface BuildContext {
   sandstoneConfig: sandstone.SandstoneConfig
   sandstonePack: sandstone.SandstonePack
   resetSandstonePack: () => void
+}
+
+/**
+ * Resolve the deployment targets the build pipeline will write to.
+ * Combines `saveOptions` from `sandstone.config.ts` with the CLI/env
+ * overrides the user passed for this invocation (CLI flags take
+ * precedence; `production` mode drops client/server paths).
+ *
+ * Extracted from `_buildProject` so other consumers (notably the
+ * watcher's daemon-publishing path) can compute the exact same
+ * resolution without re-reading the inline merge. Keep both sites in
+ * sync if the rules ever change.
+ */
+export function resolveActiveSaveConfig(
+  cliOptions: BuildOptions,
+  configSaveOptions: sandstone.SandstoneConfig['saveOptions'],
+): ActiveSaveConfig {
+  const saveOptions = configSaveOptions ?? {}
+  return {
+    world: cliOptions.world || saveOptions.world,
+    root: cliOptions.root !== undefined ? cliOptions.root : saveOptions.root,
+    clientPath: !cliOptions.production
+      ? (cliOptions.clientPath || saveOptions.clientPath)
+      : undefined,
+    serverPath: !cliOptions.production
+      ? (cliOptions.serverPath || saveOptions.serverPath)
+      : undefined,
+  }
 }
 
 // Cache management
@@ -205,6 +234,12 @@ interface BuildProjectResult {
   sandstoneConfig: sandstone.SandstoneConfig
   sandstonePack: sandstone.SandstonePack
   resetSandstonePack: () => void
+  /**
+   * The live deploy targets the build ended up using (post-script
+   * mutations). See `BuildResult.activeSaveConfig` for the rationale
+   * — the watcher reads this to republish to the daemon.
+   */
+  activeSaveConfig: ActiveSaveConfig
 }
 
 async function _buildProject(
@@ -241,6 +276,10 @@ async function _buildProject(
 
   const { scripts, resources } = sandstoneConfig
   const saveOptions = sandstoneConfig.saveOptions || {}
+  // Resolve the deployment targets once. Same helper the watcher uses
+  // when publishing to the `sand connect` daemon — keeps both sites in
+  // lockstep if the merge rules change.
+  const activeSaveConfig = resolveActiveSaveConfig(cliOptions, saveOptions)
 
   const outputFolder = path.join(folder, '.sandstone', 'output')
 
@@ -272,14 +311,10 @@ async function _buildProject(
     entrypoint,
 
     // Resolved destinations (mutable — scripts can reroute)
-    worldName: cliOptions.world || saveOptions.world,
-    root: (cliOptions.root !== undefined ? cliOptions.root : saveOptions.root),
-    clientPath: (!cliOptions.production
-      ? (cliOptions.clientPath || saveOptions.clientPath)
-      : undefined),
-    serverPath: (!cliOptions.production
-      ? (cliOptions.serverPath || saveOptions.serverPath)
-      : undefined),
+    worldName: activeSaveConfig.world,
+    root: activeSaveConfig.root,
+    clientPath: activeSaveConfig.clientPath,
+    serverPath: activeSaveConfig.serverPath,
     packName: cliOptions.name ?? sandstoneConfig.name,
 
     // Functions available in every script
@@ -589,7 +624,22 @@ async function _buildProject(
     log(`Pack(s) compiled! (${countMsg})${local.exports ? ` Exported to ${local.exports}.` : ''}`)
   }
 
-  return { resourceCounts: local.resourceCounts, sandstoneConfig, sandstonePack, resetSandstonePack }
+  return {
+    resourceCounts: local.resourceCounts,
+    sandstoneConfig,
+    sandstonePack,
+    resetSandstonePack,
+    // Snapshot the live values the build ended up using (post-script
+    // mutations). The watcher captures this on every successful build
+    // and re-publishes to the daemon so MCP sees the latest state,
+    // not just the static CLI-merge from `resolveActiveSaveConfig`.
+    activeSaveConfig: {
+      world: local.worldName,
+      root: local.root,
+      clientPath: local.clientPath,
+      serverPath: local.serverPath,
+    },
+  }
 }
 
 export async function _buildCommand(
@@ -609,6 +659,7 @@ export async function _buildCommand(
       sandstoneConfig: result?.sandstoneConfig,
       sandstonePack: result?.sandstonePack,
       resetSandstonePack: result?.resetSandstonePack,
+      activeSaveConfig: result?.activeSaveConfig,
     }
   } catch (err: any) {
     const errorMessage = err.message || String(err)

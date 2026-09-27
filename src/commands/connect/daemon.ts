@@ -24,7 +24,9 @@
 import chalk from 'chalk-template'
 import { capabilitiesToRecord, type HostConfigInput, type HostProvider, type HostType } from '../../hosts/types.js'
 import { BootstrapError, bootstrapHosts } from './bootstrap.js'
+import { loadActiveConfigFromDisk, type ActiveConfig } from './active-config.js'
 import { startServer } from './server.js'
+import type { RebuildState, WatcherStatus } from './rpc.js'
 import {
   deleteEndpoint,
   endpointPath,
@@ -156,12 +158,68 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     })
   }
 
-  // 4. Start the WS server. We need the bound port to write the
+  // 4. Load the active `sandstone.config.ts` snapshot. Best-effort: if
+  // the project has no config (yet), leave it undefined and let the
+  // dispatch handlers surface a clear "not a Sandstone project" error.
+  // The watcher will publish a snapshot over WS shortly after it
+  // connects, so an undefined boot-time value is fine — it just means
+  // `getActiveConfig` answers "no active config" until then.
+  let activeConfig: ActiveConfig | undefined
+  try {
+    activeConfig = await loadActiveConfigFromDisk(opts.projectRoot)
+    if (!activeConfig) {
+      console.error(
+        `[connect] no sandstone.config.ts found in ${opts.projectRoot}; ` +
+          `getActiveConfig will return an error until one is created or the watcher publishes one.`,
+      )
+    }
+  } catch (err) {
+    console.error(`[connect] failed to load sandstone.config.ts at boot:`, err)
+  }
+
+  // 5. Start the WS server. We need the bound port to write the
   // endpoint file, so we run startServer first and write the endpoint
   // after.
   const secret = generateSecret()
   const bind = opts.bind ?? '127.0.0.1'
   const port = opts.port ?? 0
+
+  // Two bounded circular buffers of log lines, one per stream target.
+  // Each entry carries its arrival timestamp so the matching read
+  // RPC can filter by time. The buffers are the canonical sources —
+  // any on-disk log files are only kept as a side effect for humans
+  // tailing them directly.
+  //
+  // - `buildBuffer`: pushed by `sand watch` via `publishLog`.
+  // - `testBuffer`: reserved for the future test runner; nothing
+  //   pushes to it yet, but the shape matches so MCP can offer the
+  //   same filtering on `readTestLog`.
+  let buildBuffer: { line: string; ts: number }[] = []
+  let testBuffer: { line: string; ts: number }[] = []
+  const LOG_BUFFER_CAP = 1000
+
+  // Latest rebuild state pushed by the watcher. `undefined` until the
+  // first `publishRebuild` lands. Read by MCP's `sandstone://rebuild-state`
+  // resource handler; updated by the watcher on every build start/finish.
+  let rebuildState: RebuildState | undefined
+
+  // Current watcher status. `null` until `publishWatcherStatus` lands;
+  // flipped to `connected: false` by `handleSessionClose` (in dispatch.ts)
+  // when the watcher's WS session closes. The actual ws tracking lives
+  // in dispatch.ts so the session-close handler can match it without
+  // a round-trip.
+  let watcherStatus: WatcherStatus | null = null
+
+  const pushTo = (target: 'build' | 'test') => (entries: { line: string; ts: number }[]) => {
+    // Source stamps each entry with the emit timestamp. Daemon stores
+    // verbatim — no re-stamping on receipt, so the value reflects
+    // "when the event happened" rather than "when the network packet
+    // landed".
+    const buf = target === 'test' ? testBuffer : buildBuffer
+    buf.push(...entries)
+    const overflow = buf.length - LOG_BUFFER_CAP
+    if (overflow > 0) buf.splice(0, overflow)
+  }
 
   // Race the server start against an outer timeout — if Bun.serve
   // fails (port in use), we'd otherwise hang on `server.port` access.
@@ -176,6 +234,77 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       // would, but record the actual reason.
       shutdownReason = 'shutdown-rpc'
       void handle.shutdown()
+    },
+    activeConfig,
+    // Closure captures `activeConfig` by reference — the `let`
+    // declaration above makes it mutable. Future `publishConfig` calls
+    // (from the watcher) reassign it and all subsequent dispatch
+    // contexts see the new value via the same closure.
+    setActiveConfig: (cfg) => {
+      activeConfig = cfg
+    },
+    // Closure captures `rebuildState` by reference — mutable so future
+    // `publishRebuild` calls reassign it and all subsequent dispatch
+    // contexts see the new value.
+    setRebuildState: (state) => {
+      rebuildState = state
+    },
+    getRebuildState: () => rebuildState,
+    // Watcher passes ctx.ws as the second arg so dispatch.ts can track
+    // which session is the watcher (used by `handleSessionClose` to
+    // flip `connected: false` on disconnect).
+    setWatcherStatus: (status: WatcherStatus, _ws: unknown) => {
+      watcherStatus = status
+    },
+    getWatcherStatus: () => watcherStatus,
+    appendLogLines: (entries, target) => pushTo(target)(entries),
+    readLogBuffer: (target, { tail, maxLines, range, since, until } = {}) => {
+      const buf = target === 'test' ? testBuffer : buildBuffer
+      const totalLines = buf.length
+      const nowMs = Date.now()
+
+      // 1. Time filter: `since`/`until` are seconds-relative-to-now
+      //    (e.g. `since: 300` = "the last 5 minutes"). Convert to ms
+      //    boundaries against the line's `ts`. `null` = no filter.
+      const sinceMs = since != null ? nowMs - since * 1000 : null
+      const untilMs = until != null ? nowMs - until * 1000 : null
+      const timeFiltered = (sinceMs !== null || untilMs !== null)
+        ? buf.filter((e) => {
+          if (sinceMs !== null && e.ts < sinceMs) return false
+          if (untilMs !== null && e.ts > untilMs) return false
+          return true
+        })
+        : buf
+
+      // 2. Range filter: `0` = most recent entry in the (possibly
+      //    time-filtered) buffer. Negative counts from end.
+      let selected = timeFiltered
+      const matchedLines = selected.length
+      if (range) {
+        const { from, to } = range
+        // Normalise to absolute positions relative to `selected`.
+        // `pos = (length - 1) - id` for ID where `0` = newest.
+        const len = selected.length
+        const startIdx = len - 1 - (from < 0 ? len + from : Math.min(from, len - 1))
+        const endIdx = len - 1 - (to < 0 ? len + to : Math.min(to, len - 1))
+        const lo = Math.max(0, Math.min(startIdx, endIdx))
+        const hi = Math.min(len - 1, Math.max(startIdx, endIdx))
+        selected = selected.slice(lo, hi + 1)
+      }
+
+      // 3. `tail`/`maxLines`: cap the final slice.
+      const want = tail ?? maxLines ?? 200
+      const truncated = selected.length > want
+      const lines = truncated ? selected.slice(-want) : selected
+
+      return {
+        lines: lines.map((e) => e.line),
+        totalLines,
+        matchedLines,
+        oldestTs: lines[0] ? new Date(lines[0].ts).toISOString() : null,
+        newestTs: lines[lines.length - 1] ? new Date(lines[lines.length - 1].ts).toISOString() : null,
+        truncated,
+      }
     },
   })
 

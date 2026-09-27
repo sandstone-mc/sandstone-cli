@@ -3,10 +3,11 @@ import { watchFile, unwatchFile } from 'node:fs'
 import { realpath } from 'fs/promises'
 import React from 'react'
 import { render } from 'ink'
-import { join, relative } from 'path'
+import { join, relative, resolve } from 'path'
 
 import { normalizePath } from '../utils/index.js'
 import { _buildCommand, type BuildOptions, type BuildContext } from './build/index.js'
+import type { ActiveSaveConfig } from '../utils/activeSaveConfig.js'
 import { repackIfLinked } from './link.js'
 import { WatchUI, getWatchUIAPI } from '../ui/WatchUI.js'
 import { initLogger, log, logInfo, logWarn, logError, logDebug, logTrace, setLiveLogCallback } from '../ui/logger.js'
@@ -103,7 +104,7 @@ export async function watchCommand(opts: WatchOptions) {
 
   const handleManualRebuild = () => {
     if (pendingChanges.length > 0 && !alreadyBuilding) {
-      log('Manual rebuild triggered')
+      daemonLog('Manual rebuild triggered')
       onFilesChange(pendingChanges)
       pendingChanges = []
     }
@@ -164,7 +165,7 @@ export async function watchCommand(opts: WatchOptions) {
 
     api?.setStatus('building')
     api?.setChangedFiles(changes)
-    log('Building...', changes.map(c => './' + relative(opts.path, c.path).replace(/\\/g, '/')).join(', '))
+    daemonLog(`Building... ${changes.map(c => './' + relative(opts.path, c.path).replace(/\\/g, '/')).join(', ')}`)
 
     const packageJSON = JSON.parse(await fs.readText(join(folder, 'package.json')))
 
@@ -243,6 +244,17 @@ export async function watchCommand(opts: WatchOptions) {
     // Replace global console during build to capture user console.log without messing up Ink UI
     enableConsoleCapture()
     let result
+    // Push the "started" event before the build runs. File/errors/warning
+    // counts are 0 by definition at start time.
+    if (daemonClient) {
+      void daemonClient.publishRebuild({
+        state: 'started',
+        fileCount: 0,
+        errorCount: 0,
+        warningCount: 0,
+        at: new Date().toISOString(),
+      }).catch(() => {})
+    }
     try {
       result = await _buildCommand(opts, folder, buildContext, true)
     } finally {
@@ -256,12 +268,33 @@ export async function watchCommand(opts: WatchOptions) {
         sandstonePack: result.sandstonePack!,
         resetSandstonePack: result.resetSandstonePack!,
       }
+      // Snapshot the deploy targets the build actually used. Re-publish
+      // to the daemon on every successful build so MCP sees live state
+      // (script-side mutations of `local.worldName` etc. propagate here
+      // — `resolveActiveSaveConfig` alone wouldn't see them).
+      lastBuildSaveConfig = result.activeSaveConfig
+      lastBuildConfigPath = resolve(folder, 'sandstone.config.ts')
     }
 
     api?.setBuildResult(result)
 
+    // Push the terminal build state. Aggregate error/warning counts from
+    // the result's `error` field (string, presence indicates failure —
+    // granular counts aren't surfaced today; default to 0).
+    if (daemonClient) {
+      const state = result.success ? 'complete' : 'failed'
+      void daemonClient.publishRebuild({
+        state,
+        fileCount: result.resourceCounts.functions + result.resourceCounts.other,
+        errorCount: result.success ? 0 : 1,
+        warningCount: 0,
+        at: new Date().toISOString(),
+        ...(result.success ? {} : result.error ? { message: result.error.slice(0, 500) } : {}),
+      }).catch(() => {})
+    }
+
     if (result.success) {
-      log(`Build successful: ${result.resourceCounts.functions} functions, ${result.resourceCounts.other} others`)
+      daemonLog(`Build successful: ${result.resourceCounts.functions} functions, ${result.resourceCounts.other} others`)
       lastBuildFailed = false
       // If a daemon is connected, ask it to run `/reload` so the running
       // server picks up the rebuilt datapacks without a restart. Skipped
@@ -271,7 +304,7 @@ export async function watchCommand(opts: WatchOptions) {
         // Fire-and-forget: `reload` blocks the server until datapacks
         // finish reloading, which can take seconds. Awaiting it stalls
         // the watcher (and any subsequent rebuilds queued behind it).
-        log('Sent /reload to host daemon')
+        daemonLog('Sent /reload to host daemon')
         daemonClient.executeRawCommand({ command: 'reload' }).catch((err) => {
           logWarn(`[watch] daemon reload failed: ${err instanceof Error ? err.message : String(err)}`)
         })
@@ -297,7 +330,7 @@ export async function watchCommand(opts: WatchOptions) {
   let debounceScheduled = false // Synchronous flag to prevent multiple timeouts
 
   function restart() {
-    log('Restarting watch process...')
+    daemonLog('Restarting watch process...')
     getWatchUIAPI()?.setStatus('restarting')
 
     const [runtime, ...args] = process.argv
@@ -403,7 +436,64 @@ export async function watchCommand(opts: WatchOptions) {
     }, 200)
   }
 
-  log('Watch started')
+  /**
+   * Watcher-local `log` wrapper. Always forwards to the UI logger
+   * (which writes the watch.log file for humans tailing it); when a
+   * daemon is connected, also pushes the line(s) over the existing WS
+   * via `publishLog`. The daemon keeps the canonical buffer that MCP
+   * reads; the file write is just a side effect for humans.
+   *
+   * Declared LATE — after the daemon state below — so the closure
+   * doesn't hit TDZ when invoked before `daemonClient` is declared.
+   */
+  const daemonLog = (msg: string): void => {
+    log(msg)
+    if (daemonClient) {
+      // Intrinsic timestamp: stamp at the moment the watcher emits
+      // the line, not on the daemon side. Captures "when did this
+      // happen" rather than "when did the network land".
+      const ts = Date.now()
+      void daemonClient.publishLog({ entries: [{ line: msg, ts }] }).catch(() => {
+        // Daemon may have just disconnected; no way to surface from
+        // here. Swallow.
+      })
+    }
+  }
+
+  // The live saveConfig the last successful build actually used
+  // (post-script mutations). Captured from `BuildResult.activeSaveConfig`
+  // and re-published to the daemon whenever it changes or the daemon
+  // reconnects. `undefined` until the first build completes.
+  let lastBuildSaveConfig: ActiveSaveConfig | undefined
+  let lastBuildConfigPath: string | undefined
+
+  /**
+   * Push the active saveConfig to the daemon — what the watcher will
+   * actually deploy to. Reads from the closure-mutable `lastBuild*`
+   * vars so the daemon's view always matches what the last build used
+   * (not just the static CLI-merge).
+   *
+   * No-op (silently) when no build has run yet — the daemon keeps
+   * whatever it had before (typically the boot-time disk load).
+   */
+  const publishActiveConfig = async (
+    client: DaemonClient,
+    o: WatchOptions,
+  ): Promise<void> => {
+    if (!lastBuildSaveConfig || !lastBuildConfigPath) return
+    const mode = o.library ? 'library' : 'pack'
+    const outputDir = mode === 'pack'
+      ? resolve(o.path, '.sandstone', 'output')
+      : resolve(o.path, 'test', '.sandstone', 'output')
+    await client.publishConfig({
+      mode,
+      configPath: lastBuildConfigPath,
+      saveConfig: lastBuildSaveConfig,
+      outputDir,
+      projectRoot: resolve(o.path),
+      loadedAt: new Date().toISOString(),
+    })
+  }
 
   // Poll for a running `sand connect` daemon every 5s. When one appears,
   // open a WS client to it and keep it alive for the watcher's lifetime;
@@ -419,6 +509,8 @@ export async function watchCommand(opts: WatchOptions) {
   // release them in one place.
   let activeLogSub: { unattach(): Promise<void> } | undefined
   let offDaemonShutdown: (() => void) | undefined
+  let offTriggerBuild: (() => void) | undefined
+  daemonLog('Watch started')
   const tryConnectDaemon = async () => {
     if (daemonConnected) return
     try {
@@ -428,7 +520,55 @@ export async function watchCommand(opts: WatchOptions) {
       try {
         daemonClient = await openDaemonClient({ endpoint })
         daemonConnected = true
-        log('Connected to host daemon')
+        daemonLog('Connected to host daemon')
+        // Publish the active saveConfig so the daemon (and any MCP
+        // client attached to it) sees what the watcher will actually
+        // deploy to. Resolved via the shared helper so the values
+        // match `_buildProject`'s inline merge exactly.
+        try {
+          await publishActiveConfig(daemonClient, opts)
+        } catch (err) {
+          logWarn(`[watch] publishConfig failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        // Push the watcher's runtime status — mode, manual flag, path,
+        // PID. The daemon caches this and flips `connected: false` when
+        // our WS session closes. MCP `sandstone://watcher-status`
+        // resource answers agents asking "is a watcher running, and
+        // how?".
+        try {
+          await daemonClient.publishWatcherStatus({
+            connected: true,
+            mode: (opts.library ? 'library' : 'pack') as 'pack' | 'library',
+            manual: opts.manual ?? false,
+            path: opts.path,
+            pid: process.pid,
+            at: new Date().toISOString(),
+          })
+        } catch (err) {
+          logWarn(`[watch] publishWatcherStatus failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        // Subscribe to `triggerBuild` events so MCP `runWorkspaceBuild`
+        // can ask us to fire a build. In manual mode this consumes
+        // pending changes; otherwise the rebuild is just `onFilesChange([])`.
+        if (daemonClient.onTriggerBuild) {
+          offTriggerBuild = daemonClient.onTriggerBuild(() => {
+            daemonLog('Trigger build received via daemon')
+            if (!opts.manual) {
+              // Auto-rebuild mode — just run unconditionally.
+              void onFilesChange([])
+              return
+            }
+            // Manual mode — consume pending changes.
+            if (pendingChanges.length === 0) {
+              daemonLog('Trigger received but no pending changes; running anyway')
+              void onFilesChange([])
+              return
+            }
+            const toBuild = [...pendingChanges]
+            pendingChanges = []
+            void onFilesChange(toBuild)
+          })
+        }
         // Subscribe to every host's log stream so the running server's
         // output shows up alongside the rebuild messages in the watch
         // log. Composite daemons advertise an `attachLogs` capability —
@@ -460,8 +600,10 @@ export async function watchCommand(opts: WatchOptions) {
         // subscription, dropping the client, and restarting polling so a
         // subsequent `sand connect` reconnects automatically.
         offDaemonShutdown = daemonClient.onShutdown((reason) => {
-          log(`Host daemon is shutting down (${reason}) — watching for a new daemon`)
+          daemonLog(`Host daemon is shutting down (${reason}) — watching for a new daemon`)
           void activeLogSub?.unattach().catch(() => {})
+          offTriggerBuild?.()
+          offTriggerBuild = undefined
           activeLogSub = undefined
           offDaemonShutdown = undefined
           daemonClient?.close()

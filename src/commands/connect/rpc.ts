@@ -51,13 +51,13 @@ export type RpcMethod =
   | 'writeFile'
   | 'executeRawCommand'
   | 'attachLog'
-  | 'attachLogs'
   | 'unattach'
   | 'shutdown'
   | 'getActiveConfig'
   | 'getBuildOutputTree'
   | 'readBuildLog'
   | 'readTestLog'
+  | 'readServerLog'
   | 'getWatchedFiles'
   | 'publishConfig'
   | 'publishLog'
@@ -81,6 +81,7 @@ export type RpcResult =
   | GetBuildOutputTreeResult
   | ReadBuildLogResult
   | ReadTestLogResult
+  | ReadServerLogResult
   | GetWatchedFilesResult
   | GetRebuildStateResult
   | GetWatcherStatusResult
@@ -139,10 +140,6 @@ export interface DaemonShutdownEvent {
 export interface LogEvent {
   subscriptionId: string
   lines: string[]
-  /** Set when the batch originated from a composite `attachLogs`
-   *  subscription — identifies which member emitted the lines. Omitted
-   *  for `attachLog` subscriptions (single-host daemons). */
-  hostType?: string
 }
 
 /** Pushed when the host's connection state transitions. */
@@ -365,6 +362,29 @@ export interface ReadBuildLogResult {
  */
 export type ReadTestLogResult = ReadBuildLogResult
 
+/**
+ * Server-log query parameters. `tail` is the max lines returned when
+ * no range filter matches more; `null` = use default (200).
+ * `maxLines` hard-caps the response; `null` = default (1000). Range
+ * and time filters intersect.
+ */
+export interface ReadServerLogParams {
+  tail: number | null
+  maxLines: number | null
+  range: { from: number; to: number } | null
+  since: number | null
+  until: number | null
+}
+
+/**
+ * Server-log result. Same shape as {@link ReadBuildLogResult} but
+ * served from the daemon's host-log buffer (populated via the host's
+ * `attachLog` subscription at daemon boot, NOT from `logs/latest.log`
+ * on disk — that's only kept as a fallback for hosts without an
+ * in-memory stream).
+ */
+export type ReadServerLogResult = ReadBuildLogResult
+
 export interface GetWatchedFilesResult {
   files: Array<{
     /** Absolute path. */
@@ -416,8 +436,12 @@ export interface LogLineEntry {
  *  - `test` — future test runner log. Buffer exists today (so the
  *    resource supports the same filtering shape as build) but no
  *    backend pushes to it yet.
+ *  - `server` — Minecraft server stdout. The daemon subscribes to its
+ *    own host's `attachLog` at boot and pushes every line into this
+ *    buffer so `sandstone://server-log` works without touching the
+ *    on-disk log file (and without requiring a watcher).
  */
-export type LogStreamTarget = 'build' | 'test'
+export type LogStreamTarget = 'build' | 'test' | 'server'
 
 /**
  * Watcher → daemon push of log lines. The daemon keeps a bounded

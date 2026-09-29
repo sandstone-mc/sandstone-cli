@@ -83,7 +83,19 @@ export async function watchCommand(opts: WatchOptions) {
   let buildContext: BuildContext | undefined
   let lastBuildFailed = false
 
+  // `folder` is the build context — `test/` for library mode (the test
+  // workspace is itself a mini datapack), `opts.path` for pack mode.
   const folder = opts.library ? join(opts.path, 'test') : opts.path
+
+  // All late-binding state referenced by the `exit` arrow below. Hoisted
+  // here so they're declared before render() — initial `onFilesChange([])`
+  // at the bottom of this function calls `api.exit()` synchronously when
+  // the project lacks `sandstone.config.ts`, which would otherwise hit
+  // TDZ on these bindings.
+  let daemonClient: DaemonClient | undefined
+  let daemonPoll: ReturnType<typeof setInterval> | undefined
+  let linkVersionWatchers: { file: string }[] = []
+  let sigintHandler: (() => Promise<void>) | undefined
 
   let subscription: Awaited<ReturnType<typeof subscribe>>
 
@@ -92,7 +104,9 @@ export async function watchCommand(opts: WatchOptions) {
   // Discarding the return value previously left the .sandstone/watch.log
   // FD open and let pendingWrites grow unbounded for the lifetime of the
   // watch session.
-  const closeLogger = initLogger(folder)
+  // Logger lives at the project root regardless of mode — the watcher
+  // session is a single process, the log should be easy to find.
+  const closeLogger = initLogger(opts.path)
 
   // Set up live log callback to send to UI
   setLiveLogCallback((level, args) => {
@@ -244,17 +258,6 @@ export async function watchCommand(opts: WatchOptions) {
     // Replace global console during build to capture user console.log without messing up Ink UI
     enableConsoleCapture()
     let result
-    // Push the "started" event before the build runs. File/errors/warning
-    // counts are 0 by definition at start time.
-    if (daemonClient) {
-      void daemonClient.publishRebuild({
-        state: 'started',
-        fileCount: 0,
-        errorCount: 0,
-        warningCount: 0,
-        at: new Date().toISOString(),
-      }).catch(() => {})
-    }
     try {
       result = await _buildCommand(opts, folder, buildContext, true)
     } finally {
@@ -501,9 +504,9 @@ export async function watchCommand(opts: WatchOptions) {
   // logged + cleaned up on exit). Stops polling once connected; restarts
   // when the daemon sends a `daemonShutdown` event so a subsequent
   // `sand connect` reconnects without restarting `sand watch`.
-  let daemonClient: DaemonClient | undefined
+  // (daemonClient/daemonPoll declared at top — referenced by the exit
+  // arrow passed to render())
   let daemonConnected = false
-  let daemonPoll: ReturnType<typeof setInterval> | undefined
   // Active log subscription + its unsubscribe + the daemonShutdown
   // unsubscribe — held so the shutdown handler (and `cleanup`) can
   // release them in one place.
@@ -569,29 +572,15 @@ export async function watchCommand(opts: WatchOptions) {
             void onFilesChange(toBuild)
           })
         }
-        // Subscribe to every host's log stream so the running server's
+        // Subscribe to the host's log stream so the running server's
         // output shows up alongside the rebuild messages in the watch
-        // log. Composite daemons advertise an `attachLogs` capability —
-        // prefer it so we get every member's stream under one
-        // subscription instead of just the first dispatchable member.
+        // log. Single-host daemons always expose `attachLog`.
         try {
-          // Pick the right subscription RPC by capability. `attachLogs`
-          // fans out across every logging member of a composite and tags
-          // each batch with its hostType; single-host daemons don't
-          // advertise it, so fall back to `attachLog`.
-          if (daemonClient.welcome.capabilities.attachLogs) {
-            const sub = await daemonClient.attachLogs()
-            activeLogSub = sub
-            sub.onLines((lines, hostType) => {
-              for (const line of lines) log(`[connect@${hostType}] ${line.replace(MinecraftTimestampRegex, '')}`)
-            })
-          } else {
-            const sub = await daemonClient.attachLog()
-            activeLogSub = sub
-            sub.onLines((lines) => {
-              for (const line of lines) log(`[connect] ${line.replace(MinecraftTimestampRegex, '')}`)
-            })
-          }
+          const sub = await daemonClient.attachLog()
+          activeLogSub = sub
+          sub.onLines((lines) => {
+            for (const line of lines) log(`[connect] ${line.replace(MinecraftTimestampRegex, '')}`)
+          })
         } catch (err) {
           logWarn(`[watch] attachLog failed: ${err instanceof Error ? err.message : String(err)}`)
         }
@@ -641,7 +630,8 @@ export async function watchCommand(opts: WatchOptions) {
   // the new tarball. We only watch link_version (not the whole .sandstone
   // dir) so the tarball write itself doesn't re-trigger.
   const linksFilePath = join(opts.path, '.sandstone', 'links.json')
-  const linkVersionWatchers: { file: string }[] = []
+  // linkVersionWatchers declared at top — referenced by the exit arrow
+  // passed to render() before this point.
   try {
     const linksData = JSON.parse(await fs.readText(linksFilePath)) as { links?: Record<string, { libraryPath: string }> }
     for (const entry of Object.values(linksData.links ?? {})) {
@@ -676,8 +666,10 @@ export async function watchCommand(opts: WatchOptions) {
   // Handle cleanup on exit — hold the handler reference so cleanup() can
   // process.off() it. Previously every watchCommand invocation stacked a
   // new SIGINT listener that never got removed; on SIGINT they all fired
-  // against the wrong subscription.
-  const sigintHandler = async () => await exit(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
+  // against the wrong subscription. (sigintHandler declared at top of
+  // function so the exit arrow passed to render() can reference it
+  // without TDZ.)
+  sigintHandler = async () => await exit(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
   process.on('SIGINT', sigintHandler)
 }
 

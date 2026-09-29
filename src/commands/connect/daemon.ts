@@ -22,9 +22,20 @@
  */
 
 import chalk from 'chalk-template'
-import { capabilitiesToRecord, type HostConfigInput, type HostProvider, type HostType } from '../../hosts/types.js'
+import { capabilitiesToRecord, Capability, type HostConfigInput, type HostProvider, type HostType } from '../../hosts/types.js'
 import { BootstrapError, bootstrapHosts } from './bootstrap.js'
 import { loadActiveConfigFromDisk, type ActiveConfig } from './active-config.js'
+
+/**
+ * Module-level state shared with `dispatch.ts` so handlers can flag
+ * an imminent disconnect as expected (e.g. `runServerCommand("stop")`,
+ * `restartServer`). The host-lost watcher consumes the flag and
+ * leaves the daemon alive. One-shot — cleared after the next member
+ * disconnect fires.
+ */
+let expectedShutdown = false
+export const setExpectedShutdown = (v: boolean) => { expectedShutdown = v }
+export const getExpectedShutdown = () => expectedShutdown
 import { startServer } from './server.js'
 import type { RebuildState, WatcherStatus } from './rpc.js'
 import {
@@ -38,9 +49,9 @@ import {
 } from './endpoint-file.js'
 
 export interface DaemonOptions {
-  /** One or more host types. >1 triggers a {@link CompositeHost} wrap. */
-  hostTypes: HostType[]
-  /** Per-type config map. Same shape for single and composite (length-1 map is fine). */
+  /** The single host type for this daemon. */
+  hostType: HostType
+  /** Config for the host type above. */
   perHostConfig: Partial<Record<HostType, HostConfigInput>>
   projectRoot: string
   /** Bind address. Default `127.0.0.1` (loopback only — never LAN). */
@@ -120,7 +131,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   let bootstrapResult: Awaited<ReturnType<typeof bootstrapHosts>>
   try {
     bootstrapResult = await bootstrapHosts({
-      hostTypes: opts.hostTypes,
+      hostType: opts.hostType,
       perHostConfig: opts.perHostConfig,
       userProvidedHostSettings: opts.userProvidedHostSettings,
     })
@@ -149,9 +160,22 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   // the whole daemon down — half a composite is worse than no daemon.
   // `disconnect()` on the host clears its handler set, so we don't
   // need to track unsubscribers.
+  //
+  // Hosts can declare a disconnect as expected by setting
+  // `m.shuttingDown = true` before initiating shutdown (e.g.
+  // `integrated.stopServer` before SIGTERM, `rcon.executeRawCommand('stop')`
+  // before RCON's self-disconnect). When set, the watcher no-ops so a
+  // restart cycle can cycle one member without tearing the daemon down.
   for (const m of members) {
     if (!m.onDisconnected) continue
     m.onDisconnected((reason: string) => {
+      if (expectedShutdown) {
+        console.error(`[connect] member '${m.type}' disconnected (${reason}) — expected shutdown (self-initiated), daemon stays up`)
+        // Don't clear `expectedShutdown` here — multiple members can
+        // disconnect during one cycle (e.g. rcon + integrated in a
+        // composite). Cleared at the START of the next cycle instead.
+        return
+      }
       shutdownReason = 'host-lost'
       console.error(`[connect] member '${m.type}' disconnected (${reason}) — shutting down`)
       void handle.shutdown()
@@ -194,8 +218,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   // - `testBuffer`: reserved for the future test runner; nothing
   //   pushes to it yet, but the shape matches so MCP can offer the
   //   same filtering on `readTestLog`.
+  // - `serverBuffer`: the host's stdout. The daemon subscribes to its
+  //   own host's `attachLog` at boot (below) and pushes every line
+  //   here, so `readServerLog` works without a watcher and without
+  //   reading the on-disk log file.
   let buildBuffer: { line: string; ts: number }[] = []
   let testBuffer: { line: string; ts: number }[] = []
+  let serverBuffer: { line: string; ts: number }[] = []
   const LOG_BUFFER_CAP = 1000
 
   // Latest rebuild state pushed by the watcher. `undefined` until the
@@ -210,15 +239,36 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   // a round-trip.
   let watcherStatus: WatcherStatus | null = null
 
-  const pushTo = (target: 'build' | 'test') => (entries: { line: string; ts: number }[]) => {
+  const pushTo = (target: 'build' | 'test' | 'server') => (entries: { line: string; ts: number }[]) => {
     // Source stamps each entry with the emit timestamp. Daemon stores
     // verbatim — no re-stamping on receipt, so the value reflects
     // "when the event happened" rather than "when the network packet
     // landed".
-    const buf = target === 'test' ? testBuffer : buildBuffer
+    const buf = target === 'server' ? serverBuffer : target === 'test' ? testBuffer : buildBuffer
     buf.push(...entries)
     const overflow = buf.length - LOG_BUFFER_CAP
     if (overflow > 0) buf.splice(0, overflow)
+  }
+
+  // Daemon-owned subscription to the host's stdout. Pushes every
+  // emitted chunk into `serverBuffer` so `readServerLog` works without
+  // a watcher and without reading the on-disk log file. Skipped when
+  // the host doesn't expose `attachLog` (e.g. some composite members
+  // that delegate to another member's stream). The returned
+  // subscription's `unattach` is fire-and-forget — the daemon never
+  // detaches during its lifetime (lifecycle ends at process exit).
+  if (host.capabilities.has(Capability.AttachLog) && host.attachLog) {
+    try {
+      // The daemon holds this subscription open for its entire
+      // lifetime — calling `unattach()` would immediately remove the
+      // handler we just added. The subscription dies with the process.
+      await host.attachLog((lines) => {
+        if (lines.length === 0) return
+        pushTo('server')(lines.map((line) => ({ line, ts: Date.now() })))
+      })
+    } catch (err) {
+      console.error(`[connect] failed to attach host log for server-log buffer:`, err)
+    }
   }
 
   // Race the server start against an outer timeout — if Bun.serve
@@ -250,6 +300,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       rebuildState = state
     },
     getRebuildState: () => rebuildState,
+    getExpectedShutdown,
     // Watcher passes ctx.ws as the second arg so dispatch.ts can track
     // which session is the watcher (used by `handleSessionClose` to
     // flip `connected: false` on disconnect).
@@ -259,7 +310,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     getWatcherStatus: () => watcherStatus,
     appendLogLines: (entries, target) => pushTo(target)(entries),
     readLogBuffer: (target, { tail, maxLines, range, since, until } = {}) => {
-      const buf = target === 'test' ? testBuffer : buildBuffer
+      const buf = target === 'server' ? serverBuffer : target === 'test' ? testBuffer : buildBuffer
       const totalLines = buf.length
       const nowMs = Date.now()
 
@@ -314,7 +365,6 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     url: running.url,
     secret,
     hostType: host.type,
-    hostTypes: opts.hostTypes,
     displayName: host.displayName,
     capabilities: capabilitiesToRecord(host.capabilities),
     pid: process.pid,

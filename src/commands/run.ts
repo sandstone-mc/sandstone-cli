@@ -43,7 +43,7 @@ import { connect as openClient, type Client } from './connect/client.js'
 import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
 import { BootstrapError, bootstrapHosts } from './connect/bootstrap.js'
 import type { HostConfigInput, HostProvider, HostType, LogChunkHandler } from '../hosts/types.js'
-import { DEFAULT_HOST_TYPES } from './connect/index.js'
+import { DEFAULT_HOST_TYPE } from './connect/index.js'
 import { createSandstonePack, type SandstoneContext } from 'sandstone'
 import { randomUUID as nodeRandomUUID } from 'node:crypto'
 import chalk from 'chalk-template'
@@ -67,7 +67,6 @@ const DEFAULT_TIMEOUT_SECONDS = 30
 
 const KNOWN_HOST_TYPES = new Set<HostType>([
   'ssh',
-  'rcon',
   'ftp',
   'local-client',
   'integrated',
@@ -112,39 +111,40 @@ export async function runCommand(
   const endpoint = await readEndpoint(projectRoot)
   const daemonAlive = !!(endpoint && (await pidAlive(endpoint.pid)))
 
-  // 5. Direct-mode host type resolution. Default to the same composite
-  // the daemon would boot by default (rcon + integrated) so the direct
-  // path matches what `sand connect` would do without a daemon.
-  let hostTypes: HostType[] = opts.hostType
-    ? (opts.hostType.split(',').map((s) => s.trim()).filter(Boolean) as HostType[])
-    : [...DEFAULT_HOST_TYPES]
-  // Forward to bootstrapHosts so it can auto-include `local-client` using
-  // the same sandstone.config.ts load that injects `sandstoneConfig` per
-  // host — no duplicate `import()` per invocation.
-  const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
+  // 5. Direct-mode host type resolution. Default to `integrated` so the
+  // direct path matches what `sand connect` would do without a daemon.
+  // Reject multi-host-type values — composite daemons are gone.
+  let hostType: HostType | undefined
+  if (opts.hostType) {
+    if (opts.hostType.includes(',')) {
+      console.error(
+        chalk`{red Error:} Only one --host-type is supported, got '${opts.hostType}'. Composite daemons were removed.`,
+      )
+      process.exit(2)
+    }
+    hostType = opts.hostType as HostType
+  }
   if (!daemonAlive) {
-    for (const t of hostTypes) {
-      if (!KNOWN_HOST_TYPES.has(t)) {
-        console.error(chalk`{red Error:} Unknown --host-type '${t}'`)
-        process.exit(2)
-      }
+    if (!hostType) hostType = DEFAULT_HOST_TYPE
+    if (!KNOWN_HOST_TYPES.has(hostType as HostType)) {
+      console.error(chalk`{red Error:} Unknown --host-type '${hostType}'`)
+      process.exit(2)
     }
     if (opts.hostConfig && opts.hostConfigFile) {
       console.error(chalk`{red Error:} Pass either --host-config or --host-config-file, not both`)
       process.exit(2)
     }
-    // Default to a per-host-type empty config when --host-config is
-    // omitted (mirrors `sand connect`). Empty `{}` per member lets
-    // `getProvider` succeed; the provider's connect() picks up any
-    // defaults internally.
+    // Default to a minimal empty config when --host-config is omitted
+    // (mirrors `sand connect`). Empty `{}` lets `getProvider` succeed;
+    // the provider's connect() picks up any defaults internally.
     if (!opts.hostConfig && !opts.hostConfigFile) {
-      opts.hostConfig = JSON.stringify(Object.fromEntries(hostTypes.map((t) => [t, {}])))
+      opts.hostConfig = JSON.stringify({})
     }
   }
-  // Downstream code uses `hostType` as a single value — pin to the
-  // first type when the user supplied a comma list (the daemon path
-  // already handles the full list via the endpoint file).
-  const hostType: HostType = hostTypes[0]!
+  // Forward to bootstrapHosts so it can auto-include `local-client` using
+  // the same sandstone.config.ts load that injects `sandstoneConfig` per
+  // host — no duplicate `import()` per invocation.
+  const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
 
   // 6. Daemon-mode fast path.
   if (daemonAlive && endpoint) {
@@ -214,20 +214,24 @@ export async function runCommand(
   // 7. Direct mode. Use the shared bootstrap so direct mode agrees
   // with `sand connect`: same defaults (latest sandstone version,
   // RCON port/password auto-derive), same member lifecycle.
-  const perHostConfig: Partial<Record<HostType, HostConfigInput>> =
-    hostTypes.length === 1
-      ? { [hostTypes[0]!]: await loadHostConfig(opts) }
-      : (await loadHostConfig(opts)) as Partial<Record<HostType, HostConfigInput>>
+  const directHostType = hostType ?? DEFAULT_HOST_TYPE
+  const rawPerHost = await loadHostConfig(opts)
+  const perHostConfig: Partial<Record<HostType, HostConfigInput>> = {
+    [directHostType]: rawPerHost,
+  }
   // Project root injection (the bootstrap also handles this, but we
   // need it here too so the merged config is right for logging).
-  for (const t of hostTypes) {
-    const cfg = perHostConfig[t] as Record<string, unknown> | undefined
-    if (cfg && cfg.projectRoot === undefined) cfg.projectRoot = projectRoot
-  }
+  const cfg = perHostConfig[directHostType as HostType] as Record<string, unknown> | undefined
+  if (cfg && cfg.projectRoot === undefined) cfg.projectRoot = projectRoot
   let host: HostProvider
   let weStarted: HostType[]
   try {
-    const result = await bootstrapHosts({ hostTypes, perHostConfig, silent: true, userProvidedHostSettings })
+    const result = await bootstrapHosts({
+      hostType: directHostType,
+      perHostConfig,
+      silent: true,
+      userProvidedHostSettings,
+    })
     host = result.host
     weStarted = result.spawnedByUs
   } catch (err) {
@@ -242,7 +246,7 @@ export async function runCommand(
   }
 
   if (!host.capabilities.has('executeRawCommand')) {
-    console.error(chalk`{red Error:} Host '${hostType}' does not support executeRawCommand`)
+    console.error(chalk`{red Error:} Host '${directHostType}' does not support executeRawCommand`)
     await safeDisconnect(host)
     process.exit(1)
   }
@@ -450,9 +454,13 @@ async function attachAwaitHost(
 async function loadHostConfig(opts: RunCommandOptions): Promise<HostConfigInput> {
   if (opts.hostConfigFile) {
     const raw = await Bun.file(opts.hostConfigFile).text()
-    return JSON.parse(raw)
+    return JSON.parse(raw) as HostConfigInput
   }
-  return JSON.parse(opts.hostConfig!)
+  if (opts.hostConfig) {
+    return JSON.parse(opts.hostConfig) as HostConfigInput
+  }
+  // No config provided — caller will apply defaults.
+  return {} as HostConfigInput
 }
 
 async function safeDisconnect(host: HostProvider): Promise<void> {
@@ -654,29 +662,32 @@ async function runCommands(
   const endpoint = await readEndpoint(projectRoot)
   const daemonAlive = !!(endpoint && (await pidAlive(endpoint.pid)))
 
-  let hostTypes: HostType[] = opts.hostType
-    ? (opts.hostType.split(',').map((s) => s.trim()).filter(Boolean) as HostType[])
-    : [...DEFAULT_HOST_TYPES]
-  // Forward to bootstrapHosts so it can auto-include `local-client` using
-  // the same sandstone.config.ts load that injects `sandstoneConfig` per
-  // host — no duplicate `import()` per invocation.
+  let hostType: HostType | undefined
+  if (opts.hostType) {
+    if (opts.hostType.includes(',')) {
+      console.error(
+        chalk`{red Error:} Only one --host-type is supported, got '${opts.hostType}'. Composite daemons were removed.`,
+      )
+      process.exit(2)
+    }
+    hostType = opts.hostType as HostType
+  }
   const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
   if (!daemonAlive) {
-    for (const t of hostTypes) {
-      if (!KNOWN_HOST_TYPES.has(t)) {
-        console.error(chalk`{red Error:} Unknown --host-type '${t}'`)
-        process.exit(2)
-      }
+    if (!hostType) hostType = DEFAULT_HOST_TYPE
+    if (!KNOWN_HOST_TYPES.has(hostType as HostType)) {
+      console.error(chalk`{red Error:} Unknown --host-type '${hostType}'`)
+      process.exit(2)
     }
     if (opts.hostConfig && opts.hostConfigFile) {
       console.error(chalk`{red Error:} Pass either --host-config or --host-config-file, not both`)
       process.exit(2)
     }
     if (!opts.hostConfig && !opts.hostConfigFile) {
-      opts.hostConfig = JSON.stringify(Object.fromEntries(hostTypes.map((t) => [t, {}])))
+      opts.hostConfig = JSON.stringify({})
     }
   }
-  const hostType: HostType = hostTypes[0]!
+  const resolvedHostType: HostType = hostType ?? DEFAULT_HOST_TYPE
 
   if (daemonAlive && endpoint) {
     const client = await openClient({ endpoint })
@@ -702,18 +713,20 @@ async function runCommands(
   }
 
   // Direct mode.
-  const perHostConfig: Partial<Record<HostType, HostConfigInput>> =
-    hostTypes.length === 1
-      ? { [hostTypes[0]!]: await loadHostConfig(opts) }
-      : ((await loadHostConfig(opts)) as Partial<Record<HostType, HostConfigInput>>)
-  for (const t of hostTypes) {
-    const cfg = perHostConfig[t] as Record<string, unknown> | undefined
-    if (cfg && cfg.projectRoot === undefined) cfg.projectRoot = projectRoot
+  const directPerHost: Partial<Record<HostType, HostConfigInput>> = {
+    [resolvedHostType]: await loadHostConfig(opts),
   }
+  const directCfg = directPerHost[resolvedHostType] as Record<string, unknown> | undefined
+  if (directCfg && directCfg.projectRoot === undefined) directCfg.projectRoot = projectRoot
   let host: HostProvider
   let weStarted: HostType[]
   try {
-    const result = await bootstrapHosts({ hostTypes, perHostConfig, silent: true, userProvidedHostSettings })
+    const result = await bootstrapHosts({
+      hostType: resolvedHostType,
+      perHostConfig: directPerHost,
+      silent: true,
+      userProvidedHostSettings,
+    })
     host = result.host
     weStarted = result.spawnedByUs
   } catch (err) {
@@ -727,7 +740,7 @@ async function runCommands(
     process.exit(1)
   }
   if (!host.capabilities.has('executeRawCommand')) {
-    console.error(chalk`{red Error:} Host '${hostType}' does not support executeRawCommand`)
+    console.error(chalk`{red Error:} Host '${resolvedHostType}' does not support executeRawCommand`)
     await safeDisconnect(host)
     process.exit(1)
   }

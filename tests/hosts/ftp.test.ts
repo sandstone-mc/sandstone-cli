@@ -2,6 +2,11 @@
  * FtpHost end-to-end tests. Exposes `registerFtpTests()` which the
  * orchestrator (`host.test.ts`) calls inside its own beforeAll scope
  * so the FTP tests share the harness lifecycle with the SSH tests.
+ *
+ * FTP itself has no native exec channel — RCON is configured under
+ * the ftp config block (since rcon-srcds is intrinsic to FtpHost now,
+ * not a separate composite member). Tests that don't need
+ * `executeRawCommand` omit the `rcon` block entirely.
  */
 import { describe, expect, test } from 'bun:test'
 
@@ -11,35 +16,50 @@ export function registerFtpTests(
   getCfg: () => HarnessConfig,
   getProjectRoot: () => string,
 ): void {
+  // FTP-only config — no RCON. Skips `executeRawCommand` capability.
+  // Host config is flat (HostConfigInput is the union of all
+  // provider configs); no `ftp:` wrapper. The CLI parses the
+  // `--host-config` JSON and routes it to the matching provider.
+  const ftpOnlyConfig = (cfg: HarnessConfig): string =>
+    JSON.stringify({
+      host: cfg.ftp.host,
+      port: cfg.ftp.port,
+      user: cfg.ftp.user,
+      password: cfg.ftp.password,
+      // logPath MUST be absolute. FtpHost's default
+      // `'logs/latest.log'` is relative; with no basePath it stays
+      // relative, and basic-ftp resolves it against the FTP user's
+      // CWD (`/home/mctest`) — so the default would look for
+      // `/home/mctest/logs/latest.log`, which doesn't exist. Pin to
+      // the absolute MC log path.
+      logPath: `${cfg.serverDir}/logs/latest.log`,
+    })
+
+  // FTP+RCON — exposes `executeRawCommand`. `rcon` config is a flat
+  // sibling of the other FtpHost fields since FtpHost owns its rcon
+  // client directly (no composite layer).
+  const ftpRconConfig = (cfg: HarnessConfig): string =>
+    JSON.stringify({
+      host: cfg.ftp.host,
+      port: cfg.ftp.port,
+      user: cfg.ftp.user,
+      password: cfg.ftp.password,
+      logPath: `${cfg.serverDir}/logs/latest.log`,
+      rcon: {
+        host: cfg.rcon.host,
+        port: cfg.rcon.port,
+        password: cfg.rcon.password,
+      },
+    })
+
   describe('FtpHost — connect daemon lifecycle', () => {
-    test('sand connect boots an rcon+ftp daemon against the harness', async () => {
+    test('sand connect boots an FTP-only daemon against the harness', async () => {
       const cfg = getCfg()
       const projectRoot = getProjectRoot()
-      const ftpHostConfig = JSON.stringify({
-        ftp: {
-          host: cfg.ftp.host,
-          port: cfg.ftp.port,
-          user: cfg.ftp.user,
-          password: cfg.ftp.password,
-          // logPath MUST be absolute. FtpHost's default
-          // `'logs/latest.log'` is relative; with no basePath it
-          // stays relative, and basic-ftp resolves it against the
-          // FTP user's CWD (`/home/mctest`) — so the default would
-          // look for `/home/mctest/logs/latest.log`, which doesn't
-          // exist. The poller would swallow the ENOENT silently and
-          // never fire onChunk. Pin to the absolute MC log path.
-          logPath: `${cfg.serverDir}/logs/latest.log`,
-        },
-        rcon: {
-          host: cfg.rcon.host,
-          port: cfg.rcon.port,
-          password: cfg.rcon.password,
-        },
-      })
       const daemon = await startDaemon({
         projectRoot,
-        hostType: 'rcon,ftp',
-        hostConfig: ftpHostConfig,
+        hostType: 'ftp',
+        hostConfig: ftpOnlyConfig(cfg),
       })
       try {
         expect(daemon.url).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/)
@@ -55,24 +75,10 @@ export function registerFtpTests(
     test('writeFile then readFile round-trip matches the original payload', async () => {
       const cfg = getCfg()
       const projectRoot = getProjectRoot()
-      const ftpHostConfig = JSON.stringify({
-        ftp: {
-          host: cfg.ftp.host,
-          port: cfg.ftp.port,
-          user: cfg.ftp.user,
-          password: cfg.ftp.password,
-          logPath: `${cfg.serverDir}/logs/latest.log`,
-        },
-        rcon: {
-          host: cfg.rcon.host,
-          port: cfg.rcon.port,
-          password: cfg.rcon.password,
-        },
-      })
       const daemon = await startDaemon({
         projectRoot,
-        hostType: 'rcon,ftp',
-        hostConfig: ftpHostConfig,
+        hostType: 'ftp',
+        hostConfig: ftpOnlyConfig(cfg),
       })
       const client = await openDaemonClient(daemon)
       try {
@@ -95,24 +101,10 @@ export function registerFtpTests(
     test('readFile of an existing MC server file returns its content', async () => {
       const cfg = getCfg()
       const projectRoot = getProjectRoot()
-      const ftpHostConfig = JSON.stringify({
-        ftp: {
-          host: cfg.ftp.host,
-          port: cfg.ftp.port,
-          user: cfg.ftp.user,
-          password: cfg.ftp.password,
-          logPath: `${cfg.serverDir}/logs/latest.log`,
-        },
-        rcon: {
-          host: cfg.rcon.host,
-          port: cfg.rcon.port,
-          password: cfg.rcon.password,
-        },
-      })
       const daemon = await startDaemon({
         projectRoot,
-        hostType: 'rcon,ftp',
-        hostConfig: ftpHostConfig,
+        hostType: 'ftp',
+        hostConfig: ftpOnlyConfig(cfg),
       })
       const client = await openDaemonClient(daemon)
       try {
@@ -131,24 +123,10 @@ export function registerFtpTests(
     test('readFile on a missing path surfaces an RPC error', async () => {
       const cfg = getCfg()
       const projectRoot = getProjectRoot()
-      const ftpHostConfig = JSON.stringify({
-        ftp: {
-          host: cfg.ftp.host,
-          port: cfg.ftp.port,
-          user: cfg.ftp.user,
-          password: cfg.ftp.password,
-          logPath: `${cfg.serverDir}/logs/latest.log`,
-        },
-        rcon: {
-          host: cfg.rcon.host,
-          port: cfg.rcon.port,
-          password: cfg.rcon.password,
-        },
-      })
       const daemon = await startDaemon({
         projectRoot,
-        hostType: 'rcon,ftp',
-        hostConfig: ftpHostConfig,
+        hostType: 'ftp',
+        hostConfig: ftpOnlyConfig(cfg),
       })
       const client = await openDaemonClient(daemon)
       try {
@@ -161,86 +139,14 @@ export function registerFtpTests(
     }, 30_000)
   })
 
-  describe('FtpHost — attachLog via composite (rcon + ftp)', () => {
-    test(
-      'rcon `say` triggers an MC log line that FtpHost attachLog picks up',
-      async () => {
-        const cfg = getCfg()
-        const projectRoot = getProjectRoot()
-        const ftpHostConfig = JSON.stringify({
-          ftp: {
-            host: cfg.ftp.host,
-            port: cfg.ftp.port,
-            user: cfg.ftp.user,
-            password: cfg.ftp.password,
-            logPath: `${cfg.serverDir}/logs/latest.log`,
-          },
-          rcon: {
-            host: cfg.rcon.host,
-            port: cfg.rcon.port,
-            password: cfg.rcon.password,
-          },
-        })
-        const daemon = await startDaemon({
-          projectRoot,
-          hostType: 'rcon,ftp',
-          hostConfig: ftpHostConfig,
-        })
-        const client = await openDaemonClient(daemon)
-        try {
-          const sub = await client.attachLog()
-          const received: string[] = []
-          sub.onLines((lines) => {
-            for (const line of lines) received.push(line)
-          })
-          try {
-            const tag = `ftplog${Date.now()}`
-            for (let i = 0; i < 5; i++) {
-              await client.executeRawCommand({ command: `say ${tag}${i}` })
-            }
-            const start = Date.now()
-            while (
-              Date.now() - start < 15_000 &&
-              !received.some((l) => l.includes(tag))
-            ) {
-              await new Promise((r) => setTimeout(r, 100))
-            }
-            const hit = received.find((l) => l.includes(tag))
-            expect(hit).toBeDefined()
-          } finally {
-            await sub.unattach()
-          }
-        } finally {
-          client.close()
-          await daemon.shutdown()
-        }
-      },
-      60_000,
-    )
-  })
-
-  describe('FtpHost + RconHost — sand run dispatch', () => {
-    test('sand run "say <tag>" exits 0 via the rcon member', async () => {
+  describe('FtpHost + rcon — sand run dispatch', () => {
+    test('sand run "say <tag>" exits 0 via the ftp host\'s rcon', async () => {
       const cfg = getCfg()
       const projectRoot = getProjectRoot()
-      const ftpHostConfig = JSON.stringify({
-        ftp: {
-          host: cfg.ftp.host,
-          port: cfg.ftp.port,
-          user: cfg.ftp.user,
-          password: cfg.ftp.password,
-          logPath: `${cfg.serverDir}/logs/latest.log`,
-        },
-        rcon: {
-          host: cfg.rcon.host,
-          port: cfg.rcon.port,
-          password: cfg.rcon.password,
-        },
-      })
       const daemon = await startDaemon({
         projectRoot,
-        hostType: 'rcon,ftp',
-        hostConfig: ftpHostConfig,
+        hostType: 'ftp',
+        hostConfig: ftpRconConfig(cfg),
       })
       try {
         const { exitCode } = await runSand([`say ftprcon${Date.now()}`], projectRoot)
@@ -249,5 +155,43 @@ export function registerFtpTests(
         await daemon.shutdown()
       }
     }, 30_000)
+
+    test('WS client executeRawCommand triggers an MC log line that FtpHost attachLog picks up', async () => {
+      const cfg = getCfg()
+      const projectRoot = getProjectRoot()
+      const daemon = await startDaemon({
+        projectRoot,
+        hostType: 'ftp',
+        hostConfig: ftpRconConfig(cfg),
+      })
+      const client = await openDaemonClient(daemon)
+      try {
+        const sub = await client.attachLog()
+        const received: string[] = []
+        sub.onLines((lines) => {
+          for (const line of lines) received.push(line)
+        })
+        try {
+          const tag = `ftplog${Date.now()}`
+          for (let i = 0; i < 5; i++) {
+            await client.executeRawCommand({ command: `say ${tag}${i}` })
+          }
+          const start = Date.now()
+          while (
+            Date.now() - start < 15_000 &&
+            !received.some((l) => l.includes(tag))
+          ) {
+            await new Promise((r) => setTimeout(r, 100))
+          }
+          const hit = received.find((l) => l.includes(tag))
+          expect(hit).toBeDefined()
+        } finally {
+          await sub.unattach()
+        }
+      } finally {
+        client.close()
+        await daemon.shutdown()
+      }
+    }, 60_000)
   })
 }

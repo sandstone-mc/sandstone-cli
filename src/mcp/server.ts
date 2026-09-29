@@ -142,7 +142,7 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
     readServerLog.NAME,
     new ResourceTemplate(readServerLog.URI, { list: undefined }),
     async (uri, params) => {
-      const r = await readServerLog.read(ctx, coerceFileLogParams(params))
+      const r = await readServerLog.read(ctx, coerceLogParams(params))
       return { contents: [r] }
     },
   )
@@ -246,8 +246,10 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
   // -----------------------------------------------------------------
   // Don't block server startup if the daemon is down — most resources
   // will surface the error per-call.
+  console.error(`[mcp-debug] buildMcpServer: registering daemon forwarders @ ${Date.now()}`)
   try {
     const daemon = await requireDaemon(ctx.projectRoot)
+    console.error(`[mcp-debug] buildMcpServer: daemon acquired @ ${Date.now()}`)
     forwardConfigChangedToResource(server.server, daemon)
     // Bridge WS-received notifications → stdio output. Without this,
     // daemon-pushed notifications (e.g. `notifications/resources/updated`
@@ -255,9 +257,12 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
     // the SDK's typed handlers cover configChanged/log, but generic
     // resource notifications have nowhere to go.
     forwardNotificationsToStdio(daemon, server)
-  } catch {
+    console.error(`[mcp-debug] buildMcpServer: forwarders wired @ ${Date.now()}`)
+  } catch (e) {
+    console.error(`[mcp-debug] buildMcpServer: requireDaemon failed @ ${Date.now()}:`, e instanceof Error ? e.message : e)
     // No daemon — agent will discover this when it calls a resource.
   }
+  console.error(`[mcp-debug] buildMcpServer: returning server @ ${Date.now()}`)
 
   return server
 }
@@ -266,14 +271,22 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
  * Start the MCP server on stdio. Blocks until stdin closes.
  */
 export async function runMcpServer(opts: { path: string; version: string }): Promise<void> {
+  console.error(`[mcp-debug] runMcpServer start @ ${Date.now()}`)
   const server = await buildMcpServer(opts)
+  console.error(`[mcp-debug] buildMcpServer done @ ${Date.now()}`)
   const transport = new StdioServerTransport()
+  console.error(`[mcp-debug] transport created @ ${Date.now()}; calling server.connect()`)
   await server.connect(transport)
-  // `server.connect()` resolves once the transport is wired. The SDK
-  // keeps the process alive while the transport is open — stdio closes
-  // when the parent (Claude Code) disconnects, at which point
-  // `server.close()` is called via the SDK's lifecycle hook. Nothing
-  // for us to await here.
+  console.error(`[mcp-debug] server.connect() RESOLVED @ ${Date.now()}; awaiting transport close`)
+  // `server.connect()` resolves once the transport is wired — it does
+  // NOT block until stdin closes. Wait for the transport's `onclose`
+  // callback so the process stays alive while the parent is connected.
+  await new Promise<void>((resolve) => {
+    transport.onclose = () => {
+      console.error(`[mcp-debug] transport onclose @ ${Date.now()}`)
+      resolve()
+    }
+  })
 }
 
 /**

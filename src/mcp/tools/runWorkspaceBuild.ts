@@ -32,7 +32,7 @@ export const DESCRIPTION =
   'Trigger a `sand build`. USAGE: only useful when a `sand watch` is connected in **manual mode** (changes queue until you trigger). ' +
   'If the watcher is in auto-rebuild mode, this returns an error — the watcher already rebuilds on every file change, no need to push. ' +
   'If no watcher is connected, this returns an error — use the `sand build` Bash command directly. ' +
-  'Pairs with subscribing to `sandstone://rebuild-state` for the build result; this tool returns immediately when the trigger is accepted.'
+  'Pairs with subscribing to `sandstone://rebuild-state` for the build result; this tool returns immediately when the trigger is accepted and exactly one notification fires per build (when it completes or fails).'
 
 export async function call(
   ctx: McpContext,

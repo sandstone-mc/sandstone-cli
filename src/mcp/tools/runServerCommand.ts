@@ -27,7 +27,7 @@ import { endpointStatus, readEndpoint, endpointPath } from '../../commands/conne
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
 import type { McpContext } from '../daemon-client.js'
 import type { HostProvider, HostType, HostConfigInput } from '../../hosts/types.js'
-import { DEFAULT_HOST_TYPES } from '../../commands/connect/index.js'
+import { DEFAULT_HOST_TYPE } from '../../commands/connect/index.js'
 
 export const NAME = 'runServerCommand'
 export const DESCRIPTION =
@@ -55,8 +55,22 @@ export async function call(
   if (status === 'live') {
     const endpoint = await readEndpoint(ctx.projectRoot)
     if (endpoint) {
+      // Two distinct failure modes must NOT be conflated:
+      //   - `openClient` throws  → daemon is unreachable, fall through
+      //     to direct-path bootstrap (mirrors `sand run` semantics).
+      //   - `client.executeRawCommand` throws → daemon is up but the
+      //     command failed (e.g. `rcon host is not connected` while
+      //     the daemon is mid-restart). DO NOT fall through — that
+      //     would spawn a second JVM in the MCP process which then
+      //     collides on the world directory lock held by the daemon's
+      //     JVM. Return the error verbatim.
+      let client
       try {
-        const client = await openClient({ endpoint })
+        client = await openClient({ endpoint })
+      } catch {
+        // Daemon unreachable — fall through to direct.
+      }
+      if (client) {
         try {
           if (!client.welcome.capabilities.executeRawCommand) {
             return {
@@ -77,45 +91,46 @@ export async function call(
               text: result.output || '(no output)',
             }],
           }
+        } catch (err) {
+          // Daemon is alive but the command failed — surface the error.
+          return {
+            isError: true,
+            content: [{
+              type: 'text',
+              text: err instanceof Error ? err.message : String(err),
+            }],
+          }
         } finally {
           client.close()
         }
-      } catch (err) {
-        // Daemon died mid-flight — fall through to direct.
       }
     }
   }
 
-  // 2. Direct path — bootstrap a host from --host-config.
-  const hostTypes = args.hostType
-    ? (args.hostType.split(',').map((s) => s.trim()).filter(Boolean) as HostType[])
-    : [...DEFAULT_HOST_TYPES]
+  // 2. Direct path — bootstrap a host from --host-config. The direct
+  // path runs when no daemon is available; it's the only remaining
+  // host selection mechanism since composite daemons were removed.
+  const hostType: HostType = args.hostType
+    ? (args.hostType as HostType)
+    : DEFAULT_HOST_TYPE
   const userProvidedHostSettings = !!args.hostType || !!args.hostConfig
 
-  // Build a per-host-type config map. Two shapes accepted, mirroring
-  // `sand run`'s direct mode:
-  //   - flat shape: `args.hostConfig` itself is a single host's config
-  //     (assign it to the first requested type);
-  //   - composite shape: `args.hostConfig` is already keyed by host
-  //     type (`{ssh:{...}, rcon:{...}}`) and we cast through.
+  // Build the per-host-type config map. Flat shape accepted for
+  // back-compat with single-host invocations.
   let perHostConfig: Partial<Record<HostType, HostConfigInput>>
   if (args.hostConfig) {
-    perHostConfig = hostTypes.length === 1
-      ? { [hostTypes[0]!]: args.hostConfig as HostConfigInput }
-      : (args.hostConfig as Partial<Record<HostType, HostConfigInput>>)
+    perHostConfig = { [hostType]: args.hostConfig as HostConfigInput }
   } else {
-    perHostConfig = Object.fromEntries(hostTypes.map((t) => [t, {} as HostConfigInput])) as Partial<Record<HostType, HostConfigInput>>
+    perHostConfig = { [hostType]: {} as HostConfigInput }
   }
-  for (const t of hostTypes) {
-    const cfg = perHostConfig[t] as Record<string, unknown> | undefined
-    if (cfg && cfg.projectRoot === undefined) cfg.projectRoot = ctx.projectRoot
-  }
+  const cfg = perHostConfig[hostType] as Record<string, unknown> | undefined
+  if (cfg && cfg.projectRoot === undefined) cfg.projectRoot = ctx.projectRoot
 
   let host: HostProvider
   let weStarted: HostType[]
   try {
     const result = await bootstrapHosts({
-      hostTypes,
+      hostType,
       perHostConfig,
       silent: true,
       userProvidedHostSettings,

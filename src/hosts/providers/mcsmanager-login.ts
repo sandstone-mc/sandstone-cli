@@ -71,7 +71,7 @@ export class McsManagerLoginHost implements HostProvider {
    * to detect when a composite member has gone away and trigger a
    * coordinated shutdown.
    */
-  private disconnectHandlers = new Set<(reason: string) => void>()
+  disconnectHandlers: Set<(reason: string) => void> = new Set<(reason: string) => void>()
 
   constructor(config: McsManagerHostConfig) {
     this.config = config

@@ -6,6 +6,11 @@
  * The harness itself is brought up once, in `host.test.ts`'s
  * beforeAll — the registration function just receives the already-
  * loaded config and the per-test projectRoot.
+ *
+ * SSH's built-in `execCommand` is reserved for `startCommand` /
+ * `stopCommand` (lifecycle). For `executeRawCommand` we open a
+ * separate rcon-srcds client via the optional `rcon` block under
+ * the ssh config — same pattern as FtpHost.
  */
 import { describe, expect, test } from 'bun:test'
 
@@ -15,35 +20,54 @@ export function registerSshTests(
   getCfg: () => HarnessConfig,
   getProjectRoot: () => string,
 ): void {
+  // SSH-only config — no RCON. Skips `executeRawCommand` capability.
+  // The SSH exec channel is reserved for start/stop commands, which
+  // these tests stub out as `true` so nothing actually launches.
+  // Host config is flat (HostConfigInput is the union of all
+  // provider configs); no `ssh:` wrapper.
+  const sshOnlyConfig = (cfg: HarnessConfig): string =>
+    JSON.stringify({
+      host: cfg.ssh.host,
+      port: cfg.ssh.port,
+      username: cfg.ssh.username,
+      password: cfg.ssh.password,
+      serverDir: cfg.serverDir,
+      startCommand: 'true',
+      stopCommand: 'true',
+      // SshHost's default `'logs/latest.log'` is relative; with
+      // no basePath it stays relative, and the SFTP layer resolves
+      // it against the user's CWD. Pin to the absolute MC log path.
+      logPath: `${cfg.serverDir}/logs/latest.log`,
+    })
+
+  // SSH+RCON — exposes `executeRawCommand`. `rcon` config is a flat
+  // sibling of the other SshHost fields since SshHost owns its rcon
+  // client directly (no composite layer).
+  const sshRconConfig = (cfg: HarnessConfig): string =>
+    JSON.stringify({
+      host: cfg.ssh.host,
+      port: cfg.ssh.port,
+      username: cfg.ssh.username,
+      password: cfg.ssh.password,
+      serverDir: cfg.serverDir,
+      startCommand: 'true',
+      stopCommand: 'true',
+      logPath: `${cfg.serverDir}/logs/latest.log`,
+      rcon: {
+        host: cfg.rcon.host,
+        port: cfg.rcon.port,
+        password: cfg.rcon.password,
+      },
+    })
+
   describe('SshHost — connect daemon lifecycle', () => {
-    test('sand connect boots an SSH+rcon daemon against the harness', async () => {
+    test('sand connect boots an SSH-only daemon against the harness', async () => {
       const cfg = getCfg()
       const projectRoot = getProjectRoot()
-      const sshHostConfig = JSON.stringify({
-        ssh: {
-          host: cfg.ssh.host,
-          port: cfg.ssh.port,
-          username: cfg.ssh.username,
-          password: cfg.ssh.password,
-          serverDir: cfg.serverDir,
-          startCommand: 'true',
-          stopCommand: 'true',
-          // SshHost's default `'logs/latest.log'` is relative; with
-          // no basePath it stays relative, and basic-ftp resolves it
-          // against the user's CWD. Pin to the absolute MC log
-          // path.
-          logPath: `${cfg.serverDir}/logs/latest.log`,
-        },
-        rcon: {
-          host: cfg.rcon.host,
-          port: cfg.rcon.port,
-          password: cfg.rcon.password,
-        },
-      })
       const daemon = await startDaemon({
         projectRoot,
-        hostType: 'ssh,rcon',
-        hostConfig: sshHostConfig,
+        hostType: 'ssh',
+        hostConfig: sshOnlyConfig(cfg),
       })
       try {
         expect(daemon.url).toMatch(/^ws:\/\/127\.0\.0\.1:\d+$/)
@@ -55,33 +79,83 @@ export function registerSshTests(
     }, 30_000)
   })
 
-  describe('SshHost — attachLog via composite (ssh + rcon)', () => {
+  describe('SshHost — file I/O (via WS RPC)', () => {
+    test('writeFile then readFile round-trip matches the original payload', async () => {
+      const cfg = getCfg()
+      const projectRoot = getProjectRoot()
+      const daemon = await startDaemon({
+        projectRoot,
+        hostType: 'ssh',
+        hostConfig: sshOnlyConfig(cfg),
+      })
+      const client = await openDaemonClient(daemon)
+      try {
+        const path = `${cfg.serverDir}/.ssh-rpc-roundtrip-${Date.now()}.txt`
+        const payload = `ssh round-trip ${Date.now()}\n`
+        // writeFile RPC defaults to base64 — pass `encoding: 'utf-8'`
+        // so the string lands on disk as text rather than as the
+        // base64 representation of itself.
+        await client.writeFile({ path, data: payload, encoding: 'utf-8' })
+        const back = await client.readFile({ path })
+        // readFile RPC always returns base64. Decode before comparing.
+        const decoded = Buffer.from(back.data, 'base64').toString('utf-8')
+        expect(decoded).toBe(payload)
+      } finally {
+        client.close()
+        await daemon.shutdown()
+      }
+    }, 30_000)
+
+    test('readFile of an existing MC server file returns its content', async () => {
+      const cfg = getCfg()
+      const projectRoot = getProjectRoot()
+      const daemon = await startDaemon({
+        projectRoot,
+        hostType: 'ssh',
+        hostConfig: sshOnlyConfig(cfg),
+      })
+      const client = await openDaemonClient(daemon)
+      try {
+        const path = `${cfg.serverDir}/server.properties`
+        const back = await client.readFile({ path })
+        const decoded = Buffer.from(back.data, 'base64').toString('utf-8')
+        expect(decoded).toContain('enable-rcon=true')
+        expect(decoded).toContain('rcon.port=25575')
+      } finally {
+        client.close()
+        await daemon.shutdown()
+      }
+    }, 30_000)
+
+    test('readFile on a missing path surfaces an RPC error', async () => {
+      const cfg = getCfg()
+      const projectRoot = getProjectRoot()
+      const daemon = await startDaemon({
+        projectRoot,
+        hostType: 'ssh',
+        hostConfig: sshOnlyConfig(cfg),
+      })
+      const client = await openDaemonClient(daemon)
+      try {
+        const path = `${cfg.serverDir}/.ssh-rpc-missing-${Date.now()}.txt`
+        await expect(client.readFile({ path })).rejects.toThrow()
+      } finally {
+        client.close()
+        await daemon.shutdown()
+      }
+    }, 30_000)
+  })
+
+  describe('SshHost — attachLog + RCON', () => {
     test(
       'sand run "say <tag>" drives MC via RCON — exit 0 means RCON dispatched',
       async () => {
         const cfg = getCfg()
         const projectRoot = getProjectRoot()
-        const sshHostConfig = JSON.stringify({
-          ssh: {
-            host: cfg.ssh.host,
-            port: cfg.ssh.port,
-            username: cfg.ssh.username,
-            password: cfg.ssh.password,
-            serverDir: cfg.serverDir,
-            startCommand: 'true',
-            stopCommand: 'true',
-            logPath: `${cfg.serverDir}/logs/latest.log`,
-          },
-          rcon: {
-            host: cfg.rcon.host,
-            port: cfg.rcon.port,
-            password: cfg.rcon.password,
-          },
-        })
         const daemon = await startDaemon({
           projectRoot,
-          hostType: 'ssh,rcon',
-          hostConfig: sshHostConfig,
+          hostType: 'ssh',
+          hostConfig: sshRconConfig(cfg),
         })
         try {
           const tag = `sshattach${Date.now()}`
@@ -99,27 +173,10 @@ export function registerSshTests(
       async () => {
         const cfg = getCfg()
         const projectRoot = getProjectRoot()
-        const sshHostConfig = JSON.stringify({
-          ssh: {
-            host: cfg.ssh.host,
-            port: cfg.ssh.port,
-            username: cfg.ssh.username,
-            password: cfg.ssh.password,
-            serverDir: cfg.serverDir,
-            startCommand: 'true',
-            stopCommand: 'true',
-            logPath: `${cfg.serverDir}/logs/latest.log`,
-          },
-          rcon: {
-            host: cfg.rcon.host,
-            port: cfg.rcon.port,
-            password: cfg.rcon.password,
-          },
-        })
         const daemon = await startDaemon({
           projectRoot,
-          hostType: 'ssh,rcon',
-          hostConfig: sshHostConfig,
+          hostType: 'ssh',
+          hostConfig: sshRconConfig(cfg),
         })
         const client = await openDaemonClient(daemon)
         try {

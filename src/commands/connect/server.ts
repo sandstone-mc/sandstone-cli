@@ -30,7 +30,7 @@ import {
   type WelcomeEvent,
 } from './rpc.js'
 import { capabilitiesToRecord } from '../../hosts/types.js'
-import { RpcHandlerError, ShutdownSignal, dispatch, narrowMethod, withHost, attachLogsCapability, handleSessionClose, type DispatchContext } from './dispatch.js'
+import { RpcHandlerError, ShutdownSignal, dispatch, narrowMethod, withHost, handleSessionClose, type DispatchContext } from './dispatch.js'
 import type { ActiveConfig } from './active-config.js'
 import { type RebuildState, type WatcherStatus, notification } from './rpc.js'
 import { SubscriptionRegistry } from './subscriptions.js'
@@ -90,10 +90,17 @@ export interface ServerOptions {
   getWatcherStatus?: () => WatcherStatus | null
   /** Mutator for the current watcher status. */
   setWatcherStatus?: (status: WatcherStatus, ws: unknown) => void
+  /**
+   * Read of the daemon-level "expected shutdown in progress" flag.
+   * When true, RPC handler errors are not treated as fatal — the
+   * error is sent to the client but the daemon stays up. See
+   * {@link expectedShutdown} on the daemon module.
+   */
+  getExpectedShutdown?: () => boolean
   /** Append log entries to one of the daemon's bounded buffers. */
-  appendLogLines?: (entries: { line: string; ts: number }[], target: 'build' | 'test') => void
+  appendLogLines?: (entries: { line: string; ts: number }[], target: 'build' | 'test' | 'server') => void
   /** Snapshot read of a named log buffer with filtering. */
-  readLogBuffer?: (target: 'build' | 'test', opts?: {
+  readLogBuffer?: (target: 'build' | 'test' | 'server', opts?: {
     tail?: number | null
     maxLines?: number | null
     range?: { from: number; to: number } | null
@@ -176,11 +183,6 @@ export function startServer(opts: ServerOptions): RunningServer {
       console.log(`[ws] connection opened (${ws.remoteAddress})`)
 
       const welcomeCaps = capabilitiesToRecord(opts.host.capabilities)
-      // Same gating as the `ping` RPC handler — clients pick
-      // attachLog vs attachLogs based on this welcome.
-      if (attachLogsCapability(opts.host)) {
-        welcomeCaps.attachLogs = true
-      }
       const welcome: WelcomeEvent = {
         protocol: PROTOCOL_VERSION,
         hostType: opts.host.type,
@@ -235,19 +237,19 @@ export function startServer(opts: ServerOptions): RunningServer {
         host: opts.host,
         subscriptions,
         ws,
-        pushLog: (lines, subscriptionId, hostType) => pushLog(ctx, ws, subscriptionId, lines, hostType),
+        pushLog: (lines, subscriptionId) => pushLog(ctx, ws, subscriptionId, lines),
         startedAt,
         activeConfig: opts.activeConfig,
         setActiveConfig: opts.setActiveConfig,
         getRebuildState: opts.getRebuildState,
         setRebuildState: opts.setRebuildState,
+        getExpectedShutdown: opts.getExpectedShutdown,
         getWatcherStatus: opts.getWatcherStatus,
         setWatcherStatus: opts.setWatcherStatus,
         appendLogLines: opts.appendLogLines,
         readLogBuffer: opts.readLogBuffer,
         broadcast,
         notifyResourceUpdated: (uri) => {
-          console.error(`[notify-debug] notifyResourceUpdated(${uri}) sessions=${sessions.size}`)
           // Fire `notifications/resources/updated` to every connected
           // session. Uses the JSON-RPC notification envelope (not the
           // legacy `{event, data}` shape that `broadcast` uses for
@@ -257,8 +259,7 @@ export function startServer(opts: ServerOptions): RunningServer {
             'notifications/resources/updated',
             { uri },
           ))
-          for (const [ws, ctx] of sessions) {
-            console.error(`[notify-debug]   sending to ws shuttingDown=${ctx.shuttingDown}`)
+          for (const [ws] of sessions) {
             try { ws.sendText(envelope) } catch { /* disconnected */ }
           }
         },
@@ -299,7 +300,11 @@ export function startServer(opts: ServerOptions): RunningServer {
         // Preserve the handler's typed RpcError if present, otherwise
         // coerce to InternalError. Send the err, then shut the daemon
         // down so the failure isn't masked by a transient-looking
-        // response.
+        // response — UNLESS we're inside an expected-shutdown cycle
+        // (e.g. an `rcon.executeRawCommand('stop')` raising
+        // `NotConnectedError` because rcon was already disconnected by
+        // the daemon's own graceful stop). In that case the error is
+        // expected collateral; the daemon stays up.
         const rpcErr = e instanceof RpcHandlerError ? e.rpc : {
           code: -32603,
           message: e instanceof Error ? e.message : String(e),
@@ -307,6 +312,12 @@ export function startServer(opts: ServerOptions): RunningServer {
         response = err(parsed.id, rpcErr)
         ws.sendText(JSON.stringify(response))
         const status = `err:${rpcErr.code}`
+        if (opts.getExpectedShutdown?.()) {
+          console.error(
+            `[ws] → ${parsed.method} id=${parsed.id} ${status} ${rpcErr.message} (${Date.now() - startMs}ms) — expected shutdown cycle, daemon stays up`,
+          )
+          return
+        }
         console.error(
           `[ws] → ${parsed.method} id=${parsed.id} ${status} ${rpcErr.message} (${Date.now() - startMs}ms) — shutting down`,
         )
@@ -403,16 +414,7 @@ export function startServer(opts: ServerOptions): RunningServer {
 // Log coalescing
 // ---------------------------------------------------------------------------
 
-function pushLog(ctx: SessionContext, ws: ServerWebSocket<WsData>, subscriptionId: string, lines: string[], hostType?: string): void {
-  // Fan-out batches carry a hostType so the client can attribute lines to
-  // their emitting member. Send them immediately without coalescing —
-  // batching multiple hostType-tagged batches would lose attribution
-  // if a second member pushes before the timer fires. Single-host
-  // batches (no hostType) keep the original coalescing for bandwidth.
-  if (hostType !== undefined) {
-    ws.sendText(JSON.stringify(event('log', { subscriptionId, lines, hostType })))
-    return
-  }
+function pushLog(ctx: SessionContext, ws: ServerWebSocket<WsData>, subscriptionId: string, lines: string[]): void {
   let pending = ctx.pendingBySub.get(subscriptionId)
   if (!pending) {
     pending = []

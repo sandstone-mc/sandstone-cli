@@ -1,22 +1,20 @@
 /**
  * Direct server management — provider types.
  *
- * A `HostProvider` implements any subset of six capabilities. The registry +
- * composite compose partial providers into whatever combination the caller
- * wants (e.g. `[ssh, rcon]` for full control with RCON handling the MC
- * console, or `[ftp]` for read/write-only access).
+ * Each provider implements any subset of the capabilities below.
+ * `integrated` and `mcsmanager-login` speak the Minecraft console
+ * protocol directly (RCON and MCSManager WS respectively); SSH and FTP
+ * are file/transport only — pair them with a console-capable host via
+ * the operator if you need remote console access.
  *
- * `executeRawCommand` is reserved for providers that speak the Minecraft
- * console protocol (RCON, MCSManager WebSocket stream/input, or a locally-
- * attached server's stdin). SSH does NOT implement it — SSH gives shell +
- * file access only.
+ * `executeRawCommand` returns a real response (not just echoed to
+ * stdin) when the underlying transport supports it.
  */
 
 import type { SandstoneConfig } from 'sandstone'
 
 export type HostType =
   | 'ssh'
-  | 'rcon'
   | 'ftp'
   | 'local-client'
   | 'integrated'
@@ -40,9 +38,7 @@ export const Capability = {
   ExecuteRawCommand: 'executeRawCommand',
   /**
    * True when `executeRawCommand` returns a non-empty response from the
-   * underlying server transport (RCON, MCSManager WS, etc.). False when
-   * the method is implemented but the response is unreliable / empty
-   * (e.g. integrated writes to a child stdin and gets no echo). Lets
+   * underlying server transport (RCON, MCSManager WS, etc.). Lets
    * callers like `sand run --expect` skip the attach-and-await path
    * when a built-in response already signals success.
    */
@@ -52,7 +48,6 @@ export const Capability = {
 /** Every valid host type literal. */
 export const HOST_TYPES = [
   'ssh',
-  'rcon',
   'ftp',
   'local-client',
   'integrated',
@@ -85,9 +80,6 @@ export interface LogSubscription {
 /** Per-chunk callback signature. Lines already split on `\n`. */
 export type LogChunkHandler = (lines: string[]) => void
 
-/** Fan-out chunk callback. `source` identifies which provider emitted the lines. */
-export type LogChunkFanoutHandler = (source: HostType, lines: string[]) => void
-
 /**
  * Base interface. Capability methods are optional on the type but each
  * provider implementation only defines the ones matching its capabilities.
@@ -115,13 +107,16 @@ export interface HostProvider {
   readFile?(path: ServerPath): Promise<Buffer>
   writeFile?(path: ServerPath, data: Buffer | string): Promise<void>
   attachLog?(onChunk: LogChunkHandler): Promise<LogSubscription>
-  /** Minecraft console command only. RCON / MCSManager WS / server stdin. */
+  /**
+   * Minecraft console command only. RCON / MCSManager WS. Returns the
+   * server's response when the underlying transport supports it; an
+   * empty string otherwise.
+   */
   executeRawCommand?(command: string): Promise<string>
   /**
    * Subscribe to unexpected liveness loss — the spawned child exited,
    * the socket disconnected, etc. The daemon uses this to detect when
-   * any member of a composite has gone away and trigger a coordinated
-   * shutdown.
+   * the host has gone away and trigger a coordinated shutdown.
    *
    * `handler` receives a short reason string for logging. Returns an
    * unsubscribe function. Not invoked for graceful `disconnect()`
@@ -151,6 +146,26 @@ export interface BaseHostConfig {
   sandstoneConfig?: SandstoneConfig
 }
 
+/**
+ * RCON configuration shared by every host that supports
+ * `executeRawCommand`. When present, the host opens a persistent
+ * rcon-srcds client and forwards console commands through it. The
+ * `enabled` flag is a guard so providers can detect "user mentioned
+ * rcon but didn't enable it" — true means the host SHOULD connect;
+ * false means the user explicitly opted out and the host MUST NOT.
+ *
+ * For `integrated` this is mandatory (the JVM only accepts console
+ * input over RCON, not stdin). For `ssh` / `ftp` it's optional —
+ * file/transport-only setups don't need it.
+ */
+export interface RconConfig {
+  /** Defaults to true. `false` opts the host out of RCON entirely. */
+  enabled?: boolean
+  password?: string
+  /** Defaults to 25575 (Minecraft's standard RCON port). */
+  port?: number
+}
+
 export interface SshHostConfig extends BaseHostConfig {
   host: string
   port?: number
@@ -169,12 +184,13 @@ export interface SshHostConfig extends BaseHostConfig {
   consoleSession?: string
   /** Path to the log file. Default: `${serverDir}/logs/latest.log`. */
   logPath?: string
-}
-
-export interface RconHostConfig extends BaseHostConfig {
-  host: string
-  port?: number
-  password: string
+  /**
+   * When set AND `enabled` (default), the SSH host exposes
+   * `executeRawCommand` over RCON in addition to its built-in SFTP /
+   * shell commands. SSH exec remains for `startCommand` / `stopCommand`
+   * (those aren't `executeRawCommand` — they're lifecycle).
+   */
+  rcon?: RconConfig
 }
 
 export interface FtpHostConfig extends BaseHostConfig {
@@ -187,6 +203,13 @@ export interface FtpHostConfig extends BaseHostConfig {
   logPath?: string
   /** How often to poll the log file for new bytes. Default 500ms. */
   pollIntervalMs?: number
+  /**
+   * When set AND `enabled` (default), the FTP host exposes
+   * `executeRawCommand` over RCON. FTP itself has no native exec
+   * channel — this is the only way to send console commands to an
+   * FTP-managed server.
+   */
+  rcon?: RconConfig
 }
 
 export interface LocalClientHostConfig extends BaseHostConfig {
@@ -214,12 +237,12 @@ export interface IntegratedHostConfig extends BaseHostConfig {
    */
   serverPort?: number
   /**
-   * RCON configuration. When enabled, the host writes `enable-rcon`,
-   * `rcon.port`, and `rcon.password` to `server.properties` so the
-   * JVM starts its RCON listener. Pair this with a separate `rcon`
-   * provider in a composite daemon to drive the console over RCON.
+   * RCON configuration. The integrated host ALWAYS enables RCON and
+   * connects via this client once the JVM is up — commands go over
+   * the rcon-srcds protocol, not the child's stdin.
    */
   rcon?: {
+    /** Defaults to true. `false` is rejected (RCON is required). */
     enabled?: boolean
     password?: string
     /** Defaults to 25575 (Minecraft's standard RCON port). */
@@ -325,7 +348,7 @@ export interface McsManagerHostConfig extends BaseHostConfig {
   password?: string
 }
 
-/** Capability-method shapes used by CompositeHost's dispatch helper. */
+/** Capability-method shapes for compile-time introspection. */
 export interface CapabilityMethods {
   startServer(): Promise<void>
   stopServer(): Promise<void>
@@ -343,21 +366,11 @@ export interface CapabilityMethods {
  */
 export type HostConfigInput = Partial<
   | SshHostConfig
-  | RconHostConfig
   | FtpHostConfig
   | LocalClientHostConfig
   | IntegratedHostConfig
   | McsManagerHostConfig
 >
-
-/**
- * Composite host config — keyed map of host type to that type's config.
- * Used by `sand connect --host-type ssh,rcon --host-config '{...}'` to
- * instantiate multiple providers and wrap them in a {@link CompositeHost}.
- * When `--host-type` lists only one provider, use the flat
- * {@link HostConfigInput} instead — composite is for ≥2.
- */
-export type CompositeHostConfigInput = Partial<Record<HostType, HostConfigInput>>
 
 export const ALL_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   Capability.StartServer,
@@ -368,13 +381,6 @@ export const ALL_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   Capability.ExecuteRawCommand,
   Capability.ExecuteRawCommandHasResponse,
 ])
-
-/** Merge capability sets with OR semantics. Used by CompositeHost. */
-export function mergeCapabilities(sets: HostCapabilities[]): HostCapabilities {
-  const out = new Set<Capability>()
-  for (const set of sets) for (const cap of set) out.add(cap)
-  return out
-}
 
 /** Serialize a `Set<Capability>` to the wire `Record<string, boolean>`. */
 export function capabilitiesToRecord(caps: HostCapabilities): Record<string, boolean> {

@@ -34,7 +34,28 @@ export async function mcpCommand(opts: McpCommandOptions): Promise<void> {
   console.error('[mcp] capabilities: resources (subscribe), tools, logging')
   console.error('[mcp] transport: stdio')
 
-  await runMcpServer({ path: projectRoot, version: CLI_VERSION })
+  // Catch late errors that would otherwise silently kill the process.
+  process.on('uncaughtException', (err) => {
+    console.error(`[mcp-debug] uncaughtException @ ${Date.now()}:`, err)
+  })
+  process.on('unhandledRejection', (reason) => {
+    console.error(`[mcp-debug] unhandledRejection @ ${Date.now()}:`, reason)
+  })
+  process.on('beforeExit', (code) => {
+    console.error(`[mcp-debug] beforeExit code=${code}`)
+  })
+  process.on('exit', (code) => {
+    console.error(`[mcp-debug] exit code=${code}`)
+  })
+  console.error(`[mcp-debug] event listeners attached; pid=${process.pid}`)
+
+  try {
+    await runMcpServer({ path: projectRoot, version: CLI_VERSION })
+    console.error(`[mcp-debug] runMcpServer returned @ ${Date.now()}`)
+  } catch (err) {
+    console.error(`[mcp-debug] runMcpServer threw @ ${Date.now()}:`, err)
+    throw err
+  }
 
   console.error('[mcp] server stopped')
 }

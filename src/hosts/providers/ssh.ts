@@ -1,14 +1,15 @@
 import { NodeSSH, type Config as NodeSshConfig } from 'node-ssh'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
+import { RconClient } from '../rcon-client.js'
 import { Capability, type HostCapabilities, type HostProvider, type LogChunkHandler, type LogSubscription, type ServerPath, type SshHostConfig } from '../types.js'
 
 /**
  * SSH provider — file I/O (SFTP), shell exec, and log attachment via the
- * `node-ssh` library. Does NOT implement `executeRawCommand`: that
- * capability is for the Minecraft console protocol (RCON / WS / stdin),
- * and SSH only speaks shell. Compose with an RCON provider via
- * `CompositeHost` if you need both.
+ * `node-ssh` library. Optionally exposes `executeRawCommand` over RCON
+ * when `config.rcon` is set with `enabled !== false` — SSH's built-in
+ * `execCommand` is reserved for `startCommand`/`stopCommand` (those
+ * aren't `executeRawCommand` — they're lifecycle hooks).
  *
  * Lifecycle:
  *  - `startServer`: runs `startCommand` via `execCommand`.
@@ -17,6 +18,8 @@ import { Capability, type HostCapabilities, type HostProvider, type LogChunkHand
  *    falls back to `stopCommand` after `gracefulStopTimeoutSeconds`.
  *  - `attachLog`: runs `tail -F -n 0` over SSH and forwards each new
  *    line.
+ *  - `executeRawCommand` (optional): forwards through the persistent
+ *    RCON client opened in `connect()`.
  */
 export class SshHost implements HostProvider {
   readonly type = 'ssh' as const
@@ -32,6 +35,8 @@ export class SshHost implements HostProvider {
   private readonly ssh = new NodeSSH()
   private readonly config: SshHostConfig
   private connected = false
+  /** Optional RCON client — only set when `config.rcon` is configured with `enabled !== false`. */
+  private rcon: RconClient | null = null
 
   constructor(config: SshHostConfig) {
     this.config = config
@@ -55,10 +60,37 @@ export class SshHost implements HostProvider {
       )
     }
     this.connected = true
+    // Open RCON if configured. Same host as SSH — the MC server's
+    // RCON listener binds alongside its main port. Failure here is
+    // not fatal (file/log still works) but should be reported so the
+    // user knows `executeRawCommand` won't work.
+    const rconCfg = this.config.rcon
+    if (rconCfg && rconCfg.enabled !== false && rconCfg.port && rconCfg.password) {
+      const rcon = new RconClient({
+        host: this.config.host,
+        port: rconCfg.port,
+        password: rconCfg.password,
+      })
+      try {
+        await rcon.authenticate()
+        this.rcon = rcon
+        // Only add the capability once auth actually succeeded —
+        // otherwise we'd advertise a method we can't honor.
+        this.capabilities.add(Capability.ExecuteRawCommand)
+        this.capabilities.add(Capability.ExecuteRawCommandHasResponse)
+      } catch (err) {
+        this.rcon = null
+        console.error(`[ssh] RCON authenticate failed (${err instanceof Error ? err.message : err}) — executeRawCommand disabled`)
+      }
+    }
   }
 
   async disconnect(): Promise<void> {
     if (!this.connected) return
+    if (this.rcon) {
+      try { this.rcon.destroy() } catch { /* ignore */ }
+      this.rcon = null
+    }
     try {
       this.ssh.dispose()
     } finally {
@@ -133,6 +165,16 @@ export class SshHost implements HostProvider {
       stream.on('close', () => resolve())
       stream.end(typeof data === 'string' ? Buffer.from(data) : data)
     })
+  }
+
+  async executeRawCommand(command: string): Promise<string> {
+    this.requireConnected('ssh')
+    if (!this.rcon) {
+      throw new Error(
+        `SSH host has no RCON configured — set \`rcon\` in the host config to enable executeRawCommand.`,
+      )
+    }
+    return await this.rcon.execute(command)
   }
 
   async attachLog(onChunk: LogChunkHandler): Promise<LogSubscription> {

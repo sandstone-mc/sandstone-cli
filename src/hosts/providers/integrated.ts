@@ -1,6 +1,7 @@
 import { join as pathJoin } from 'node:path'
 import { createHash } from 'node:crypto'
 
+import { RconClient } from '../rcon-client.js'
 import { NotConnectedError } from '../errors.js'
 import { ensureJava, requiredJavaMajor } from '../java.js'
 import {
@@ -88,6 +89,7 @@ export class IntegratedHost implements HostProvider {
     Capability.WriteFile,
     Capability.AttachLog,
     Capability.ExecuteRawCommand,
+    Capability.ExecuteRawCommandHasResponse,
   ])
 
   private readonly config: IntegratedHostConfig
@@ -98,6 +100,8 @@ export class IntegratedHost implements HostProvider {
   private resolvedMinecraftVersion: string | null = null
   private resolvedMinecraftType: 'release' | 'snapshot' | null = null
   private child: ChildProcessWithoutNullStreams | null = null
+  /** RCON client. Re-established on every JVM spawn. */
+  private rcon: RconClient | null = null
   private connected = false
   // Shared line-splitter state — written by startServer's chunk handler,
   // read by attachLog (replay) + forwarded to active handlers. Reset
@@ -128,11 +132,12 @@ export class IntegratedHost implements HostProvider {
    * unexpectedly (SIGTERM/SIGKILL from the OS, crash, internal stop,
    * etc.) — NOT for the daemon's own `disconnect()` call. The daemon
    * subscribes via {@link HostProvider.onDisconnected} to detect when
-   * a composite member has gone away and trigger a coordinated shutdown.
+   * the integrated host has gone away and trigger a coordinated shutdown.
    */
-  private disconnectHandlers = new Set<(reason: string) => void>()
+  disconnectHandlers: Set<(reason: string) => void> = new Set<(reason: string) => void>()
 
   private doneDetected = false
+  private rconReadyDetected = false
   /**
    * Set during `startServer()` when `doneDetected` was false at entry
    * (i.e. the bootstrap actually spawned the JVM). Reset at the top of
@@ -350,9 +355,13 @@ export class IntegratedHost implements HostProvider {
   async disconnect(): Promise<void> {
     if (!this.connected) return
     const child = this.child
+    // Mark rcon close as expected — disconnecting the socket ourselves
+    // shouldn't trip the host-lost handler.
+    if (this.rcon) this.rcon.closeExpected = true
     // Detach the disconnect-listener set BEFORE killing so the exit
     // event fired by our own kill doesn't trigger our own handler.
     this.disconnectHandlers.clear()
+    this.destroyRcon()
     if (child) {
       // Wait for the child to actually exit so the test script doesn't
       // return while the JVM still holds port 25565 — the next test run
@@ -381,9 +390,8 @@ export class IntegratedHost implements HostProvider {
 
   /**
    * Subscribe to unexpected JVM exits. Returns an unsubscribe function.
-   * The daemon uses this to detect when a composite member has gone
-   * away (e.g. `sand run --host-type rcon,integrated "stop"` kills the
-   * integrated JVM via RCON, leaving the daemon with a dead member).
+   * The daemon uses this to detect when the integrated host has gone
+   * away (e.g. `sand run "stop"` killed the JVM via RCON).
    */
   onDisconnected(handler: (reason: string) => void): () => void {
     this.disconnectHandlers.add(handler)
@@ -411,9 +419,14 @@ export class IntegratedHost implements HostProvider {
     // return immediately. If one is in flight (child spawned, not yet
     // done), join its resolver list and wait — concurrent callers
     // (e.g. sand connect + sand run racing) shouldn't crash each other.
+    // `child.killed` stays false even after a clean exit, so stopServer
+    // explicitly nulls `this.child` after the JVM exits to make this
+    // branch skip the join when the previous JVM is already gone.
     this.weStarted = !this.doneDetected
-    if (this.doneDetected) return
-    if (this.child && !this.child.killed) {
+    if (this.doneDetected) {
+      return
+    }
+    if (this.child) {
       await new Promise<void>((resolve) => this.resolveReady.push(resolve))
       return
     }
@@ -426,12 +439,21 @@ export class IntegratedHost implements HostProvider {
       )
     }
 
-    // Reset log state for the new run.
+    // Reset log state + tear down any prior rcon client before the new JVM.
     this.logBuffer = []
     this.partialLine = ''
     this.doneDetected = false
+    this.rconReadyDetected = false
     this.resolveReady = []
     this.stderrTail = []
+    if (this.rcon) {
+      try {
+        this.rcon.destroy()
+      } catch {
+        // ignore
+      }
+      this.rcon = null
+    }
     const { spawn: nodeSpawn } = await import('node:child_process')
     this.child = nodeSpawn(
       this.java.path,
@@ -439,17 +461,17 @@ export class IntegratedHost implements HostProvider {
       {
         cwd: this.serverDir,
         shell: true,
-        // stdin is a pipe so we can write the `stop` console command
-        // for graceful shutdown. `detached: true` puts the JVM in its
-        // own process group so signal propagation from Bun doesn't race
-        // the `stop` command path.
+        // stdin is kept open for graceful shutdown signaling, though
+        // we now drive the console exclusively via RCON. `detached: true`
+        // puts the JVM in its own process group so signal propagation
+        // from Bun doesn't race the `stop` command path.
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: true,
       },
     )
 
-    // Watch for unexpected exit so the daemon can react (e.g. when a
-    // composite member's RCON-driven `stop` kills the JVM).
+    // Watch for unexpected exit so the daemon can react (e.g. when the
+    // rcon-driven `stop` kills the JVM).
     const onUnexpectedExit = (code: number | null) => {
       for (const h of this.disconnectHandlers) {
         h(`JVM exited with code ${code}`)
@@ -481,8 +503,8 @@ export class IntegratedHost implements HostProvider {
           const [_, localPlayer, clientAddress] = UnwhitelistedAttempt.exec(line)!
           if (clientAddress === '127.0.0.1') {
             console.log(`[integrated] local connection attempt with account "${localPlayer}" detected, whitelisting & opping, please rejoin`)
-            this.executeRawCommand(`whitelist add ${localPlayer}`)
-            this.executeRawCommand(`op ${localPlayer}`)
+            void this.executeRawCommand(`whitelist add ${localPlayer}`)
+            void this.executeRawCommand(`op ${localPlayer}`)
           }
         }
         // Resolve a pending one-shot matcher, if any. Used by
@@ -490,9 +512,6 @@ export class IntegratedHost implements HostProvider {
         // before continuing.
         const matcher = this.pendingLineMatcher
         if (matcher && matcher.pattern.test(line)) {
-          console.log(
-            `[integrated] line matched pending matcher (${matcher.pattern}): ${JSON.stringify(line)}`,
-          )
           this.pendingLineMatcher = null
           matcher.resolve(line)
         }
@@ -515,6 +534,29 @@ export class IntegratedHost implements HostProvider {
             const resolvers = this.resolveReady
             this.resolveReady = []
             for (const r of resolvers) r()
+            break
+          }
+        }
+      }
+      if (!this.rconReadyDetected && this.config.rcon) {
+        // The JVM prints `RCON running on 0.0.0.0:<port>` once the rcon
+        // listener thread binds its socket. Match via the existing
+        // pendingLineMatcher so the same detectLogLine path that
+        // confirms `fill`/`setblock` responses also resolves this.
+        const expectedPort = this.config.rcon.port
+        for (const line of lines) {
+          if (
+            this.pendingLineMatcher &&
+            line.match(this.pendingLineMatcher.pattern) &&
+            line.includes(`RCON running on 0.0.0.0:${expectedPort}`)
+          ) {
+            this.rconReadyDetected = true
+            this.logVerbose(
+              `[integrated#startServer] detected "RCON running on 0.0.0.0:${expectedPort}" — rcon listener ready`,
+            )
+            const m = this.pendingLineMatcher
+            this.pendingLineMatcher = null
+            m.resolve(line)
             break
           }
         }
@@ -554,7 +596,7 @@ export class IntegratedHost implements HostProvider {
     // bad config, etc.). Unbounded by design: when the server died
     // before "Done (" the buffer is small (seconds of output at most).
     const child = this.child
-    await new Promise<void>((resolve, reject) => {
+    const donePromise = new Promise<void>((resolve, reject) => {
       this.resolveReady.push(resolve)
       child!.once('exit', (code: number | null) => {
         if (!this.doneDetected) {
@@ -569,78 +611,98 @@ export class IntegratedHost implements HostProvider {
       })
     })
 
+    // Wait for the RCON listener thread to bind its port. The JVM
+    // prints `Done (` BEFORE the rcon listener thread starts — we
+    // use the existing detectLogLine matcher to await both signals in
+    // parallel via Promise.all, so we return the moment BOTH are true
+    // (no fixed sleep). Matches the configured port exactly so a stale
+    // log line from a prior JVM can't satisfy the new waiter.
+    const rconReadyPromise = this.config.rcon
+      ? this.detectLogLine(
+          new RegExp(`RCON running on 0\\.0\\.0\\.0:${this.config.rcon.port}`),
+        )
+      : Promise.resolve()
+
+    await Promise.all([donePromise, rconReadyPromise])
+
+    // Both "Done (" and "RCON running on ..." have fired. Bring up
+    // the rcon client now that we know the listener is bound.
+    await this.connectRcon()
+
     if (this.needsInitialWorldSetup) {
       this.needsInitialWorldSetup = false
       console.log(
         `[integrated#startServer] running initial world setup (fill + setblock)`,
       )
       const fillSucceeded = this.detectLogLine(/Successfully filled 1089 block\(s\)/)
-      console.log(
-        `[integrated#startServer] writing 'fill 24 -61 24 -8 -61 -8 stone'`,
-      )
       await this.executeRawCommand('fill 24 -61 24 -8 -61 -8 stone')
-      console.log(
-        `[integrated#startServer] awaiting fill response (matcher set: ${fillSucceeded !== undefined})`,
-      )
       await fillSucceeded
-      console.log(
-        `[integrated#startServer] fill response received`,
-      )
       const setblockSucceeded = this.detectLogLine(/Changed the block at 8, -61, 8/)
-      console.log(
-        `[integrated#startServer] writing 'setblock 8 -61 8 cobblestone'`,
-      )
       await this.executeRawCommand('setblock 8 -61 8 cobblestone')
-      console.log(
-        `[integrated#startServer] awaiting setblock response`,
-      )
       await setblockSucceeded
-      console.log(
-        `[integrated#startServer] setblock response received`,
-      )
     }
   }
 
   async stopServer(): Promise<void> {
     this.requireConnected('integrated')
     const child = this.child
-    if (!child || child.killed) return
-    const timeoutMs =
-      (this.config.gracefulStopTimeoutSeconds ?? 30) * 1000
-
-    // Order: write `stop` first, THEN set up the timeout + wait. The
-    // timeout is a safety net for the case where `stop` doesn't lead to
-    // an exit within `gracefulStopTimeoutSeconds`. The promise resolves
-    // on whichever fires first.
+    // Reset `doneDetected` so the next `startServer()` doesn't short-
+    // circuit on the "Done (" already seen" check. The flag's
+    // "Done (" was for the OLD JVM; the NEW JVM hasn't booted yet, so
+    // we need a fresh detection.
+    this.doneDetected = false
+    this.resolveReady = []
+    if (!child || child.killed) {
+      // Already gone — just clean up rcon and bail.
+      this.destroyRcon()
+      return
+    }
+    // Try to send `stop` via RCON first — that's the documented graceful
+    // path the JVM understands (save worlds, broadcast goodbye). The
+    // rcon protocol is request/response, but if the JVM dies mid-response
+    // the rcon client never receives a reply — `rcon.execute()` would
+    // hang indefinitely. Race it against `waitForExit(child)` so we
+    // proceed as soon as EITHER resolves. If the JVM exits first we
+    // abandon the pending execute (its socket will close).
+    const timeoutMs = (this.config.gracefulStopTimeoutSeconds ?? 30) * 1000
     const exited = waitForExit(child)
-    console.log(`[${this.serverDir}] stopServer: writing "stop" to JVM stdin`)
-    child.stdin?.write('stop\n')
-
-    // 2. Set up the timeout. Only fires if `stop` didn't cause exit
-    //    within `gracefulStopTimeoutSeconds`. We don't currently have a
-    //    configurable hard-kill command (no shell layer in integrated),
-    //    so escalation is SIGTERM → SIGKILL via the child process.
-    const killTimer = setTimeout(() => {
-      console.log(
-        `[${this.serverDir}] stopServer: server still alive after ${timeoutMs}ms — escalating to SIGTERM`,
+    if (this.rcon) this.rcon.closeExpected = true
+    let stopSent = false
+    if (this.rcon?.isConnected()) {
+      const stopPromise = this.rcon.execute('stop').then(
+        () => true,
+        () => false,
       )
+      const result = await Promise.race([stopPromise, exited.then(() => null)])
+      if (result === true) stopSent = true
+    }
+    if (!stopSent) {
+      child.stdin?.write('stop\n')
+    }
+    // Race the exit against the graceful timeout. If `stop` doesn't
+    // cause the JVM to exit within `gracefulStopTimeoutSeconds`, escalate
+    // to SIGTERM then SIGKILL.
+    const killTimer = setTimeout(() => {
       if (!child.killed) {
         child.kill('SIGTERM')
-        // Escalate to SIGKILL if still alive 5s later.
         const finalTimer = setTimeout(() => {
-          console.log(
-            `[${this.serverDir}] stopServer: server still alive after SIGTERM — escalating to SIGKILL`,
-          )
           if (!child.killed) child.kill('SIGKILL')
         }, 5_000)
         finalTimer.unref?.()
       }
     }, timeoutMs)
     killTimer.unref?.()
-
-    // 3. Wait for the child to exit.
     await exited
     clearTimeout(killTimer)
+    // JVM is gone — close rcon if it's still up. The close handler may
+    // have already fired (and we suppressed the host-lost event by
+    // detaching the listeners — see disconnect()).
+    this.destroyRcon()
+    // Drop the child reference. `child.killed` stays false even after
+    // a clean exit (it only flips true when we call `child.kill()`), so
+    // leaving the old ref in place would make the next startServer
+    // think the JVM is still booting and join a resolver queue nobody
+    // resolves.
     this.child = null
   }
 
@@ -710,17 +772,47 @@ export class IntegratedHost implements HostProvider {
 
   async executeRawCommand(command: string): Promise<string> {
     this.requireConnected('integrated')
-    const child = this.child
-    if (!child) throw new Error('Server is not running')
-    // Write the command to the JVM's stdin and return immediately.
-    // The Fabric server doesn't reliably echo console-command output to
-    // stdout (especially with mods that silence it), so response capture
-    // is unreliable here. Callers that need to observe the response
-    // should use `attachLog` to capture stdout from the moment the
-    // command is written onward.
-    const stdin = child.stdin as unknown as NodeJS.WritableStream | null
-    stdin?.write(`${command}\n`)
-    return ''
+    if (!this.rcon || !this.rcon.isConnected()) {
+      throw new Error('Server is not running (rcon not connected)')
+    }
+    return await this.rcon.execute(command)
+  }
+
+  /**
+   * Open the rcon-srcds client and authenticate against the JVM's RCON
+   * listener. Throws on auth failure (bad password) or transport error.
+   * Surface unexpected socket close as a host-lost event.
+   */
+  private async connectRcon(): Promise<void> {
+    const rconCfg = this.config.rcon
+    if (!rconCfg) throw new Error('RCON is not configured for this integrated host')
+    const port = rconCfg.port
+    const password = rconCfg.password
+    if (!port || !password) {
+      throw new Error('Integrated host rcon config is missing port or password')
+    }
+    const client = new RconClient({ host: '127.0.0.1', port, password })
+    await client.authenticate()
+    client.installLivenessHandlers({
+      onClose: () => {
+        for (const h of this.disconnectHandlers) h('RCON connection closed')
+      },
+      onError: (err) => {
+        for (const h of this.disconnectHandlers) h(`RCON socket error: ${err.message}`)
+      },
+    })
+    this.rcon = client
+  }
+
+  /**
+   * Synchronous socket teardown. Idempotent — safe to call from any
+   * shutdown path. `RconClient.destroy()` uses `rcon.connection.destroy()`
+   * (NOT `await rcon.disconnect()`) because the latter hangs when a
+   * request is in flight as the JVM exits.
+   */
+  private destroyRcon(): void {
+    this.rcon?.destroy()
+    this.rcon = null
   }
 
   // ---------------------------------------------------------------------

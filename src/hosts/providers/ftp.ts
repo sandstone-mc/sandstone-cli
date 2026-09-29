@@ -2,13 +2,16 @@ import { Client as FtpClient } from 'basic-ftp'
 import { Writable, Readable } from 'node:stream'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
+import { RconClient } from '../rcon-client.js'
 import { Capability, type FtpHostConfig, type HostCapabilities, type HostProvider, type LogChunkHandler, type LogSubscription, type ServerPath } from '../types.js'
 
 
 /**
- * FTP provider — read/write files and poll-based log attachment. No
- * Minecraft console support (no executeRawCommand). Use alongside an RCON
- * provider if you need both file + console access.
+ * FTP provider — read/write files and poll-based log attachment.
+ * Optionally exposes `executeRawCommand` over RCON when `config.rcon`
+ * is set with `enabled !== false` (FTP itself has no native exec
+ * channel — RCON is the only way to send console commands to an
+ * FTP-managed server).
  *
  * FTP has no native streaming/log interface, so `attachLog` polls the log
  * file every `pollIntervalMs`, fetches the byte delta since the last poll,
@@ -18,15 +21,20 @@ import { Capability, type FtpHostConfig, type HostCapabilities, type HostProvide
 export class FtpHost implements HostProvider {
   readonly type = 'ftp' as const
   readonly displayName = 'FTP'
-  readonly capabilities: HostCapabilities = new Set([
-    Capability.ReadFile,
-    Capability.WriteFile,
-    Capability.AttachLog,
-  ])
+  readonly capabilities: HostCapabilities = (() => {
+    const set: HostCapabilities = new Set([
+      Capability.ReadFile,
+      Capability.WriteFile,
+      Capability.AttachLog,
+    ])
+    return set
+  })()
 
   private readonly client = new FtpClient()
   private readonly config: FtpHostConfig
   private connected = false
+  /** Optional RCON client — only set when `config.rcon` is configured with `enabled !== false`. */
+  private rcon: RconClient | null = null
 
   constructor(config: FtpHostConfig) {
     this.config = config
@@ -43,10 +51,37 @@ export class FtpHost implements HostProvider {
       )
     }
     this.connected = true
+    // Open RCON if configured. Same host as FTP — the MC server's
+    // RCON listener binds alongside its main port. Failure here is
+    // not fatal (file/log still works) but should be reported so the
+    // user knows `executeRawCommand` won't work.
+    const rconCfg = this.config.rcon
+    if (rconCfg && rconCfg.enabled !== false && rconCfg.port && rconCfg.password) {
+      const rcon = new RconClient({
+        host: this.config.host,
+        port: rconCfg.port,
+        password: rconCfg.password,
+      })
+      try {
+        await rcon.authenticate()
+        this.rcon = rcon
+        // Only add the capability once auth actually succeeded —
+        // otherwise we'd advertise a method we can't honor.
+        this.capabilities.add(Capability.ExecuteRawCommand)
+        this.capabilities.add(Capability.ExecuteRawCommandHasResponse)
+      } catch (err) {
+        this.rcon = null
+        console.error(`[ftp] RCON authenticate failed (${err instanceof Error ? err.message : err}) — executeRawCommand disabled`)
+      }
+    }
   }
 
   async disconnect(): Promise<void> {
     if (!this.connected) return
+    if (this.rcon) {
+      try { this.rcon.destroy() } catch { /* ignore */ }
+      this.rcon = null
+    }
     try {
       this.client.close()
     } finally {
@@ -56,6 +91,16 @@ export class FtpHost implements HostProvider {
 
   isConnected(): boolean {
     return this.connected && !this.client.closed
+  }
+
+  async executeRawCommand(command: string): Promise<string> {
+    this.requireConnected('ftp')
+    if (!this.rcon) {
+      throw new Error(
+        `FTP host has no RCON configured — set \`rcon\` in the host config to enable executeRawCommand.`,
+      )
+    }
+    return await this.rcon.execute(command)
   }
 
   async readFile(path: ServerPath): Promise<Buffer> {

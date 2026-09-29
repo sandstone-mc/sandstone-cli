@@ -29,6 +29,8 @@ import {
   type ReadBuildLogParams,
   type ReadBuildLogResult,
   type ReadTestLogResult,
+  type ReadServerLogParams,
+  type ReadServerLogResult,
   type ReadFileParams,
   type ReadFileResult,
   type RebuildState,
@@ -53,6 +55,7 @@ import {
 } from './active-config.js'
 import type { ActiveSaveConfig } from '../../utils/activeSaveConfig.js'
 import type { LogStreamTarget } from './rpc.js'
+import { setExpectedShutdown } from './daemon.js'
 
 export interface DispatchContext {
   host: HostProvider
@@ -60,9 +63,8 @@ export interface DispatchContext {
   ws: unknown
   /** Coalesce handler pushed by `attachLog`. Created per ws connection.
    *  `subscriptionId` tags the wire batch so the client can route to the
-   *  matching subscription's `onLines` callback. `hostType` is set only
-   *  by fan-out (`attachLogs`) handlers. */
-  pushLog: (lines: string[], subscriptionId: string, hostType?: string) => void
+   *  matching subscription's `onLines` callback. */
+  pushLog: (lines: string[], subscriptionId: string) => void
   startedAt: number
   /**
    * Live in-memory `sandstone.config.ts` snapshot, seeded at daemon
@@ -130,6 +132,14 @@ export interface DispatchContext {
    * `watch.log`) is only kept for humans tailing it directly.
    */
   appendLogLines?: (entries: { line: string; ts: number }[], target: LogStreamTarget) => void
+  /**
+   * Read of the daemon-level "expected shutdown in progress" flag.
+   * Consumed by `server.ts`'s RPC handler-error path: while set, RPC
+   * errors during a graceful stop (e.g. `rcon.executeRawCommand('stop')`
+   * raising `NotConnectedError` because rcon was already disconnected)
+   * are reported to the client but don't tear the daemon down.
+   */
+  getExpectedShutdown?: () => boolean
   /**
    * Snapshot read of a named log buffer with filtering. Returns the
    * filtered lines, the buffer's total length (pre-filter), the number
@@ -205,13 +215,13 @@ const KNOWN_METHODS: ReadonlySet<string> = new Set<RpcMethod>([
   'writeFile',
   'executeRawCommand',
   'attachLog',
-  'attachLogs',
   'unattach',
   'shutdown',
   'getActiveConfig',
   'getBuildOutputTree',
   'readBuildLog',
   'readTestLog',
+  'readServerLog',
   'getWatchedFiles',
   'publishConfig',
   'publishLog',
@@ -261,8 +271,6 @@ async function route(
       return handleExecuteRawCommand(params)
     case 'attachLog':
       return handleAttachLog(ctx, params)
-    case 'attachLogs':
-      return handleAttachLogs(ctx, params)
     case 'unattach':
       return handleUnattach(ctx, params)
     case 'getActiveConfig':
@@ -273,6 +281,8 @@ async function route(
       return handleReadBuildLog(ctx, params)
     case 'readTestLog':
       return handleReadTestLog(ctx, params)
+    case 'readServerLog':
+      return handleReadServerLog(ctx, params)
     case 'getWatchedFiles':
       return handleGetWatchedFiles(ctx)
     case 'publishConfig':
@@ -305,9 +315,6 @@ async function route(
 
 async function handlePing(ctx: DispatchContext): Promise<PingResult> {
   const caps = capabilitiesToRecord(ctx.host.capabilities)
-  if (attachLogsCapability(ctx.host)) {
-    caps.attachLogs = true
-  }
   return {
     protocol: PROTOCOL_VERSION,
     hostType: ctx.host.type,
@@ -318,32 +325,6 @@ async function handlePing(ctx: DispatchContext): Promise<PingResult> {
   }
 }
 
-/**
- * Surface `attachLogs` as an ad-hoc capability only when the host can
- * actually fan out across multiple logging members. Single-host daemons
- * and composites with one attachLog-capable member don't get the
- * capability — there's nothing to fan out to. Not in the Capability
- * enum because only the wire cares about it.
- *
- * Used by both the `ping` RPC handler and the `welcome` event sent at
- * WS connect time — clients decide between `attachLog` and `attachLogs`
- * based on the welcome, so both paths must agree.
- */
-export function attachLogsCapability(host: HostProvider): boolean {
-  const members = (host as unknown as { members?: readonly unknown[] }).members
-  if (!Array.isArray(members)) return false
-  if (typeof (host as unknown as { attachLogs?: unknown }).attachLogs !== 'function') return false
-  let loggingCount = 0
-  for (const m of members) {
-    const member = m as { capabilities?: { has: (c: Capability) => boolean }; attachLog?: unknown }
-    if (member.capabilities?.has(Capability.AttachLog) && typeof member.attachLog === 'function') {
-      loggingCount++
-      if (loggingCount >= 2) return true
-    }
-  }
-  return false
-}
-
 async function handleStartServer(): Promise<void> {
   if (!capable(Capability.StartServer)) throw new UnsupportedCapabilityRpc(Capability.StartServer)
   await runHost((h) => (h.startServer ?? notImplemented(Capability.StartServer)).bind(h)())
@@ -351,6 +332,15 @@ async function handleStartServer(): Promise<void> {
 
 async function handleStopServer(params: unknown): Promise<void> {
   if (!capable(Capability.StopServer)) throw new UnsupportedCapabilityRpc(Capability.StopServer)
+  // Reset the flag from any prior cycle before re-arming. The flag
+  // covers ALL member disconnects during the cycle — without the
+  // reset, a leftover `true` from a prior run would suppress
+  // disconnect handling for an unrelated later event.
+  setExpectedShutdown(false)
+  // Mark the imminent disconnect as expected so the host-lost
+  // watcher leaves the daemon alive. Covers MCP `restartServer`,
+  // `runServerCommand("stop")` (which routes here), etc.
+  setExpectedShutdown(true)
   // Optional `{ timeoutSeconds?: number }`. We only forward it to the
   // provider if the config supports it — today no provider does, so the
   // field is parsed but ignored. Documented as a forward-compatible
@@ -378,6 +368,13 @@ async function handleWriteFile(params: unknown): Promise<void> {
 async function handleExecuteRawCommand(params: unknown): Promise<ExecuteRawCommandResult> {
   if (!capable(Capability.ExecuteRawCommand)) throw new UnsupportedCapabilityRpc(Capability.ExecuteRawCommand)
   const { command } = parseParams<ExecuteRawCommandParams>(params, ['command'])
+  // `stop` triggers an intentional MC server shutdown. Mark the
+  // imminent disconnect as expected so the host-lost watcher leaves
+  // the daemon alive. Set BEFORE delegating to the host so the JVM
+  // exit (triggered by `stop` reaching the server) doesn't race us.
+  if (command.trim().toLowerCase() === 'stop') {
+    setExpectedShutdown(true)
+  }
   const output = await runHost<string>((h) =>
     (h.executeRawCommand ?? notImplemented(Capability.ExecuteRawCommand)).bind(h)(command),
   )
@@ -419,56 +416,6 @@ async function handleAttachLog(ctx: DispatchContext, params: unknown): Promise<A
   // Replace the placeholder unattach with the real provider thunk so the
   // ws close cascade (dropAllForWs) and explicit `unattach` RPCs both
   // reach the host's subscription.
-  ctx.subscriptions.replaceUnattach(subscriptionId, () => subscription.unattach())
-  return { subscriptionId }
-}
-
-/**
- * Fan-out variant of `attachLog`. Composite hosts with two or more
- * attachLog-capable members implement `attachLogs` to subscribe to every
- * member under one subscription; the fanout handler reports each
- * emitting host type so clients can label output.
- *
- * Only exists on fan-out daemons — a daemon with a single logging host
- * doesn't advertise the `attachLogs` capability and this handler is
- * never invoked. Lines are passed through unchanged; `hostType` rides
- * on the wire batch so the client can choose how (or whether) to label.
- */
-async function handleAttachLogs(ctx: DispatchContext, params: unknown): Promise<AttachLogResult> {
-  const { regex } = parseParams<AttachLogParams>(params, [])
-  const filter = regex ? new RegExp(regex) : null
-
-  const fanout = (ctx.host as unknown as {
-    attachLogs?: (onChunk: (hostType: string, lines: string[]) => void) => Promise<{ unattach(): Promise<void> }>
-  }).attachLogs
-
-  if (!fanout) {
-    // The `attachLogs` capability is only advertised by daemons that
-    // actually fan out, so getting here means the capability record was
-    // stale (daemon reconfigured mid-session). Reject with a stable RPC
-    // code so the client falls back to `attachLog`.
-    throw rpcError(RpcErrorCode.UnsupportedCapability, 'attachLogs not supported by this host')
-  }
-
-  const subscriptionId = ctx.subscriptions.registerWithId(
-    crypto.randomUUID(),
-    ctx.ws,
-    async () => {},
-  )
-
-  const fanoutHandler = (hostType: string, lines: string[]) => {
-    if (filter) {
-      const matched = lines.filter((l) => filter.test(l))
-      if (matched.length > 0) ctx.pushLog(matched, subscriptionId, hostType)
-    } else {
-      ctx.pushLog(lines, subscriptionId, hostType)
-    }
-  }
-  const subscription = await runHost((h) =>
-    ((h as unknown as { attachLogs?: typeof fanout }).attachLogs ?? notImplemented('attachLogs')).bind(h)(fanoutHandler),
-  )
-  // Wire the real unattach so the ws close cascade (dropAllForWs) tears
-  // down the composite's fan-out subscription, not a no-op placeholder.
   ctx.subscriptions.replaceUnattach(subscriptionId, () => subscription.unattach())
   return { subscriptionId }
 }
@@ -558,6 +505,32 @@ async function handleReadTestLog(
   // consumers can display a useful hint.
   return {
     path: '<test-runner-buffer>',
+    lines: buf.lines,
+    totalLines: buf.totalLines,
+    matchedLines: buf.matchedLines,
+    oldestTs: buf.oldestTs,
+    newestTs: buf.newestTs,
+    truncated: buf.truncated,
+  }
+}
+
+async function handleReadServerLog(
+  ctx: DispatchContext,
+  params: unknown,
+): Promise<ReadServerLogResult> {
+  const { tail, maxLines, range, since, until } = parseParams<ReadServerLogParams>(
+    params,
+    ['tail', 'maxLines', 'range', 'since', 'until'],
+  )
+  if (!ctx.readLogBuffer) {
+    throw rpcError(RpcErrorCode.InternalError, 'Daemon has no log buffer configured')
+  }
+  // In-memory buffer populated by the daemon's own attachLog
+  // subscription at boot. No file read — the on-disk log is only for
+  // humans tailing it directly.
+  const buf = ctx.readLogBuffer('server', { tail, maxLines, range, since, until })
+  return {
+    path: '<host-stdout-buffer>',
     lines: buf.lines,
     totalLines: buf.totalLines,
     matchedLines: buf.matchedLines,
@@ -731,12 +704,11 @@ async function runHost<T>(op: (h: HostProvider) => Promise<T>): Promise<T> {
 
 /** Set the active host before dispatching; restore on the way out. */
 export async function withHost<T>(host: HostProvider, fn: () => Promise<T>): Promise<T> {
-  const prev = currentHost
   currentHost = host
   try {
     return await fn()
   } finally {
-    currentHost = prev
+    currentHost = null
   }
 }
 

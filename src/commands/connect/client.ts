@@ -26,6 +26,8 @@ import {
   type PingResult,
   type ReadBuildLogParams,
   type ReadBuildLogResult,
+  type ReadServerLogParams,
+  type ReadServerLogResult,
   type GetWatcherStatusResult,
   type ReadTestLogResult,
   type ReadFileResult,
@@ -41,30 +43,12 @@ import type { EndpointFile } from './endpoint-file.js'
 
 /**
  * Handle returned by `attachLog`. Each call to `onLines` registers a
- * listener for lines from this subscription only; `hostType` is never
- * surfaced because the underlying RPC (`attachLog`) only routes to one
- * member.
+ * listener for lines from this subscription only.
  */
 export interface AttachLogSubscription {
   readonly subscriptionId: string
-  /** Register a listener for line batches from this subscription. Lines
-   *  are passed through verbatim — no hostType. */
+  /** Register a listener for line batches from this subscription. */
   onLines(fn: (lines: string[]) => void): void
-  /** Release the server-side subscription. Safe to call multiple times. */
-  unattach(): Promise<void>
-}
-
-/**
- * Handle returned by `attachLogs`. The fan-out variant tags every batch
- * with the emitting member's host type so callers can label output.
- * Only available when the daemon advertises the `attachLogs`
- * capability.
- */
-export interface AttachLogsSubscription {
-  readonly subscriptionId: string
-  /** Register a listener for line batches from this subscription. Each
-   *  batch carries the host type of its emitting composite member. */
-  onLines(fn: (lines: string[], hostType: string) => void): void
   /** Release the server-side subscription. Safe to call multiple times. */
   unattach(): Promise<void>
 }
@@ -105,11 +89,10 @@ export async function connect(opts: ClientOptions): Promise<Client> {
   })
 
   const pending = new Map<string | number, { resolve: (r: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }>()
-  // Per-subscriptionId listener set. Each `attachLog` / `attachLogs` call
-  // produces a LogSubscription whose `onLines` registers here; the
-  // websocket log event dispatches by subscriptionId so a hostType-aware
-  // fan-out subscription never leaks its tag onto a single-host listener.
-  type InternalListener = (lines: string[], hostType: string | undefined) => void
+  // Per-subscriptionId listener set. Each `attachLog` call produces a
+  // LogSubscription whose `onLines` registers here; the websocket log
+  // event dispatches by subscriptionId.
+  type InternalListener = (lines: string[]) => void
   const listenersBySub = new Map<string, Set<InternalListener>>()
   // Shutdown listeners registered via `Client.onShutdown`. Fired once
   // when the daemon broadcasts `daemonShutdown`, then cleared. Each
@@ -133,12 +116,12 @@ export async function connect(opts: ClientOptions): Promise<Client> {
 
   ws.addEventListener('message', (ev) => {
     const data = typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data as ArrayBuffer)
-    const parsed = JSON.parse(data) as RpcResponse | { event: string; data: unknown }
+    const parsed = JSON.parse(data) as RpcResponse | { event?: string; data?: unknown; method?: string; params?: unknown }
     if ('event' in parsed && parsed.event === 'log') {
       const logData = parsed.data as { subscriptionId: string; lines: string[]; hostType?: string }
       const subs = listenersBySub.get(logData.subscriptionId)
       if (!subs) return
-      for (const fn of subs) fn(logData.lines, logData.hostType)
+      for (const fn of subs) fn(logData.lines)
       return
     }
     if ('event' in parsed && parsed.event === 'daemonShutdown') {
@@ -177,13 +160,22 @@ export async function connect(opts: ClientOptions): Promise<Client> {
       }
       return
     }
-    // Any other server-pushed event (e.g. `notifications/resources/updated`,
-    // `notifications/message`). Fire the fallback handler if installed —
-    // MCP uses this to re-emit on the stdio transport.
-    if (fallbackNotificationHandler && 'event' in parsed) {
-      Promise.resolve(fallbackNotificationHandler({ method: parsed.event, params: parsed.data }))
-        .catch(() => { /* swallow */ })
-      return
+    // Any other server-pushed event. Two shapes:
+    //   - Legacy `{event, data}` envelope (configChanged, triggerBuild, log, ...)
+    //   - Standard JSON-RPC `{method, params}` notification (resources/updated, ...)
+    // Catch-all fallback fires for either shape, re-emitting to the
+    // MCP client's stdio transport.
+    if (fallbackNotificationHandler) {
+      const evt = 'event' in parsed && parsed.event !== undefined
+        ? { method: parsed.event, params: parsed.data }
+        : 'method' in parsed && parsed.method !== undefined
+          ? { method: parsed.method, params: parsed.params }
+          : null
+      if (evt) {
+        Promise.resolve(fallbackNotificationHandler(evt))
+          .catch(() => { /* swallow */ })
+        return
+      }
     }
     if ('id' in parsed && (parsed as RpcResponse).id !== undefined) {
       const resp = parsed as RpcResponse
@@ -243,32 +235,6 @@ export async function connect(opts: ClientOptions): Promise<Client> {
     }
   }
 
-  function buildFanout(subscriptionId: string): AttachLogsSubscription {
-    let detached = false
-    const set = new Set<InternalListener>()
-    listenersBySub.set(subscriptionId, set)
-    return {
-      subscriptionId,
-      onLines(fn: (lines: string[], hostType: string) => void) {
-        // Every fan-out batch carries a hostType. If the server ever
-        // omits it (legacy single-host fallback path), label with
-        // 'unknown' to keep the public contract — listeners can always
-        // trust the second arg.
-        set.add((lines, hostType) => fn(lines, hostType ?? 'unknown'))
-      },
-      async unattach() {
-        if (detached) return
-        detached = true
-        listenersBySub.delete(subscriptionId)
-        try {
-          await call<void>('unattach', { subscriptionId })
-        } catch {
-          // Daemon may already be gone; cascade-clean will fire.
-        }
-      },
-    }
-  }
-
   return {
     welcome,
     ping: () => call<PingResult>('ping'),
@@ -281,14 +247,11 @@ export async function connect(opts: ClientOptions): Promise<Client> {
       const res = await call<{ subscriptionId: string }>('attachLog', params)
       return buildSingle(res.subscriptionId)
     },
-    async attachLogs(params) {
-      const res = await call<{ subscriptionId: string }>('attachLogs', params)
-      return buildFanout(res.subscriptionId)
-    },
     getActiveConfig: () => call<GetActiveConfigResult>('getActiveConfig'),
     getBuildOutputTree: (params) => call<GetBuildOutputTreeResult>('getBuildOutputTree', params),
     readBuildLog: (params: ReadBuildLogParams) => call<ReadBuildLogResult>('readBuildLog', params),
     readTestLog: (params: ReadBuildLogParams) => call<ReadTestLogResult>('readTestLog', params),
+    readServerLog: (params: ReadServerLogParams) => call<ReadServerLogResult>('readServerLog', params),
     getWatchedFiles: () => call<GetWatchedFilesResult>('getWatchedFiles'),
     getRebuildState: () => call<GetRebuildStateResult>('getRebuildState'),
     getWatcherStatus: () => call<GetWatcherStatusResult>('getWatcherStatus'),
@@ -337,12 +300,8 @@ export interface Client {
   readFile(params: { path: string }): Promise<ReadFileResult>
   writeFile(params: { path: string; data: string; encoding?: 'utf-8' | 'base64' }): Promise<void>
   executeRawCommand(params: { command: string }): Promise<ExecuteRawCommandResult>
-  /** Subscribe to a single host's log stream. */
+  /** Subscribe to the host's log stream. */
   attachLog(params?: { regex?: string }): Promise<AttachLogSubscription>
-  /** Subscribe to a fan-out of every attachLog-capable member of a
-   *  composite daemon. Only available when the daemon advertises the
-   *  `attachLogs` capability. */
-  attachLogs(params?: { regex?: string }): Promise<AttachLogsSubscription>
   /**
    * Return the daemon's current `sandstone.config.ts` snapshot. The
    * daemon seeds this from disk at boot and refreshes it whenever the
@@ -360,6 +319,12 @@ export interface Client {
    * semantics once data starts flowing.
    */
   readTestLog(params?: ReadBuildLogParams): Promise<ReadTestLogResult>
+  /**
+   * Tail the host's stdout buffer (populated by the daemon's own
+   * `attachLog` subscription at boot). In-memory only — never reads
+   * `logs/latest.log` from disk. Same filtering shape as `readBuildLog`.
+   */
+  readServerLog(params?: ReadServerLogParams): Promise<ReadServerLogResult>
   /**
    * List files the watcher is tracking. Currently a stub — returns
    * `{files: []}` because the daemon doesn't track per-file state.

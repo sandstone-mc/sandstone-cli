@@ -3,6 +3,7 @@ import { Readable, Writable } from 'node:stream'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
 import { RconClient } from '../rcon-client.js'
+import { attachRconIfConfigured } from '../_shared/attach-rcon.js'
 import { Capability, type HostCapabilities, type HostProvider, type LogChunkHandler, type LogSubscription, type ServerPath, type SshHostConfig } from '../types.js'
 
 /**
@@ -62,28 +63,14 @@ export class SshHost implements HostProvider {
     }
     this.connected = true
     // Open RCON if configured. Same host as SSH — the MC server's
-    // RCON listener binds alongside its main port. Failure here is
-    // not fatal (file/log still works) but should be reported so the
-    // user knows `executeRawCommand` won't work.
-    const rconCfg = this.config.rcon
-    if (rconCfg && rconCfg.enabled !== false && rconCfg.port && rconCfg.password) {
-      const rcon = new RconClient({
-        host: this.config.host,
-        port: rconCfg.port,
-        password: rconCfg.password,
-      })
-      try {
-        await rcon.authenticate()
-        this.rcon = rcon
-        // Only add the capability once auth actually succeeded —
-        // otherwise we'd advertise a method we can't honor.
-        this.capabilities.add(Capability.ExecuteRawCommand)
-        this.capabilities.add(Capability.ExecuteRawCommandHasResponse)
-      } catch (err) {
-        this.rcon = null
-        console.error(`[ssh] RCON authenticate failed (${err instanceof Error ? err.message : err}) — executeRawCommand disabled`)
-      }
-    }
+    // RCON listener binds alongside its main port.
+    await attachRconIfConfigured(
+      this.config.rcon,
+      this.config.host,
+      'ssh',
+      (msg) => console.error(msg),
+      { setRcon: (r) => { this.rcon = r }, addCapability: (c) => this.capabilities.add(c) },
+    )
   }
 
   async disconnect(): Promise<void> {
@@ -336,8 +323,7 @@ export class SshHost implements HostProvider {
     // channel, so we let it run until disconnect(). `-n 0` skips existing
     // content and starts at EOF — subscribers get only lines emitted
     // after they subscribed (matches local-client + integrated).
-    void this.ssh
-      .execCommand(`tail -F -n 0 ${JSON.stringify(logPath)}`, {
+    this.ssh.execCommand(`tail -F -n 0 ${JSON.stringify(logPath)}`, {
         cwd: this.config.serverDir,
         onStdout: (chunk: Buffer) => {
           if (stopped) return

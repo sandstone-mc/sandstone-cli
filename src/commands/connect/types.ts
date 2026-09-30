@@ -7,6 +7,8 @@
 
 import type { HostProvider, LogSubscription } from '../../hosts/types.js'
 
+import type { Dispatcher } from './dispatch.js'
+
 /**
  * Per-WebSocket connection state. The server creates one when a client
  * dials and disposes it on close. `host` is shared across connections
@@ -25,6 +27,12 @@ export interface SessionContext {
   flushTimerBySub: Map<string, ReturnType<typeof setTimeout>>
   /** True after `daemonShutdown` was sent — stops accepting requests. */
   shuttingDown: boolean
+  /**
+   * One dispatcher per WS session, constructed in `open()`. Reused
+   * across every message on this session so handlers don't rebuild
+   * the dispatch internals on every call.
+   */
+  dispatcher: Dispatcher
 }
 
 /**

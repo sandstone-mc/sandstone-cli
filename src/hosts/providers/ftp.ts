@@ -3,6 +3,7 @@ import { Readable, Writable } from 'node:stream'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
 import { RconClient } from '../rcon-client.js'
+import { attachRconIfConfigured } from '../_shared/attach-rcon.js'
 import { Capability, type FtpHostConfig, type HostCapabilities, type HostProvider, type LogChunkHandler, type LogSubscription, type ServerPath } from '../types.js'
 
 
@@ -79,28 +80,14 @@ export class FtpHost implements HostProvider {
     }
     this.connected = true
     // Open RCON if configured. Same host as FTP — the MC server's
-    // RCON listener binds alongside its main port. Failure here is
-    // not fatal (file/log still works) but should be reported so the
-    // user knows `executeRawCommand` won't work.
-    const rconCfg = this.config.rcon
-    if (rconCfg && rconCfg.enabled !== false && rconCfg.port && rconCfg.password) {
-      const rcon = new RconClient({
-        host: this.config.host,
-        port: rconCfg.port,
-        password: rconCfg.password,
-      })
-      try {
-        await rcon.authenticate()
-        this.rcon = rcon
-        // Only add the capability once auth actually succeeded —
-        // otherwise we'd advertise a method we can't honor.
-        this.capabilities.add(Capability.ExecuteRawCommand)
-        this.capabilities.add(Capability.ExecuteRawCommandHasResponse)
-      } catch (err) {
-        this.rcon = null
-        console.error(`[ftp] RCON authenticate failed (${err instanceof Error ? err.message : err}) — executeRawCommand disabled`)
-      }
-    }
+    // RCON listener binds alongside its main port.
+    await attachRconIfConfigured(
+      this.config.rcon,
+      this.config.host,
+      'ftp',
+      (msg) => console.error(msg),
+      { setRcon: (r) => { this.rcon = r }, addCapability: (c) => this.capabilities.add(c) },
+    )
   }
 
   async disconnect(): Promise<void> {
@@ -173,7 +160,7 @@ export class FtpHost implements HostProvider {
       const size = await this.client.size(this.resolvePath(path))
       const node = new PassThrough()
       // Fire-and-forget — `sink` is the stream the daemon consumes.
-      void this.client.downloadTo(node, this.resolvePath(path)).catch((err) => {
+      this.client.downloadTo(node, this.resolvePath(path)).catch((err) => {
         node.destroy(err instanceof Error ? err : new Error(String(err)))
       })
       return { stream: Readable.toWeb(node) as ReadableStream<Uint8Array>, size }

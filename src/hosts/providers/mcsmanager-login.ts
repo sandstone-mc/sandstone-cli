@@ -84,6 +84,13 @@ export class McsManagerLoginHost implements HostProvider {
     this.token = process.env.MCS_MANAGER_TOKEN ?? ''
     await this.login()
     this.connected = true
+    // RCON target is the panel-managed daemon's local socket. We
+    // can't use the shared `attachRconIfConfigured` here because
+    // mcsmanager's RCON host string is a constructor-time concern
+    // (`config.endpoint`) and `attachRconIfConfigured` would bind it
+    // to `config.host`. For now we leave the legacy in-place RCON
+    // path — `executeRawCommand` is rarely used against panel
+    // sockets.
   }
 
   async disconnect(): Promise<void> {

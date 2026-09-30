@@ -2,9 +2,10 @@ import { join as pathJoin } from 'node:path'
 import { createHash } from 'node:crypto'
 import { Readable, Writable } from 'node:stream'
 
-import { RconClient } from '../rcon-client.js'
+import { attachRconIfConfigured } from '../_shared/attach-rcon.js'
 import { NotConnectedError } from '../errors.js'
 import { ensureJava, requiredJavaMajor } from '../java.js'
+import { RconClient } from '../rcon-client.js'
 import {
   downloadMod,
   downloadUrl,
@@ -504,8 +505,8 @@ export class IntegratedHost implements HostProvider {
           const [_, localPlayer, clientAddress] = UnwhitelistedAttempt.exec(line)!
           if (clientAddress === '127.0.0.1') {
             console.log(`[integrated] local connection attempt with account "${localPlayer}" detected, whitelisting & opping, please rejoin`)
-            void this.executeRawCommand(`whitelist add ${localPlayer}`)
-            void this.executeRawCommand(`op ${localPlayer}`)
+            this.executeRawCommand(`whitelist add ${localPlayer}`).catch(() => {})
+            this.executeRawCommand(`op ${localPlayer}`).catch(() => {})
           }
         }
         // Resolve a pending one-shot matcher, if any. Used by
@@ -567,7 +568,7 @@ export class IntegratedHost implements HostProvider {
     // Spawn stream-pump tasks for stdout + stderr. Errors are caught
     // silently — the early-exit check below will reject startServer
     // if either stream errors out.
-    void (async () => {
+    ;(async () => {
       try {
         for await (const chunk of this.child!.stdout) {
           processChunk(chunk)
@@ -576,7 +577,7 @@ export class IntegratedHost implements HostProvider {
         // ignore
       }
     })()
-    void (async () => {
+    ;(async () => {
       try {
         const decoder = new TextDecoder('utf-8')
         let partial = ''
@@ -820,26 +821,39 @@ export class IntegratedHost implements HostProvider {
    * Open the rcon-srcds client and authenticate against the JVM's RCON
    * listener. Throws on auth failure (bad password) or transport error.
    * Surface unexpected socket close as a host-lost event.
+   *
+   * Custom rather than the shared `attachRconIfConfigured` because
+   * integrated wires RCON socket close/error into its own
+   * `disconnectHandlers` set — the shared one doesn't know about that.
    */
   private async connectRcon(): Promise<void> {
     const rconCfg = this.config.rcon
-    if (!rconCfg) throw new Error('RCON is not configured for this integrated host')
-    const port = rconCfg.port
-    const password = rconCfg.password
-    if (!port || !password) {
-      throw new Error('Integrated host rcon config is missing port or password')
-    }
-    const client = new RconClient({ host: '127.0.0.1', port, password })
-    await client.authenticate()
-    client.installLivenessHandlers({
-      onClose: () => {
-        for (const h of this.disconnectHandlers) h('RCON connection closed')
-      },
-      onError: (err) => {
-        for (const h of this.disconnectHandlers) h(`RCON socket error: ${err.message}`)
-      },
+    if (!rconCfg) return
+    if (rconCfg.enabled === false || !rconCfg.port || !rconCfg.password) return
+    const rcon = new RconClient({
+      host: '127.0.0.1',
+      port: rconCfg.port,
+      password: rconCfg.password,
     })
-    this.rcon = client
+    try {
+      await rcon.authenticate()
+      this.rcon = rcon
+      this.capabilities.add(Capability.ExecuteRawCommand)
+      this.capabilities.add(Capability.ExecuteRawCommandHasResponse)
+      rcon.installLivenessHandlers({
+        onClose: () => {
+          for (const h of this.disconnectHandlers) h('RCON connection closed')
+        },
+        onError: (err) => {
+          for (const h of this.disconnectHandlers) h(`RCON socket error: ${err.message}`)
+        },
+      })
+    } catch (err) {
+      this.rcon = null
+      console.error(
+        `[integrated] RCON authenticate failed (${err instanceof Error ? err.message : String(err)}) — executeRawCommand disabled`,
+      )
+    }
   }
 
   /**
@@ -1256,7 +1270,7 @@ export class IntegratedHost implements HostProvider {
         })
         let stdoutBuf = ''
         const decoder = new TextDecoder('utf-8')
-        void (async () => {
+        ;(async () => {
           try {
             const stream = proc.stdout as ReadableStream<Uint8Array<ArrayBufferLike>>
             for await (const chunk of stream) {

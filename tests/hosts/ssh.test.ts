@@ -98,7 +98,7 @@ export function registerSshTests(
         // `readFile({encode: 'utf-8'})` decodes the stream server-side
         // and returns the file as a string.
         const back = await client.readFile({ path, encode: 'utf-8' })
-        expect(back.data).toBe(payload)
+        expect(back).toBe(payload)
       } finally {
         client.close()
         await daemon.shutdown()
@@ -117,8 +117,8 @@ export function registerSshTests(
       try {
         const path = `${cfg.serverDir}/server.properties`
         const back = await client.readFile({ path, encode: 'utf-8' })
-        expect(back.data).toContain('enable-rcon=true')
-        expect(back.data).toContain('rcon.port=25575')
+        expect(back).toContain('enable-rcon=true')
+        expect(back).toContain('rcon.port=25575')
       } finally {
         client.close()
         await daemon.shutdown()

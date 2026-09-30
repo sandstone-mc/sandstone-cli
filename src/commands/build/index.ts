@@ -377,7 +377,6 @@ async function _buildProject(
     if (await local.fs.fileExists(path.join(local.folder, local.entrypoint))) {
       const entrypointUrl = pathToFileURL(path.join(local.folder, local.entrypoint)).toString()
       await import(entrypointUrl)
-      void watching
     }
   } catch (e: any) {
     e.message = `While loading "${path.join(local.folder, local.entrypoint)}":\n${e.message || e}`

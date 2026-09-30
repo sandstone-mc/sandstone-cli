@@ -81,7 +81,7 @@ export type RpcMethod =
  */
 export type RpcResult =
   | PingResult
-  | ReadFileResult
+  | RpcReadFileStream
   | ExecuteRawCommandResult
   | AttachLogResult
   | GetActiveConfigResult
@@ -197,7 +197,7 @@ export interface StopServerParams {
 export interface ReadFileParams {
   path: string
 }
-export interface ReadFileResult {
+export interface RpcReadFileStream {
   /** 16-byte streamId hex-encoded. */
   streamId: string
   /** Best-effort size from fs.stat (may be unknown). */

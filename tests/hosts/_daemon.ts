@@ -76,7 +76,6 @@ export async function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
   const portStr = String(port)
   // Surface the exact binary + args so test failures can be
   // reproduced manually.
-  console.error(`[test-trace] startDaemon bin=${BUN_BIN} cli=${SANDBIN} hostType=${hostType}`)
 
   // Resolve any symlinks in the bun binary path. `process.execPath`
 // returns the symlinked path (e.g. `~/.bun/bin/bun` → `.../bun.exe`)
@@ -104,7 +103,6 @@ const cmd: string[] = [
     windowsHide: true,
     windowsVerbatimArguments: true,
   })
-  console.error(`[test-trace] spawned pid=${proc.pid}`)
 
   const endpointPath = join(projectRoot, '.sandstone', 'connect.url')
 
@@ -122,7 +120,6 @@ const cmd: string[] = [
     // error message survives even when no captured stderr is
     // available.
     const stderr = proc.stderr ? await new Response(proc.stderr).text() : '<stderr not captured (inherit)>'
-    console.error(`[test-trace] daemon exited early pid=${proc.pid} code=${proc.exitCode}\nstderr:\n${stderr}`)
     throw new Error(`daemon exited early (code ${proc.exitCode}):\n${stderr}`)
   }
     await new Promise((r) => setTimeout(r, 100))
@@ -130,7 +127,6 @@ const cmd: string[] = [
   if (!existsSync(endpointPath)) {
     // Surface daemon stderr so failures are debuggable from the test log.
     const stderr = proc.stderr ? await new Response(proc.stderr).text() : '<stderr not captured (inherit)>'
-    console.error(`[test-trace] endpoint timeout — daemon stderr:\n${stderr}`)
     proc.kill()
     throw new Error(`daemon did not write endpoint file within 30s.\nstderr:\n${stderr}`)
   }

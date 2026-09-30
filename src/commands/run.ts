@@ -41,7 +41,7 @@ import { resolve, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { connect as openClient, type Client } from './connect/client.js'
 import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
-import { BootstrapError, bootstrapHosts } from './connect/bootstrap.js'
+import { BootstrapError, bootstrapHost } from './connect/bootstrap.js'
 import type { HostConfigInput, HostProvider, HostType, LogChunkHandler } from '../hosts/types.js'
 import { DEFAULT_HOST_TYPE } from './connect/index.js'
 import { createSandstonePack, type SandstoneContext } from 'sandstone'
@@ -133,12 +133,6 @@ export async function runCommand(
       console.error(chalk`{red Error:} Pass either --host-config or --host-config-file, not both`)
       process.exit(2)
     }
-    // Default to a minimal empty config when --host-config is omitted
-    // (mirrors `sand connect`). Empty `{}` lets `getProvider` succeed;
-    // the provider's connect() picks up any defaults internally.
-    if (!opts.hostConfig && !opts.hostConfigFile) {
-      opts.hostConfig = JSON.stringify({})
-    }
   }
   // Forward to bootstrapHosts so it can inject `sandstoneConfig` per
   // host from the same sandstone.config.ts load — no duplicate
@@ -214,20 +208,16 @@ export async function runCommand(
   // with `sand connect`: same defaults (latest sandstone version,
   // RCON port/password auto-derive), same member lifecycle.
   const directHostType = hostType ?? DEFAULT_HOST_TYPE
-  const rawPerHost = await loadHostConfig(opts)
-  const perHostConfig: Partial<Record<HostType, HostConfigInput>> = {
-    [directHostType]: rawPerHost,
-  }
+  const hostConfig = await loadHostConfig(opts)
   // Project root injection (the bootstrap also handles this, but we
   // need it here too so the merged config is right for logging).
-  const cfg = perHostConfig[directHostType as HostType] as Record<string, unknown> | undefined
-  if (cfg && cfg.projectRoot === undefined) cfg.projectRoot = projectRoot
+  if (hostConfig.projectRoot === undefined) hostConfig.projectRoot = projectRoot
   let host: HostProvider
-  let weStarted: HostType[]
+  let weStarted = false
   try {
-    const result = await bootstrapHosts({
+    const result = await bootstrapHost({
       hostType: directHostType,
-      perHostConfig,
+      config: hostConfig,
       silent: true,
       userProvidedHostSettings,
     })
@@ -296,7 +286,7 @@ export async function runCommand(
   // manually (e.g. via VS Code), sending `stop` would kill their
   // session. `weStarted` is populated by `bootstrapHosts` from the
   // integrated provider's `weStartedThisCall()` flag.
-  if (weStarted.length > 0 && host.stopServer && host.capabilities.has('stopServer')) {
+  if (weStarted && host.stopServer && host.capabilities.has('stopServer')) {
     try {
       await host.stopServer()
     } catch {
@@ -451,15 +441,8 @@ async function attachAwaitHost(
 }
 
 async function loadHostConfig(opts: RunCommandOptions): Promise<HostConfigInput> {
-  if (opts.hostConfigFile) {
-    const raw = await Bun.file(opts.hostConfigFile).text()
-    return JSON.parse(raw) as HostConfigInput
-  }
-  if (opts.hostConfig) {
-    return JSON.parse(opts.hostConfig) as HostConfigInput
-  }
-  // No config provided — caller will apply defaults.
-  return {} as HostConfigInput
+  const { parseHostConfig } = await import('./connect/host-config.js')
+  return (await parseHostConfig(opts.hostConfig, opts.hostConfigFile)).config
 }
 
 async function safeDisconnect(host: HostProvider): Promise<void> {
@@ -712,17 +695,14 @@ async function runCommands(
   }
 
   // Direct mode.
-  const directPerHost: Partial<Record<HostType, HostConfigInput>> = {
-    [resolvedHostType]: await loadHostConfig(opts),
-  }
-  const directCfg = directPerHost[resolvedHostType] as Record<string, unknown> | undefined
-  if (directCfg && directCfg.projectRoot === undefined) directCfg.projectRoot = projectRoot
+  const hostConfig = await loadHostConfig(opts)
+  if (hostConfig.projectRoot === undefined) hostConfig.projectRoot = projectRoot
   let host: HostProvider
-  let weStarted: HostType[]
+  let weStarted = false
   try {
-    const result = await bootstrapHosts({
+    const result = await bootstrapHost({
       hostType: resolvedHostType,
-      perHostConfig: directPerHost,
+      config: hostConfig,
       silent: true,
       userProvidedHostSettings,
     })
@@ -752,7 +732,7 @@ async function runCommands(
       await runOneDirect(host, cmd, isLast ? expectRegex : null, timeoutMs, hasResponse)
     }
   } finally {
-    if (weStarted.length > 0 && host.stopServer && host.capabilities.has('stopServer')) {
+    if (weStarted && host.stopServer && host.capabilities.has('stopServer')) {
       try {
         await host.stopServer()
       } catch {

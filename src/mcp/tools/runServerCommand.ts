@@ -20,10 +20,9 @@
  *     bootstrap itself failed (user-action error).
  */
 
-import { run as shell } from '../../utils/shell.js'
-import { bootstrapHosts, BootstrapError } from '../../commands/connect/bootstrap.js'
+import { bootstrapHost, BootstrapError } from '../../commands/connect/bootstrap.js'
 import { connect as openClient } from '../../commands/connect/client.js'
-import { endpointStatus, readEndpoint, endpointPath } from '../../commands/connect/endpoint-file.js'
+import { endpointStatus, readEndpoint } from '../../commands/connect/endpoint-file.js'
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
 import type { McpContext } from '../daemon-client.js'
 import type { HostProvider, HostType, HostConfigInput } from '../../hosts/types.js'
@@ -115,23 +114,14 @@ export async function call(
     : DEFAULT_HOST_TYPE
   const userProvidedHostSettings = !!args.hostType || !!args.hostConfig
 
-  // Build the per-host-type config map. Flat shape accepted for
-  // back-compat with single-host invocations.
-  let perHostConfig: Partial<Record<HostType, HostConfigInput>>
-  if (args.hostConfig) {
-    perHostConfig = { [hostType]: args.hostConfig as HostConfigInput }
-  } else {
-    perHostConfig = { [hostType]: {} as HostConfigInput }
-  }
-  const cfg = perHostConfig[hostType] as Record<string, unknown> | undefined
-  if (cfg && cfg.projectRoot === undefined) cfg.projectRoot = ctx.projectRoot
+  if (args.hostConfig && args.hostConfig.projectRoot === undefined) args.hostConfig.projectRoot = ctx.projectRoot
 
   let host: HostProvider
-  let weStarted: HostType[]
+  let weStarted = false
   try {
-    const result = await bootstrapHosts({
+    const result = await bootstrapHost({
       hostType,
-      perHostConfig,
+      config: args.hostConfig ?? {},
       silent: true,
       userProvidedHostSettings,
     })
@@ -174,13 +164,9 @@ export async function call(
       }],
     }
   } finally {
-    if (weStarted.length > 0 && host.stopServer) {
+    if (weStarted && host.stopServer) {
       await host.stopServer().catch(() => {})
     }
     await host.disconnect().catch(() => {})
   }
 }
-
-// silence unused import linter
-void shell
-void endpointPath

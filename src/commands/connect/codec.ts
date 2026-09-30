@@ -12,7 +12,7 @@
  * protocol a binary-friendly shape for future streaming calls
  * (wholesale file copies, raw log dumps, etc.).
  */
-import { Decoder, Encoder, type ExtData } from '@msgpack/msgpack'
+import { Decoder, Encoder } from '@msgpack/msgpack'
 
 /** Reusable encoder/decoder — msgpack is stateless and thread-safe. */
 const encoder = new Encoder({ useBigInt64: false })
@@ -98,7 +98,5 @@ export function hexToBytes(hex: string): Uint8Array {
   return out
 }
 
-// Quiet the linter for the unused ExtData type — we may need it if
-// future envelopes carry tagged binary blobs (e.g. stream chunks
-// inlined into an envelope for small files).
-void (null as unknown as ExtData)
+// (No top-level linter-silencing needed — ExtData is exported by the
+// package for future envelope shapes; consumers import directly.)

@@ -15,7 +15,8 @@
  * Format: `text/plain`
  */
 
-import { requireDaemon, type McpContext } from '../daemon-client.js'
+import { withDaemon, type McpContext } from '../daemon-client.js'
+import { coerceFileLogParams, formatLogHeader } from '../../utils/logParams.js'
 
 export const URI = 'sandstone://test-log{?tail,maxLines,from,to,since,until}'
 export const FIXED_URI = 'sandstone://test-log'
@@ -25,35 +26,18 @@ export const DESCRIPTION = 'Test runner log buffer (in-memory, daemon-side). All
 
 export async function read(
   ctx: McpContext,
-  params: {
-    tail: number
-    maxLines: number
-    from: number
-    to: number
-    since: number
-    until: number
-  },
+  params: { tail: number; maxLines: number; from: number; to: number; since: number; until: number },
 ): Promise<{ uri: string; mimeType: string; text: string }> {
-  const daemon = await requireDaemon(ctx.projectRoot)
-  const result = await daemon.readTestLog({
-    tail: params.tail === -1 ? null : params.tail,
-    maxLines: params.maxLines === -1 ? null : params.maxLines,
-    range: params.from !== -1 && params.to !== -1 ? { from: params.from, to: params.to } : null,
-    since: params.since === -1 ? null : params.since,
-    until: params.until === -1 ? null : params.until,
+  return withDaemon(ctx, async (daemon) => {
+    const result = await daemon.readTestLog(coerceFileLogParams(params))
+    return {
+      uri: FIXED_URI,
+      mimeType: MIME,
+      text: `${formatLogHeader('Test runner log', result, [
+        result.totalLines === 0
+          ? '(no test runner has pushed lines yet — the buffer is reserved for a future backend)'
+          : null,
+      ])}\n\n${result.lines.join('\n')}`,
+    }
   })
-  const header = [
-    `# Test runner log (${result.lines.length} of ${result.matchedLines} matched; ${result.totalLines} buffered)`,
-    result.oldestTs ? `oldest: ${result.oldestTs}` : null,
-    result.newestTs ? `newest: ${result.newestTs}` : null,
-    result.truncated ? 'TRUNCATED — increase tail/maxLines or narrow range/since' : null,
-    result.totalLines === 0
-      ? '(no test runner has pushed lines yet — the buffer is reserved for a future backend)'
-      : null,
-  ].filter(Boolean).join('\n')
-  return {
-    uri: FIXED_URI,
-    mimeType: MIME,
-    text: `${header}\n\n${result.lines.join('\n')}`,
-  }
 }

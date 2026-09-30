@@ -23,7 +23,7 @@
 
 import chalk from 'chalk-template'
 import { capabilitiesToRecord, Capability, type HostConfigInput, type HostProvider, type HostType } from '../../hosts/types.js'
-import { BootstrapError, bootstrapHosts } from './bootstrap.js'
+import { BootstrapError, bootstrapHost } from './bootstrap.js'
 import { loadActiveConfigFromDisk, type ActiveConfig } from './active-config.js'
 
 /**
@@ -52,7 +52,7 @@ export interface DaemonOptions {
   /** The single host type for this daemon. */
   hostType: HostType
   /** Config for the host type above. */
-  perHostConfig: Partial<Record<HostType, HostConfigInput>>
+  config: Partial<HostConfigInput>
   projectRoot: string
   /** Bind address. Default `127.0.0.1` (loopback only — never LAN). */
   bind?: string
@@ -124,19 +124,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     await deleteEndpoint(opts.projectRoot, process.pid)
   }
 
-  // 2. Instantiate + connect + start via the shared bootstrap. The same
-  // path runs in `sand run` direct mode — both must agree on defaults
-  // (sandstone version, RCON port/password auto-derivation) and on
-  // member lifecycle order.
-  console.error(`[daemon-trace] step 1: bootstrapping host=${opts.hostType}`)
-  let bootstrapResult: Awaited<ReturnType<typeof bootstrapHosts>>
+  let bootstrapResult: Awaited<ReturnType<typeof bootstrapHost>>
   try {
-    bootstrapResult = await bootstrapHosts({
+    bootstrapResult = await bootstrapHost({
       hostType: opts.hostType,
-      perHostConfig: opts.perHostConfig,
+      config: opts.config,
       userProvidedHostSettings: opts.userProvidedHostSettings,
     })
-    console.error(`[daemon-trace] step 1 done: bootstrap returned`)
   } catch (e) {
     if (e instanceof BootstrapError) {
       throw new DaemonError(e.message, e.code)
@@ -144,52 +138,18 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     throw e
   }
   const host = bootstrapResult.host
-  const members = bootstrapResult.members
-  // `integrated` is the only host type whose lifecycle the daemon
-  // actually owns (it spawns and supervises the MC JVM). For every
-  // other provider — ssh, ftp, rcon, local-client, mcsmanager-login
-  // — the daemon just connects to a server the user started
-  // externally. Threaded into `teardown()` so handle.shutdown()
-  // knows whether it's allowed to call host.stopServer(). Without
-  // this gate, an `onDisconnected` blip on any member of e.g.
-  // `[ftp, rcon]` would route stopServer to the rcon member and
-  // `stop` a server the daemon doesn't own — which is what used to
-  // kill the harness MC mid-suite.
-  const ownsServer = members.some((m) => m.type === 'integrated')
 
-  // 6b. Watch each member for unexpected liveness loss. If any member
-  // dies (JVM exit, RCON socket close, SSH connection drop, etc.), shut
-  // the whole daemon down — half a composite is worse than no daemon.
-  // `disconnect()` on the host clears its handler set, so we don't
-  // need to track unsubscribers.
-  //
-  // Hosts can declare a disconnect as expected by setting
-  // `m.shuttingDown = true` before initiating shutdown (e.g.
-  // `integrated.stopServer` before SIGTERM, `rcon.executeRawCommand('stop')`
-  // before RCON's self-disconnect). When set, the watcher no-ops so a
-  // restart cycle can cycle one member without tearing the daemon down.
-  for (const m of members) {
-    if (!m.onDisconnected) continue
-    m.onDisconnected((reason: string) => {
+  if (host.onDisconnected) {
+    host.onDisconnected((reason: string) => {
       if (expectedShutdown) {
-        console.error(`[connect] member '${m.type}' disconnected (${reason}) — expected shutdown (self-initiated), daemon stays up`)
-        // Don't clear `expectedShutdown` here — multiple members can
-        // disconnect during one cycle (e.g. rcon + integrated in a
-        // composite). Cleared at the START of the next cycle instead.
         return
       }
       shutdownReason = 'host-lost'
-      console.error(`[connect] member '${m.type}' disconnected (${reason}) — shutting down`)
-      void handle.shutdown()
+      handle.shutdown().catch(() => {})
     })
   }
 
-  // 4. Load the active `sandstone.config.ts` snapshot. Best-effort: if
-  // the project has no config (yet), leave it undefined and let the
-  // dispatch handlers surface a clear "not a Sandstone project" error.
-  // The watcher will publish a snapshot over WS shortly after it
-  // connects, so an undefined boot-time value is fine — it just means
-  // `getActiveConfig` answers "no active config" until then.
+  // 4. Load the active `sandstone.config.ts` snapshot.
   let activeConfig: ActiveConfig | undefined
   try {
     activeConfig = await loadActiveConfigFromDisk(opts.projectRoot)
@@ -275,18 +235,17 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
 
   // Race the server start against an outer timeout — if Bun.serve
   // fails (port in use), we'd otherwise hang on `server.port` access.
-  console.error(`[daemon-trace] step 5: starting WS server`)
   const running = startServer({
     host,
     secret,
     bind,
     port,
-    onShutdown: () => {
+    onShutdown: async () => {
       // The server signals us via this callback when a client sends
       // the `shutdown` RPC. Kick off the same teardown as a signal
       // would, but record the actual reason.
       shutdownReason = 'shutdown-rpc'
-      void handle.shutdown()
+      handle.shutdown().catch(() => {})
     },
     // Closure captures `activeConfig` by reference — the `let`
     // declaration above makes it mutable. Future `publishConfig` calls
@@ -385,7 +344,6 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   const done = new Promise<void>((r) => {
     resolveDone = r
   })
-  console.error(`[daemon-trace] step 4: sandstone.config snapshot loaded=${!!activeConfig}`)
   const handle: DaemonHandle = {
     host,
     endpoint,
@@ -404,7 +362,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
           (event, data) => running.broadcast(event, data),
           endpoint,
           shutdownReason,
-          ownsServer,
+          host.type === 'integrated',
         )
       } finally {
         // resolveDone MUST run even if teardown throws — otherwise the
@@ -420,7 +378,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   const onSignal = (sig: NodeJS.Signals) => {
     console.error(`\n[connect] received ${sig}, shutting down...`)
     shutdownReason = 'signal'
-    void handle.shutdown()
+    handle.shutdown().catch(() => {})
   }
   try {
     process.on('SIGINT', onSignal)
@@ -433,11 +391,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     // before crashing the process. Logs to stderr (already mirrored
     // to the parent's test log when running under the harness).
     process.on('uncaughtException', (err, origin) => {
-      console.error(`[daemon-trace] uncaughtException: ${err.message}\n${err.stack ?? '<no stack>'}\n  origin=${typeof origin === 'string' ? origin : 'unknown'}`)
+      console.error(`[daemon] uncaughtException: ${err.message}\n${err.stack ?? '<no stack>'}\n  origin=${typeof origin === 'string' ? origin : 'unknown'}`)
     })
     process.on('unhandledRejection', (reason) => {
       const err = reason instanceof Error ? reason : new Error(String(reason))
-      console.error(`[daemon-trace] unhandledRejection: ${err.message}\n${err.stack ?? '<no stack>'}`)
+      console.error(`[daemon] unhandledRejection: ${err.message}\n${err.stack ?? '<no stack>'}`)
     })
   } catch (err) {
     // Signal registration failed (extremely unlikely on POSIX). Clean up

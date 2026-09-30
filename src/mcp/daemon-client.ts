@@ -137,9 +137,11 @@ export function forwardConfigChangedToResource(
   uri: string = 'sandstone://save-config',
 ): () => void {
   return client.onConfigChanged(() => {
-    void server.sendResourceUpdated({ uri }).catch(() => {
+    server.sendResourceUpdated({ uri }).catch(() => {
       // Client may have disconnected; no way to surface this from a
       // notification handler. Swallow.
     })
   })
 }
+
+export { withDaemon } from './with-daemon.js'

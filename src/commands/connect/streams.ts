@@ -52,8 +52,13 @@ export interface OpenStream {
    * resolving the originating readFile/writeFile call.
    */
   closed: Promise<void>
-  /** Fulfilled with the final byte count when the stream closes. */
-  resolveClosed: (bytes: number) => void
+  /**
+   * Resolve the closed promise. The wire envelope (sent via `onClose`)
+   * carries the byte count, so this resolver doesn't need to thread
+   * it through — the consumer's `done` promise is for ordering, not
+   * payload.
+   */
+  resolveClosed: () => void
   /** Reject the originating RPC if the stream is abandoned. */
   rejectClosed: (err: Error) => void
   /**
@@ -96,15 +101,14 @@ export class StreamRegistry {
     kind: StreamKind
     onClose?: (bytes: number, err?: Error) => void
   }): OpenStream {
-    let resolveClosed!: (bytes: number) => void
+    let resolveClosed!: () => void
     let rejectClosed!: (err: Error) => void
     const closed = new Promise<void>((res, rej) => {
-      resolveClosed = (bytes: number) => {
-        res(undefined)
+      resolveClosed = () => {
         // Bytes count is surfaced via the wire envelope (server-side
         // callback fires `onClose(bytes)` → envelope sends bytes),
-        // not via this resolved promise. Swallow the unused param.
-        void bytes
+        // not via this resolved promise.
+        res(undefined)
       }
       rejectClosed = (err: Error) => {
         rej(err)
@@ -115,8 +119,8 @@ export class StreamRegistry {
       kind: opts.kind,
       bytes: 0,
       closed,
-      resolveClosed(bytes: number) {
-        resolveClosed(bytes)
+      resolveClosed() {
+        resolveClosed()
       },
       rejectClosed(err: Error) {
         rejectClosed(err)
@@ -183,7 +187,7 @@ export class StreamRegistry {
       record.rejectClosed(err)
       return
     }
-    record.resolveClosed(finalBytes)
+    record.resolveClosed()
   }
 
   /**

@@ -18,6 +18,8 @@ import { resolve } from 'node:path'
 import { connect as openClient } from './client.js'
 import { startDaemon } from './daemon.js'
 import { readEndpoint, pidAlive } from './endpoint-file.js'
+import { isObject } from '../../utils/guards.js'
+import { HostConfigCliError, parseHostConfig } from './host-config.js'
 import { KNOWN_HOST_TYPES, type HostConfigInput, type HostType } from '../../hosts/types.js'
 import { printSplash } from '../../utils/index.js'
 import chalk from 'chalk-template'
@@ -39,9 +41,6 @@ export interface ConnectCommandOptions {
   path: string
 }
 
-/** Detect sensitive keys in --host-config so we can warn the user. */
-const SENSITIVE_KEYS = ['privateKey', 'password', 'cookie', 'token']
-
 export async function connectCommand(opts: ConnectCommandOptions): Promise<void> {
   const projectRoot = resolve(opts.path)
 
@@ -58,36 +57,32 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
   const hostType = parseHostType(opts.hostType)
   if (!KNOWN_HOST_TYPES.has(hostType)) {
     console.error(
-      chalk`{red Error:} Unknown --host-type '${hostType}' (one of: ssh, ftp, local-client, integrated, mcsmanager-login)`,
+      chalk`{red Error:} Unknown --host-type '${hostType}' (one of: ssh, ftp, integrated, mcsmanager-login)`,
     )
     process.exit(2)
   }
 
   // Forward whether the user passed any host-setting flag so the
-  // bootstrap knows when to skip auto-`local-client` augmentation.
+  // bootstrap knows when to skip auto-config injection.
   const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
 
-  if (opts.hostConfig && opts.hostConfigFile) {
-    console.error(chalk`{red Error:} Pass either --host-config or --host-config-file, not both`)
+  // Parse --host-config / --host-config-file. Throws HostConfigCliError
+  // on bad JSON / wrong shape / both-passed; we exit(2) on it.
+  let parsedConfig
+  try {
+    parsedConfig = await parseHostConfig(opts.hostConfig, opts.hostConfigFile)
+  } catch (err) {
+    if (err instanceof HostConfigCliError) {
+      console.error(chalk`{red Error:} ${err.message}`)
+    } else {
+      throw err
+    }
     process.exit(2)
   }
-
-  // Sensitive-key warning when the JSON is passed inline.
-  if (opts.hostConfig) {
-    const lowered = opts.hostConfig.toLowerCase()
-    const hit = SENSITIVE_KEYS.find((k) => lowered.includes(k.toLowerCase()))
-    if (hit) {
-      console.error(
-        chalk`{yellow Warning:} --host-config contains '${hit}'; this is visible in \`ps aux\`. ` +
-          `Prefer --host-config-file with \`chmod 0600\`.`,
-      )
-    }
+  for (const w of parsedConfig.warnings) {
+    console.error(chalk`{yellow Warning:} ${w}`)
   }
-
-  // Read the host's config (or default to `{}`). The daemon's auto-
-  // config block fills in host/port/password/sandstoneVersion/etc.
-  const rawConfig = await loadHostConfig(opts)
-  const perHostConfig = normalizeConfig(rawConfig, projectRoot, hostType)
+  const config = normalizeConfig(parsedConfig.config, projectRoot)
 
   const port = opts.port !== undefined ? Number(opts.port) : 0
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -97,7 +92,7 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
 
   const handle = await startDaemon({
     hostType,
-    perHostConfig,
+    config,
     projectRoot,
     bind: opts.bind,
     port,
@@ -145,8 +140,7 @@ function parseHostType(raw: string | undefined): HostType {
 function normalizeConfig(
   raw: HostConfigInput,
   projectRoot: string,
-  hostType: HostType,
-): Partial<Record<HostType, HostConfigInput>> {
+): HostConfigInput {
   if (raw === undefined || raw === null) {
     return {}
   }
@@ -156,29 +150,11 @@ function normalizeConfig(
   }
   const cfg = { ...raw, verbose: true } as HostConfigInput
   if (cfg.projectRoot === undefined) cfg.projectRoot = projectRoot
-  return { [hostType]: cfg }
-}
-
-function isObject(v: unknown): v is Record<string, unknown> {
-  return !!v && typeof v === 'object' && !Array.isArray(v)
-}
-
-async function loadHostConfig(opts: ConnectCommandOptions): Promise<HostConfigInput> {
-  if (opts.hostConfigFile) {
-    const raw = await Bun.file(opts.hostConfigFile).text()
-    return JSON.parse(raw) as HostConfigInput
-  }
-  if (opts.hostConfig) {
-    return JSON.parse(opts.hostConfig) as HostConfigInput
-  }
-  // No config passed — leave the bootstrap to apply defaults.
-  return {} as HostConfigInput
+  return cfg
 }
 
 async function runShutdown(projectRoot: string): Promise<void> {
-  console.error('[shutdown-trace] runShutdown called')
   const endpoint = await readEndpoint(projectRoot)
-  console.error(`[shutdown-trace] endpoint=${!!endpoint} pid=${endpoint?.pid}`)
   if (!endpoint) {
     console.error(chalk`{red Error:} No endpoint file at ${projectRoot}/.sandstone/connect.url — no daemon to shut down`)
     process.exit(1)
@@ -188,11 +164,8 @@ async function runShutdown(projectRoot: string): Promise<void> {
     process.exit(1)
   }
   try {
-    console.error('[shutdown-trace] opening client')
     const client = await openClient({ endpoint })
-    console.error('[shutdown-trace] client open, calling shutdown')
     await client.shutdown()
-    console.error('[shutdown-trace] shutdown RPC returned')
     client.close()
     console.log(chalk`{cyan [connect]} shutdown sent to daemon (pid ${endpoint.pid})`)
   } catch (err) {

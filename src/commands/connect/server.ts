@@ -23,23 +23,23 @@ import {
   event,
   ok,
   err,
+  classifyWsMessage,
   type RpcMethod,
   type RpcResponse,
   type WelcomeEvent,
 } from './rpc.js'
-import { classifyWsMessage } from './codec-classify.js'
 import { capabilitiesToRecord } from '../../hosts/types.js'
-import { RpcHandlerError, ShutdownSignal, Dispatcher, dispatch, narrowMethod, withHost, handleSessionClose, type DispatchContext } from './dispatch.js'
+import { RpcHandlerError, ShutdownSignal, Dispatcher, dispatch, narrowMethod, withHost, handleSessionClose, type DispatcherContext } from './dispatch.js'
 import type { ActiveConfig } from './active-config.js'
 import { type RebuildState, type WatcherStatus, notification } from './rpc.js'
 import { SubscriptionRegistry } from './subscriptions.js'
 import { StreamRegistry } from './streams.js'
-import { encodeRpc, decodeStreamChunk, streamIdHex } from './codec.js'
+import { encodeRpc, decodeStreamChunk, streamIdHex, STREAM_MAGIC } from './codec.js'
 import type { HostProvider } from '../../hosts/types.js'
 import type { SessionContext } from './types.js'
 
 /** Per-connection ws data — the secret is shared across all connections in this daemon. */
-interface WsData {
+export interface WsData {
   secret: string
 }
 
@@ -95,7 +95,7 @@ export interface ServerOptions {
   /** Snapshot read of the current watcher status. */
   getWatcherStatus?: () => WatcherStatus | null
   /** Mutator for the current watcher status. */
-  setWatcherStatus?: (status: WatcherStatus, ws: unknown) => void
+  setWatcherStatus?: (status: WatcherStatus, ws: Bun.ServerWebSocket<WsData> | undefined) => void
   /**
    * Read of the daemon-level "expected shutdown in progress" flag.
    * When true, RPC handler errors are not treated as fatal — the
@@ -192,7 +192,7 @@ export function startServer(opts: ServerOptions): RunningServer {
       // message on this WS — only the `pushLog` closure varies per
       // session (it captures this `ctx` + `ws`), so we capture it
       // once here.
-      const dispatchCtx: DispatchContext = {
+      const dispatchCtx: DispatcherContext = {
         host: opts.host,
         subscriptions,
         ws,
@@ -247,39 +247,24 @@ export function startServer(opts: ServerOptions): RunningServer {
         return
       }
 
-      // Binary frame: treat as a stream chunk ONLY when the first 16
-      // bytes match a registered `writeFile` stream. Control
-      // envelopes (request/response/event/notification) ride on
-      // msgpack-encoded binary frames too — they're typically ≥17
-      // bytes (welcome event is ~222 bytes) so a length check alone
-      // can't disambiguate. Peek the registry: an unknown streamId
-      // means this isn't a stream frame, fall through to envelope
-      // decoding.
-      if (typeof raw !== 'string' && raw.byteLength >= 17) {
+      // Binary frame: dispatch on magic byte. STREAM_MAGIC → stream chunk for
+      // a registered writeFile stream; anything else falls through to
+      // envelope decoding.
+      if (typeof raw !== 'string' && raw.byteLength >= 17 && raw[0] === STREAM_MAGIC) {
         const buf = raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw
-        const candidateStreamId = buf.slice(0, 16)
-        const candidateKey = streamIdHex(candidateStreamId)
+        const { streamId, chunk } = decodeStreamChunk(buf)
+        const candidateKey = streamIdHex(streamId)
         const stream = streams.get(candidateKey)
         if (stream && stream.kind === 'writeFile') {
-          const { chunk } = decodeStreamChunk(buf)
           stream.bytes += chunk.byteLength
           const writer = streams.writer(candidateKey)
           if (writer) {
-            // `writer.write()` returns a promise that resolves when
-            // the chunk is accepted by the WritableStream's queue.
-            // We don't await — backpressure is naturally applied
-            // when the WritableStream's queue fills up.
             writer.write(chunk).catch((err: unknown) => {
               streams.close(candidateKey, stream.bytes, err instanceof Error ? err : new Error(String(err)))
             })
           }
           return
         }
-        // Not a registered stream frame — fall through to envelope
-        // decoding below. The first 16 bytes of a msgpack-encoded
-        // envelope don't collide with a streamId often enough to
-        // matter; if it does, the envelope decoder will surface a
-        // parse error and the caller can debug.
       }
 
       if (ctx.shuttingDown) {
@@ -449,7 +434,7 @@ export function startServer(opts: ServerOptions): RunningServer {
             try { session.sendBinary(envelope) } catch { /* disconnected */ }
           }
         },
-      } as unknown as DispatchContext)
+      } as unknown as DispatcherContext)
       // Force-close every stream belonging to this session. Rejects
       // their `closed` promises so the originating RPC handlers can
       // surface an error rather than hanging forever.

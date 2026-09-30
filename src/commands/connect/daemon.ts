@@ -5,7 +5,7 @@
  *   1. Validate the project's endpoint file isn't already serving a live
  *      daemon (pidAlive + age check).
  *   2. Instantiate the requested HostProvider via the registry.
- *   3. Start the WS server (host not yet connected — server is
+ *   3. Start the WS server (host not yet connected; server is
  *      'welcome'-only until the host connects).
  *   4. Write the endpoint file.
  *   5. Register SIGINT/SIGTERM (and SIGBREAK on Windows) handlers.
@@ -17,11 +17,10 @@
  *      - Stop the server.
  *      - `process.exit(0)`.
  *
- * The shutdown sequence is idempotent — multiple triggers (signal +
+ * The shutdown sequence is idempotent; multiple triggers (signal +
  * RPC + another signal) collapse to one execution.
  */
 
-import chalk from 'chalk-template'
 import { capabilitiesToRecord, Capability, type HostConfigInput, type HostProvider, type HostType } from '../../hosts/types.js'
 import { BootstrapError, bootstrapHost } from './bootstrap.js'
 import { loadActiveConfigFromDisk, type ActiveConfig } from './active-config.js'
@@ -43,18 +42,15 @@ import {
   endpointPath,
   endpointStatus,
   generateSecret,
-  pidAlive,
   writeEndpoint,
   type EndpointFile,
 } from './endpoint-file.js'
 
 export interface DaemonOptions {
-  /** The single host type for this daemon. */
   hostType: HostType
-  /** Config for the host type above. */
   config: Partial<HostConfigInput>
   projectRoot: string
-  /** Bind address. Default `127.0.0.1` (loopback only — never LAN). */
+  /** Bind address. Default `127.0.0.1`. */
   bind?: string
   /** Bind port. `0` lets the OS pick. */
   port?: number
@@ -71,13 +67,10 @@ export interface DaemonHandle {
   host: HostProvider
   endpoint: EndpointFile
   url: string
-  /** Returns the running server's bound port (post-bind). */
   port: number
   /**
    * Trigger the shutdown sequence. Idempotent. Resolves once the
    * process is ready to exit (endpoint file removed, server stopped).
-   * Does NOT call `process.exit` — the orchestrator decides whether to
-   * exit (e.g. the CLI exits normally; tests don't exit).
    */
   shutdown(): Promise<void>
   /**
@@ -98,12 +91,6 @@ export class DaemonError extends Error {
   }
 }
 
-/**
- * Start the daemon. Returns once the server is listening and the
- * endpoint file is on disk. Caller is responsible for keeping the
- * process alive (e.g. awaiting a long-lived promise) and eventually
- * triggering `handle.shutdown()`.
- */
 export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   // 1. Reject if another daemon is already serving this project.
   const status = await endpointStatus(opts.projectRoot)
@@ -170,60 +157,24 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   const bind = opts.bind ?? '127.0.0.1'
   const port = opts.port ?? 0
 
-  // Two bounded circular buffers of log lines, one per stream target.
-  // Each entry carries its arrival timestamp so the matching read
-  // RPC can filter by time. The buffers are the canonical sources —
-  // any on-disk log files are only kept as a side effect for humans
-  // tailing them directly.
-  //
-  // - `buildBuffer`: pushed by `sand watch` via `publishLog`.
-  // - `testBuffer`: reserved for the future test runner; nothing
-  //   pushes to it yet, but the shape matches so MCP can offer the
-  //   same filtering on `readTestLog`.
-  // - `serverBuffer`: the host's stdout. The daemon subscribes to its
-  //   own host's `attachLog` at boot (below) and pushes every line
-  //   here, so `readServerLog` works without a watcher and without
-  //   reading the on-disk log file.
   let buildBuffer: { line: string; ts: number }[] = []
   let testBuffer: { line: string; ts: number }[] = []
   let serverBuffer: { line: string; ts: number }[] = []
   const LOG_BUFFER_CAP = 1000
 
-  // Latest rebuild state pushed by the watcher. `undefined` until the
-  // first `publishRebuild` lands. Read by MCP's `sandstone://rebuild-state`
-  // resource handler; updated by the watcher on every build start/finish.
   let rebuildState: RebuildState | undefined
 
-  // Current watcher status. `null` until `publishWatcherStatus` lands;
-  // flipped to `connected: false` by `handleSessionClose` (in dispatch.ts)
-  // when the watcher's WS session closes. The actual ws tracking lives
-  // in dispatch.ts so the session-close handler can match it without
-  // a round-trip.
   let watcherStatus: WatcherStatus | null = null
 
   const pushTo = (target: 'build' | 'test' | 'server') => (entries: { line: string; ts: number }[]) => {
-    // Source stamps each entry with the emit timestamp. Daemon stores
-    // verbatim — no re-stamping on receipt, so the value reflects
-    // "when the event happened" rather than "when the network packet
-    // landed".
     const buf = target === 'server' ? serverBuffer : target === 'test' ? testBuffer : buildBuffer
     buf.push(...entries)
     const overflow = buf.length - LOG_BUFFER_CAP
     if (overflow > 0) buf.splice(0, overflow)
   }
 
-  // Daemon-owned subscription to the host's stdout. Pushes every
-  // emitted chunk into `serverBuffer` so `readServerLog` works without
-  // a watcher and without reading the on-disk log file. Skipped when
-  // the host doesn't expose `attachLog` (e.g. some composite members
-  // that delegate to another member's stream). The returned
-  // subscription's `unattach` is fire-and-forget — the daemon never
-  // detaches during its lifetime (lifecycle ends at process exit).
   if (host.capabilities.has(Capability.AttachLog) && host.attachLog) {
     try {
-      // The daemon holds this subscription open for its entire
-      // lifetime — calling `unattach()` would immediately remove the
-      // handler we just added. The subscription dies with the process.
       await host.attachLog((lines) => {
         if (lines.length === 0) return
         pushTo('server')(lines.map((line) => ({ line, ts: Date.now() })))
@@ -233,39 +184,24 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     }
   }
 
-  // Race the server start against an outer timeout — if Bun.serve
-  // fails (port in use), we'd otherwise hang on `server.port` access.
   const running = startServer({
     host,
     secret,
     bind,
     port,
     onShutdown: async () => {
-      // The server signals us via this callback when a client sends
-      // the `shutdown` RPC. Kick off the same teardown as a signal
-      // would, but record the actual reason.
       shutdownReason = 'shutdown-rpc'
       handle.shutdown().catch(() => {})
     },
-    // Closure captures `activeConfig` by reference — the `let`
-    // declaration above makes it mutable. Future `publishConfig` calls
-    // (from the watcher) reassign it and all subsequent dispatch
-    // contexts see the new value via the same closure.
     getActiveConfig: () => activeConfig,
     setActiveConfig: (cfg) => {
       activeConfig = cfg
     },
-    // Closure captures `rebuildState` by reference — mutable so future
-    // `publishRebuild` calls reassign it and all subsequent dispatch
-    // contexts see the new value.
     setRebuildState: (state) => {
       rebuildState = state
     },
     getRebuildState: () => rebuildState,
     getExpectedShutdown,
-    // Watcher passes ctx.ws as the second arg so dispatch.ts can track
-    // which session is the watcher (used by `handleSessionClose` to
-    // flip `connected: false` on disconnect).
     setWatcherStatus: (status: WatcherStatus, _ws: unknown) => {
       watcherStatus = status
     },
@@ -353,8 +289,6 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     async shutdown() {
       if (shuttingDown) return
       shuttingDown = true
-      // `server.stop` must keep its `this` — Bun's stop throws
-      // ERR_INVALID_THIS otherwise.
       try {
         await teardown(
           host,
@@ -365,11 +299,6 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
           host.type === 'integrated',
         )
       } finally {
-        // resolveDone MUST run even if teardown throws — otherwise the
-        // caller's `await handle.done` hangs forever and process.exit(0)
-        // never fires, leaving the daemon (and the endpoint) alive
-        // indefinitely. deleteEndpoint already ran inside teardown if it
-        // got that far; this is the safety net for the throw case.
         resolveDone()
       }
     },
@@ -386,10 +315,6 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     if (process.platform === 'win32') {
       process.on('SIGBREAK', onSignal as (s: NodeJS.Signals) => void)
     }
-    // Diagnostic: surface uncaught exceptions with their source so
-    // we can find which stream/socket is dropping an `error` event
-    // before crashing the process. Logs to stderr (already mirrored
-    // to the parent's test log when running under the harness).
     process.on('uncaughtException', (err, origin) => {
       console.error(`[daemon] uncaughtException: ${err.message}\n${err.stack ?? '<no stack>'}\n  origin=${typeof origin === 'string' ? origin : 'unknown'}`)
     })
@@ -398,10 +323,6 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       console.error(`[daemon] unhandledRejection: ${err.message}\n${err.stack ?? '<no stack>'}`)
     })
   } catch (err) {
-    // Signal registration failed (extremely unlikely on POSIX). Clean up
-    // the endpoint and re-throw so the caller knows startup failed —
-    // leaving the file behind with a half-initialized daemon would be
-    // worse than a clean error.
     console.error('[connect] failed to register signal handlers:', err)
     try {
       await deleteEndpoint(opts.projectRoot, process.pid)
@@ -414,10 +335,6 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   return handle
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 async function teardown(
   host: HostProvider,
   stopWS: () => Promise<void>,
@@ -426,27 +343,8 @@ async function teardown(
   reason: 'signal' | 'shutdown-rpc' | 'host-lost',
   ownsServer: boolean,
 ): Promise<void> {
-  // Tell every open client we're shutting down BEFORE we touch the WS
-  // transport. Clients use this signal to flush pending state (close
-  // subscriptions, log a goodbye line) before the socket is yanked.
-  // The 100ms grace is short enough to feel instant but long enough
-  // for the event envelope to land in the client. Any client that's
-  // not actively reading (idle watcher) still benefits — once they do
-  // read, they see `daemonShutdown` and exit instead of treating the
-  // close as an error.
   broadcast('daemonShutdown', { reason })
   await new Promise<void>((r) => setTimeout(r, 100))
-  // Soft-stop the underlying server first so it gets a chance to save
-  // worlds + broadcast goodbye before we yank the transport. For
-  // composite `[rcon, integrated]` this dispatches to the rcon member,
-  // which sends `stop` via RCON. For single integrated, it sends
-  // SIGTERM + waits.
-  //
-  // Only call this when the daemon actually owns the server — i.e.
-  // `integrated` is among the members. Everything else (ssh, ftp,
-  // rcon, local-client, mcsmanager-login) is connection-only and
-  // points at user-started servers; `stop`ing them would be
-  // destructive.
   if (ownsServer && host.stopServer) {
     try {
       await host.stopServer()
@@ -454,21 +352,11 @@ async function teardown(
       console.error(`[connect] host stopServer failed:`, err)
     }
   }
-  // Delete the endpoint file BEFORE the rest of teardown. Once the JVM
-  // is dead (above), the daemon's role as "the daemon for this project"
-  // is over — even if `stopWS()` or `host.disconnect()` hang below on
-  // a stuck Bun.spawn stream or stalled WS handshake, the endpoint is
-  // already gone so the next `sand connect` won't see this dying
-  // daemon as live. Pass our pid so deleteEndpoint refuses to remove
-  // a file owned by a different daemon (see endpoint-file.ts).
   try {
     await deleteEndpoint(endpoint.projectRoot, endpoint.pid)
   } catch (err) {
     console.error(`[connect] endpoint delete failed:`, err)
   }
-  // Now tear down the WS server and disconnect the host. Either may
-  // hang on stuck Bun internals; the endpoint is already gone, so the
-  // worst case is the process not exiting promptly, NOT an orphan file.
   try {
     await stopWS()
   } catch (err) {
@@ -479,14 +367,7 @@ async function teardown(
   } catch (err) {
     console.error(`[connect] host disconnect failed:`, err)
   }
-  // Surface the reason in stderr for log scrapers. Wrapped in
-  // try/catch so a closed-stdout EPIPE on this write can't propagate
-  // out of teardown and leave the caller's `await handle.done` hanging.
-  try {
-    console.error(`[connect] shutdown complete (${reason})`)
-  } catch {
-    // ignore
-  }
+  console.error(`[connect] shutdown complete (${reason})`)
 }
 
 async function readEndpointSafe(projectRoot: string) {
@@ -498,7 +379,3 @@ async function readEndpointSafe(projectRoot: string) {
     return null
   }
 }
-
-// `pidAlive` is re-exported here so callers can reuse the import path
-// from `daemon.ts` if they want to test the "already running" branch.
-export { pidAlive }

@@ -1,16 +1,3 @@
-/**
- * RPC method dispatch.
- *
- * Maps `sand connect` RPC methods onto HostProvider capabilities. Each
- * method is a small `(params) => Promise<result>` thunk whose types
- * are sourced from `./rpc.js` (params + result for every method live
- * there as `rpc.XxxParams` / `rpc.XxxResult`). Errors are translated to
- * stable RPC codes by {@link errorToRpc}.
- *
- * Pure — does not touch `Bun.serve` or WebSocket state. The server
- * layer wires this in per-connection.
- */
-
 import { resolve as resolvePath } from 'node:path'
 
 import * as fs from '../../utils/fs.js'
@@ -26,6 +13,7 @@ import type { ActiveConfig } from './active-config.js'
 import { setExpectedShutdown } from './daemon.js'
 import { UnsupportedCapabilityRpc, rpcError } from './host-capability.js'
 import { makeStreamEndBridge } from './stream-bridge.js'
+import { WsData } from './server.js'
 
 /**
  * Thrown by `dispatch` when the caller asked for shutdown. The server
@@ -54,19 +42,11 @@ export class RpcHandlerError extends Error {
 
 const MAX_DIR_ENTRIES_DEFAULT = 1000
 
-/**
- * Per-RPC request context — data fields only, no methods. Carries
- * every value the dispatcher needs at runtime. Splitting data from
- * helpers means `DispatchContext` can be derived from this class's
- * instance type without dragging the helper methods into the public
- * type. Lives next to {@link DispatcherInternals} so the field list
- * stays in one place.
- */
 export class DispatcherContext {
   constructor(
     public readonly host: HostProvider,
     public readonly subscriptions: SubscriptionRegistry,
-    public readonly ws: unknown,
+    public readonly ws: Bun.ServerWebSocket<WsData>,
     public readonly pushLog: (lines: string[], subscriptionId: string) => void,
     public readonly startedAt: number,
     /**
@@ -81,7 +61,7 @@ export class DispatcherContext {
     public readonly getRebuildState?: () => rpc.RebuildState | undefined,
     public readonly setRebuildState?: (state: rpc.RebuildState) => void,
     public readonly getWatcherStatus?: () => rpc.WatcherStatus | null,
-    public readonly setWatcherStatus?: (status: rpc.WatcherStatus, ws: unknown) => void,
+    public readonly setWatcherStatus?: (status: rpc.WatcherStatus, ws: Bun.ServerWebSocket<WsData> | undefined) => void,
     public readonly getExpectedShutdown?: () => boolean,
     public readonly appendLogLines?: (entries: rpc.LogLineEntry[], target: rpc.LogStreamTarget) => void,
     public readonly readLogBuffer?: (target: rpc.LogStreamTarget, opts?: {
@@ -103,23 +83,13 @@ export class DispatcherContext {
 
 }
 
-/**
- * Non-RPC helpers shared by every dispatcher. Carries a circular
- * back-reference to its owning `Dispatcher` so helpers can reach RPC
- * state when they need to. All per-request data lives on the
- * sibling {@link DispatcherContext} class — the helpers stay here,
- * and `DispatchContext` is `DispatcherContext`'s instance type.
- */
 export class DispatcherInternals {
-  /** Per-request data — derived type used by `DispatchContext`. */
   readonly context: DispatcherContext
 
   constructor(public readonly dispatcher: Dispatcher, context: DispatcherContext) {
     this.context = context
   }
 
-  // ── Ergonomic pass-throughs so handler code can keep using
-  // `this.internals.host` instead of `this.internals.context.host`. ──
   get host() { return this.context.host }
   get subscriptions() { return this.context.subscriptions }
   get ws() { return this.context.ws }
@@ -138,7 +108,6 @@ export class DispatcherInternals {
   get readLogBuffer() { return this.context.readLogBuffer }
   get streams() { return this.context.streams }
 
-  /** Resolve the currently-scoped host or throw `NotConnected`. */
   runHost<T>(op: (h: HostProvider) => Promise<T>): Promise<T> {
     const host = Dispatcher.currentHost
     if (!host) throw rpcError(RpcErrorCode.NotConnected, 'No host available')
@@ -177,8 +146,6 @@ export class DispatcherInternals {
       throw rpcError(RpcErrorCode.InternalError, 'Daemon has no log buffer configured')
     }
     const buf = this.readLogBuffer(target, { tail, maxLines, range, since, until })
-    // Canonical file path for the build log; placeholders for the
-    // others (they're in-memory only).
     const cfg = await this.requireActiveConfig()
     const path = target === 'build' ? cfg.logPath : target === 'test' ? '<test-runner-buffer>' : '<host-stdout-buffer>'
     return {
@@ -192,37 +159,18 @@ export class DispatcherInternals {
     }
   }
 
-  /**
-   * Read a text file as an array of complete lines. Multi-byte-safe via
-   * `TextDecoder({ stream: true })` — bytes split mid-UTF-8-character
-   * are buffered across reads until the next chunk arrives. The
-   * trailing partial line (no terminating `\n`) is preserved.
-   */
-  async readLinesFromFile(path: string): Promise<string[]> {
-    const { createReadStream } = await import('node:fs')
-    const stream = createReadStream(path)
-    const decoder = new TextDecoder('utf-8')
-    const lines: string[] = []
-    let pending = ''
+  async readLogFile(path: string): Promise<string[]> {
     try {
-      for await (const chunk of stream) {
-        pending += decoder.decode(chunk, { stream: true })
-        const parts = pending.split('\n')
-        pending = parts.pop() ?? ''
-        if (parts.length > 0) lines.push(...parts)
-      }
-      // Flush the decoder so any bytes still buffered internally land
-      // in `pending`, then emit the trailing partial line if any.
-      pending += decoder.decode()
-      if (pending.length > 0) lines.push(pending)
+      const text = await fs.readText(path)
+      const lines = text.split('\n')
+      if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+      return lines
     } catch (err) {
-      // Re-throw with the file path for diagnosability — the MCP layer
-      // surfaces the message verbatim in the resource response.
+      // Re-throw with the file path for diagnosability.
       throw new Error(
         `Failed to read log at ${path}: ${err instanceof Error ? err.message : String(err)}`,
       )
     }
-    return lines
   }
 
   async listDirectory(
@@ -236,44 +184,16 @@ export class DispatcherInternals {
     }
     const cap = Math.max(1, limit ?? MAX_DIR_ENTRIES_DEFAULT)
     const dirents = await fs.readDirEntries(target)
-    const entries: rpc.BuildOutputEntry[] = []
-    for (const d of dirents) {
-      if (entries.length >= cap) {
-        return { baseDir, entries, truncated: true }
-      }
-      const full = resolvePath(target, d.name)
-      let size = 0
-      let mtime: Date
-      try {
-        const s = await fs.fileStat(full)
-        size = d.isDirectory ? 0 : s.size
-        mtime = s.mtime
-      } catch {
-        // File deleted between readdir and stat — skip with a sentinel
-        // mtime so the entry still surfaces (caller decides what to do).
-        mtime = new Date(0)
-      }
-      entries.push({
-        path: d.name,
-        size,
-        mtime: mtime.toISOString(),
-        isDirectory: d.isDirectory,
-      })
-    }
-    return { baseDir, entries, truncated: false }
+    const truncated = dirents.length > cap
+    const entries: rpc.BuildOutputEntry[] = dirents.slice(0, cap).map((d) => ({
+      path: d.name,
+      isDirectory: d.isDirectory,
+    }))
+    return { baseDir, entries, truncated }
   }
 }
 
-/**
- * Per-RPC request context — the data shape every handler (and
- * {@link Dispatcher}) needs at runtime. Derived from
- * {@link DispatcherContext}'s instance type so the field list lives
- * in exactly one place and helpers don't leak into the public type.
- */
-export type DispatchContext = DispatcherContext
-
 export class Dispatcher {
-  /** Per-process host scope (see {@link withHost}). Reachable from {@link DispatcherInternals}. */
   static currentHost: HostProvider | null = null
 
   /**
@@ -291,7 +211,7 @@ export class Dispatcher {
    */
   protected readonly internals: DispatcherInternals
 
-  constructor(ctx: DispatchContext) {
+  constructor(ctx: DispatcherContext) {
     // Pass the caller's `getActiveConfig` closure straight through so
     // handlers always see the latest snapshot (the watcher may
     // hot-reload the config mid-session via `publishConfig`).
@@ -342,7 +262,7 @@ export class Dispatcher {
    * session close happens outside any request — no dispatcher in
    * scope).
    */
-  static sessionClose(ws: unknown, ctx: DispatchContext): void {
+  static sessionClose(ws: Bun.ServerWebSocket<WsData>, ctx: DispatcherContext): void {
     if (Dispatcher.watcherWs !== ws) return
     Dispatcher.watcherWs = undefined
     if (!ctx.setWatcherStatus || !ctx.getWatcherStatus || !ctx.notifyResourceUpdated) return
@@ -599,7 +519,7 @@ export class Dispatcher {
     const maxLines = params?.maxLines ?? null
     const range = params?.range ?? null
     const logPath = `${clientPath}/logs/latest.log`
-    const lines = await this.internals.readLinesFromFile(logPath)
+    const lines = await this.internals.readLogFile(logPath)
     const totalLines = lines.length
 
     // Range filter: `0` = most recent line in the file. Negative
@@ -813,7 +733,7 @@ export async function withHost<T>(host: HostProvider, fn: () => Promise<T>): Pro
  * is the one that published `WatcherStatus`, flip `connected: false`
  * via `setWatcherStatus(undefined_ws)` and fire a resource notification.
  */
-export function handleSessionClose(ws: unknown, ctx: DispatchContext): void {
+export function handleSessionClose(ws: Bun.ServerWebSocket<WsData>, ctx: DispatcherContext): void {
   Dispatcher.sessionClose(ws, ctx)
 }
 

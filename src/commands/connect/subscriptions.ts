@@ -10,11 +10,12 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { WsData } from './server.js'
 
 export interface SubscriptionRecord {
   subscriptionId: string
   /** Opaque WebSocket handle (Bun's `ServerWebSocket`). Typed as `unknown` so this module stays host-agnostic. */
-  ws: unknown
+  ws: Bun.ServerWebSocket<WsData>
   /** Provider's LogSubscription.unattach thunk. */
   unattach: () => Promise<void>
 }
@@ -28,7 +29,7 @@ export class SubscriptionRegistry {
    * Register a subscription. Returns the assigned id (which the caller
    * will hand to the consumer in the `attachLog` response).
    */
-  register(ws: unknown, unattach: () => Promise<void>): string {
+  register(ws: Bun.ServerWebSocket<WsData>, unattach: () => Promise<void>): string {
     return this.registerWithId(randomUUID(), ws, unattach)
   }
 
@@ -37,7 +38,7 @@ export class SubscriptionRegistry {
    * closure needs to reference the id before the underlying provider
    * subscription is created (so its pushLog calls can tag batches).
    */
-  registerWithId(subscriptionId: string, ws: unknown, unattach: () => Promise<void>): string {
+  registerWithId(subscriptionId: string, ws: Bun.ServerWebSocket<WsData>, unattach: () => Promise<void>): string {
     if (this.byId.has(subscriptionId)) {
       throw new Error(`subscription id collision: ${subscriptionId}`)
     }
@@ -94,7 +95,7 @@ export class SubscriptionRegistry {
    * Cascade-unattach every subscription owned by `ws`. Called from the
    * server's ws.close hook so a dropped client can't leak log handlers.
    */
-  async dropAllForWs(ws: unknown): Promise<void> {
+  async dropAllForWs(ws: Bun.ServerWebSocket<WsData>): Promise<void> {
     const key = ws as object
     const set = this.byWs.get(key)
     if (!set) return

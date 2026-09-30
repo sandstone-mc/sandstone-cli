@@ -8,6 +8,7 @@
 import type { HostProvider, LogSubscription } from '../../hosts/types.js'
 
 import type { Dispatcher } from './dispatch.js'
+import { WsData } from './server.js'
 
 /**
  * Per-WebSocket connection state. The server creates one when a client
@@ -42,6 +43,6 @@ export interface SessionContext {
  */
 export interface SubscriptionRecord {
   subscriptionId: string
-  ws: unknown
+  ws: Bun.ServerWebSocket<WsData>
   unattach: LogSubscription['unattach']
 }

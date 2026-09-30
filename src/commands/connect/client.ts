@@ -7,6 +7,7 @@
  * separate encoding.
  */
 import type * as rpc from './rpc.js'
+import { classifyWsMessage } from './rpc.js'
 import { SUBPROTOCOL_PREFIX } from './rpc.js'
 import type { ActiveSaveConfig } from '../../utils/activeSaveConfig.js'
 import type { EndpointFile } from './endpoint-file.js'
@@ -15,8 +16,10 @@ import {
   decodeStreamChunk,
   encodeRpc,
   encodeStreamChunk,
+  hexFromBytes,
+  hexToBytes,
+  STREAM_MAGIC,
 } from './codec.js'
-import { classifyWsMessage } from './codec-classify.js'
 
 export interface AttachLogSubscription {
   readonly subscriptionId: string
@@ -88,7 +91,7 @@ export class Client {
       const t = setTimeout(() => reject(new Error('welcome timed out')), timeoutMs)
       const onWelcomeMessage = (ev: MessageEvent) => {
         let parsed: unknown
-        try { parsed = decodeRpc(toBytes(ev.data)).value } catch {
+        try { parsed = decodeRpc(Bytes(ev.data)).value } catch {
           return
         }
         if (parsed && typeof parsed === 'object' && 'event' in parsed && (parsed as { event: unknown }).event === 'welcome') {
@@ -106,28 +109,13 @@ export class Client {
     return client
   }
 
-  // ─── inbound dispatch ───────────────────────────────────────────
-
   private handleMessage(ev: MessageEvent): void {
-    const buf = toBytes(ev.data)
-    if (typeof ev.data !== 'string' && buf.byteLength >= 17) {
-      const candidateStreamId = buf.slice(0, 16)
-      const candidateKey = hexFromBytes(candidateStreamId)
-      const record = this.streamsById.get(candidateKey)
-      if (record) {
-        // Chunks only arrive for inbound (readFile) streams, which
-        // always carry a controller. Outbound streams flow the
-        // other direction and don't receive chunks.
-        if (record.controller) {
-          const { chunk } = decodeStreamChunk(buf)
-          try {
-            record.controller.enqueue(chunk)
-          } catch {
-            // controller already closed
-          }
-        }
-        return
-      }
+    const buf = Bytes(ev.data)
+    if (typeof ev.data !== 'string' && buf.byteLength >= 17 && buf[0] === STREAM_MAGIC) {
+      const { streamId, chunk } = decodeStreamChunk(buf)
+      const record = this.streamsById.get(hexFromBytes(streamId))!
+      record.controller!.enqueue(chunk)
+      return
     }
     const msg = classifyWsMessage(buf)
     if (!msg) return
@@ -353,7 +341,7 @@ export class Client {
         while (true) {
           const { value, done: chunkDone } = await reader.read()
           if (chunkDone) break
-          this.ws.send(encodeStreamChunk(hexToBytesForWrite(streamId), value))
+          this.ws.send(encodeStreamChunk(hexToBytes(streamId), value))
         }
         this.ws.send(encodeRpc({
           method: 'streamEnd',
@@ -541,45 +529,12 @@ export async function connect(opts: ClientOptions): Promise<Client> {
   return Client.open(opts)
 }
 
-/** Normalise WS frame data to a single Uint8Array. */
-function toBytes(data: unknown): Uint8Array {
-  if (typeof data === 'string') return new TextEncoder().encode(data)
-  if (data instanceof ArrayBuffer) return new Uint8Array(data)
-  if (data instanceof Uint8Array) return data
-  // Bun delivers binary WS frames as `Uint8Array` directly; this
-  // path is only hit if some other transport hands us a Blob/ArrayBufferView
-  // variant. Return empty so the decoder can surface a clear error
-  // rather than silently dropping bytes.
-  if (typeof Blob !== 'undefined' && data instanceof Blob) {
-    // Web Blobs are async; in practice the daemon side sends
-    // ArrayBuffer. If we ever hit this path, we silently return
-    // empty and the caller's decodeRpc will throw a parse error
-    // — that's the same surface as if no data arrived.
-    return new Uint8Array(0)
+/** Assert WS frame data is a Uint8Array (Bun's WS contract). */
+function Bytes(data: unknown): Uint8Array {
+  if (!(data instanceof Uint8Array)) {
+    throw new Error(`expected Uint8Array frame, got ${typeof data}${data instanceof Blob ? ' (Blob)' : ''}`)
   }
-  if (ArrayBuffer.isView(data)) {
-    return new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-  }
-  return new Uint8Array(0)
-}
-
-/** Hex-encode a 16-byte streamId. Local helper for the client. */
-function hexFromBytes(bytes: Uint8Array): string {
-  let out = ''
-  for (let i = 0; i < bytes.length; i++) {
-    out += bytes[i].toString(16).padStart(2, '0')
-  }
-  return out
-}
-
-/** Inverse: 32-char hex to 16 raw bytes. */
-function hexToBytesForWrite(hex: string): Uint8Array {
-  if (hex.length !== 32) throw new Error(`streamId must be 32 hex chars, got ${hex.length}`)
-  const out = new Uint8Array(16)
-  for (let i = 0; i < 16; i++) {
-    out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16)
-  }
-  return out
+  return data
 }
 
 function rpcErrorToException(e: rpc.RpcError): Error {

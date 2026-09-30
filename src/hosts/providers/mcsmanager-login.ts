@@ -144,6 +144,37 @@ export class McsManagerLoginHost implements HostProvider {
     return Buffer.from(ab)
   }
 
+  /**
+   * Streaming read. Uses the same `files/download` handshake as the
+   * buffering variant, then returns the HTTP response body directly —
+   * `fetch()` already exposes the body as a `ReadableStream<Uint8Array>`
+   * so chunks flow as the panel's download endpoint ships them.
+   *
+   * Size comes from `Content-Length` when the panel sets it; the
+   * daemon's dispatch surface ignores `undefined` so callers that
+   * need progress can fall back to byte counting.
+   */
+  async readFileStream(path: ServerPath): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }> {
+    this.requireConnected('mcsmanager-login')
+    const dl = await this.api<FileDownloadResponse>('files/download', { file_name: path })
+    if (dl.status !== 200 || !dl.data?.password) {
+      throw new Error(`MCSManager download failed: ${JSON.stringify(dl)}`)
+    }
+    const host = new URL(this.config.endpoint).hostname
+    const port = dl.data.addr.split(':')[1]
+    const url = `http://${host}:${port}/download/${dl.data.password}/${path}`
+    const resp = await fetch(url)
+    if (!resp.ok) {
+      throw new Error(`MCSManager download HTTP ${resp.status}`)
+    }
+    const sizeHeader = resp.headers.get('content-length')
+    const size = sizeHeader ? Number(sizeHeader) : undefined
+    if (!resp.body) {
+      throw new Error(`MCSManager download returned no body`)
+    }
+    return { stream: resp.body as ReadableStream<Uint8Array>, size }
+  }
+
   async writeFile(path: ServerPath, data: Buffer | string): Promise<void> {
     this.requireConnected('mcsmanager-login')
     const buffer = typeof data === 'string' ? Buffer.from(data) : data
@@ -166,6 +197,120 @@ export class McsManagerLoginHost implements HostProvider {
     )
 
     await this.uploadChunks(meta.data.id, port, buffer)
+  }
+
+  /**
+   * Streaming write. Two paths:
+   *
+   *  - **Size known** (`opts.size !== undefined`): call `upload-new`
+   *    up front with the declared size, then ship each arriving
+   *    chunk as an `upload-piece` request. True end-to-end
+   *    streaming — nothing is buffered beyond the per-chunk upload
+   *    in flight.
+   *
+   *  - **Size unknown**: MCSManager's chunked-upload protocol
+   *    requires the total size up front in `upload-new`, which the
+   *    streaming shape can't provide. Accept the WritableStream API
+   *    (consumers see the same one-chunk-at-a-time flow as every
+   *    other host) but buffer internally until `close()` fires, then
+   *    run the existing chunked upload. Memory cost is the file
+   *    size — bounded by the host's available heap.
+   */
+  async writeFileStream(path: ServerPath, opts?: { size?: number }): Promise<WritableStream<Uint8Array>> {
+    this.requireConnected('mcsmanager-login')
+    const filename = path.replace(/^.*\//, '')
+    const uploadDir = path.replace(/[^/]+$/, '')
+    const uploadStart = await this.api<FileUploadResponse>('files/upload', {
+      file_name: filename,
+      upload_dir: uploadDir,
+    })
+    const port = uploadStart.data.addr.split(':')[1] as `${number}`
+    const uploadPath = uploadStart.data.password
+
+    if (opts?.size !== undefined) {
+      // True streaming — register the upload up front, then coalesce
+      // arriving chunks into PIECE_SIZE pieces and ship each via
+      // `upload-piece`. Matches the chunked-upload protocol the
+      // panel expects (the buffered `writeFile` path uses the same
+      // size in `uploadChunks`).
+      const meta = await this.api<UploadNewResponse>(
+        'upload-new',
+        {
+          filename,
+          overwrite: 'true',
+          size: `${opts.size}`,
+          sum: '',
+        },
+        { port_override: port, path: uploadPath },
+      )
+      const uploadId = meta.data.id
+      const expectedSize = opts.size
+      // Same chunk size as the buffered `uploadChunks` loop — keeps
+      // the panel-side behaviour consistent for both code paths.
+      const PIECE_SIZE = 2_097_374
+      let offset = 0
+      let pending: Uint8Array[] = []
+      let pendingBytes = 0
+      const host = this
+      return new WritableStream<Uint8Array>({
+        async write(chunk) {
+          pending.push(chunk)
+          pendingBytes += chunk.byteLength
+          // Drain full pieces; keep the tail (< PIECE_SIZE) for
+          // the next write() / close().
+          while (pendingBytes >= PIECE_SIZE) {
+            const merged = Buffer.concat(pending, pendingBytes)
+            const take = merged.subarray(0, PIECE_SIZE)
+            await host.uploadChunk(uploadId, port, offset, take)
+            offset += PIECE_SIZE
+            const tail = merged.subarray(PIECE_SIZE)
+            pending = tail.byteLength > 0 ? [tail] : []
+            pendingBytes = tail.byteLength
+          }
+        },
+        async close() {
+          if (pendingBytes > 0) {
+            const tail = Buffer.concat(pending, pendingBytes)
+            await host.uploadChunk(uploadId, port, offset, tail)
+            offset += tail.byteLength
+          }
+          if (offset !== expectedSize) {
+            throw new Error(
+              `MCSManager upload size mismatch: wrote ${offset}, expected ${expectedSize}`,
+            )
+          }
+        },
+      })
+    }
+
+    // Buffer fallback (no size known up front).
+    const chunks: Uint8Array[] = []
+    let totalSize = 0
+    const host = this
+    return new WritableStream<Uint8Array>({
+      write(chunk) {
+        chunks.push(chunk)
+        totalSize += chunk.byteLength
+      },
+      async close() {
+        const buffer = Buffer.concat(chunks, totalSize)
+        const meta = await host.api<UploadNewResponse>(
+          'upload-new',
+          {
+            filename,
+            overwrite: 'true',
+            size: `${buffer.byteLength}`,
+            sum: '',
+          },
+          { port_override: port, path: uploadPath },
+        )
+        await host.uploadChunks(meta.data.id, port, buffer)
+      },
+      abort() {
+        // Drop the buffered chunks — consumer cancelled before close.
+        chunks.length = 0
+      },
+    })
   }
 
   async attachLog(onChunk: LogChunkHandler): Promise<LogSubscription> {
@@ -371,20 +516,32 @@ export class McsManagerLoginHost implements HostProvider {
     let offset = 0
     while (offset !== buffer.byteLength) {
       const next = Math.min(offset + 2_097_374, buffer.byteLength)
-      const form = new FormData()
-      form.append(
-        'file',
-        new Blob([buffer.subarray(offset, next)], {
-          type: 'application/octet-stream',
-        }),
-      )
-      await this.api<string>(
-        'upload-piece',
-        { offset: `${offset}` },
-        { port_override: port, path: uploadId, body: form },
-      )
+      await this.uploadChunk(uploadId, port, offset, buffer.subarray(offset, next))
       offset = next
     }
+  }
+
+  /**
+   * Single-piece `upload-piece` request. Used by both the streaming
+   * `writeFileStream` (one call per arriving chunk) and the
+   * buffered variant (chunked loop in {@link uploadChunks}).
+   */
+  private async uploadChunk(
+    uploadId: string,
+    port: `${number}`,
+    offset: number,
+    chunk: Uint8Array,
+  ): Promise<void> {
+    const form = new FormData()
+    form.append(
+      'file',
+      new Blob([chunk], { type: 'application/octet-stream' }),
+    )
+    await this.api<string>(
+      'upload-piece',
+      { offset: `${offset}` },
+      { port_override: port, path: uploadId, body: form },
+    )
   }
 
   /**

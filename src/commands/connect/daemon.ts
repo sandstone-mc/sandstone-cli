@@ -128,6 +128,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   // path runs in `sand run` direct mode — both must agree on defaults
   // (sandstone version, RCON port/password auto-derivation) and on
   // member lifecycle order.
+  console.error(`[daemon-trace] step 1: bootstrapping host=${opts.hostType}`)
   let bootstrapResult: Awaited<ReturnType<typeof bootstrapHosts>>
   try {
     bootstrapResult = await bootstrapHosts({
@@ -135,6 +136,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       perHostConfig: opts.perHostConfig,
       userProvidedHostSettings: opts.userProvidedHostSettings,
     })
+    console.error(`[daemon-trace] step 1 done: bootstrap returned`)
   } catch (e) {
     if (e instanceof BootstrapError) {
       throw new DaemonError(e.message, e.code)
@@ -273,6 +275,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
 
   // Race the server start against an outer timeout — if Bun.serve
   // fails (port in use), we'd otherwise hang on `server.port` access.
+  console.error(`[daemon-trace] step 5: starting WS server`)
   const running = startServer({
     host,
     secret,
@@ -285,11 +288,11 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       shutdownReason = 'shutdown-rpc'
       void handle.shutdown()
     },
-    activeConfig,
     // Closure captures `activeConfig` by reference — the `let`
     // declaration above makes it mutable. Future `publishConfig` calls
     // (from the watcher) reassign it and all subsequent dispatch
     // contexts see the new value via the same closure.
+    getActiveConfig: () => activeConfig,
     setActiveConfig: (cfg) => {
       activeConfig = cfg
     },
@@ -382,6 +385,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   const done = new Promise<void>((r) => {
     resolveDone = r
   })
+  console.error(`[daemon-trace] step 4: sandstone.config snapshot loaded=${!!activeConfig}`)
   const handle: DaemonHandle = {
     host,
     endpoint,
@@ -424,6 +428,17 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     if (process.platform === 'win32') {
       process.on('SIGBREAK', onSignal as (s: NodeJS.Signals) => void)
     }
+    // Diagnostic: surface uncaught exceptions with their source so
+    // we can find which stream/socket is dropping an `error` event
+    // before crashing the process. Logs to stderr (already mirrored
+    // to the parent's test log when running under the harness).
+    process.on('uncaughtException', (err, origin) => {
+      console.error(`[daemon-trace] uncaughtException: ${err.message}\n${err.stack ?? '<no stack>'}\n  origin=${typeof origin === 'string' ? origin : 'unknown'}`)
+    })
+    process.on('unhandledRejection', (reason) => {
+      const err = reason instanceof Error ? reason : new Error(String(reason))
+      console.error(`[daemon-trace] unhandledRejection: ${err.message}\n${err.stack ?? '<no stack>'}`)
+    })
   } catch (err) {
     // Signal registration failed (extremely unlikely on POSIX). Clean up
     // the endpoint and re-throw so the caller knows startup failed —

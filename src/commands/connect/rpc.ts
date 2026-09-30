@@ -1,9 +1,13 @@
 /**
  * Wire protocol for the `sand connect` daemon.
  *
- * JSON-over-WebSocket envelopes with a discriminator on shape:
- *  - Client → server: `{ id, method, params? }` → `{ id, result? | error? }`
- *  - Server → client: `{ event, data }` (no `id`)
+ * Msgpack-over-WebSocket envelopes with two frame types:
+ *  - Control envelope (msgpack): `{ id, method, params? }` (request)
+ *    and `{ id, result? | error? }` (response). Server-to-client
+ *    notifications use `{ event, data }` (no `id`), matching the
+ *    pre-msgpack shape so existing handlers don't need to change.
+ *  - Binary chunk frame: 16-byte streamId + raw bytes. Used to
+ *    stream file payloads between WS peers (see `codec.ts`).
  *
  * JSON-RPC-style error codes for the standard cases, plus a -32xxx range
  * for host-specific errors. The mapping from host error classes lives in
@@ -12,6 +16,7 @@
 
 import { HostAuthError, NotConnectedError, UnsupportedCapabilityError } from '../../hosts/errors.js'
 import type { ActiveSaveConfig } from '../../utils/activeSaveConfig.js'
+import { decodeRpc } from './codec.js'
 
 /** Bump when the on-wire shape changes incompatibly. */
 export const PROTOCOL_VERSION = 1
@@ -66,6 +71,7 @@ export type RpcMethod =
   | 'publishWatcherStatus'
   | 'getWatcherStatus'
   | 'publishTriggerBuild'
+  | 'streamEnd'
 
 /**
  * Union of every possible RPC handler return type. `dispatch` and
@@ -148,11 +154,6 @@ export interface HostStateEvent {
   reason?: string
 }
 
-/** Final message sent before the WS closes during shutdown. */
-export interface DaemonShutdownEvent {
-  reason: 'signal' | 'shutdown-rpc' | 'host-lost'
-}
-
 /**
  * Pushed whenever the active `sandstone.config.ts` changes — either at
  * daemon startup (one immediate event after `welcome`) or after a hot
@@ -195,19 +196,71 @@ export interface ReadFileParams {
   path: string
 }
 export interface ReadFileResult {
-  /** base64-encoded file contents */
-  data: string
-  size: number
+  /** 16-byte streamId hex-encoded. */
+  streamId: string
+  /** Best-effort size from fs.stat (may be unknown). */
+  totalSize?: number
 }
 
 export interface WriteFileParams {
+  /**
+   * Destination path on the host. Chunks flow on the binary
+   * channel after the RPC resolves — wire params carry only the
+   * path; the stream itself is out-of-band so msgpack can encode
+   * the envelope without paying to carry a non-serializable
+   * ReadableStream.
+   */
   path: string
   /**
-   * File contents. Always base64 unless `encoding: 'utf-8'` is set, in
-   * which case it's a UTF-8 string.
+   * Optional final byte count. Hosts whose upload protocol needs
+   * a known size up front (e.g. MCSManager's chunked-upload
+   * handshake) stream chunks through `upload-piece` when this is
+   * supplied; otherwise they buffer until close. Hosts with
+   * native streaming backends ignore it.
    */
-  data: string
-  encoding?: 'utf-8' | 'base64'
+  size?: number
+}
+export interface WriteFileResult {
+  /** 16-byte streamId hex-encoded. */
+  streamId: string
+}
+
+/**
+ * Notification sent on either side when a stream finishes. Not a
+ * request/response — just an envelope with `event` + `data`. Both
+ * peers may emit it (whichever side closes the stream first).
+ */
+export interface StreamEndEvent {
+  event: 'streamEnd'
+  data: {
+    /** 16-byte streamId hex-encoded. */
+    streamId: string
+    /** Final byte count (read or written, depending on direction). */
+    bytes: number
+  }
+}
+
+/**
+ * Notification sent when a stream aborts on the server side — the
+ * host's read/write stream errored (SFTP drop, file deleted mid-read,
+ * disk full, etc.). Distinct from {@link StreamEndEvent} so the
+ * client can surface the host error to the consumer instead of
+ * silently resolving as a successful zero-byte completion.
+ */
+export interface StreamErrorEvent {
+  event: 'streamError'
+  data: {
+    /** 16-byte streamId hex-encoded. */
+    streamId: string
+    /**
+     * Stable error code. Stable across the codebase so consumers
+     * can branch on it (`code === 1` for I/O, etc.). Falls back to
+     * `0` when the host surfaced a non-numeric error.
+     */
+    code: number
+    /** Human-readable error message from the host transport. */
+    message: string
+  }
 }
 
 export interface ExecuteRawCommandParams {
@@ -611,42 +664,60 @@ export function errorToRpc(err: unknown): RpcError {
  * Try to parse raw WS text into a {@link RpcRequest}. Returns a
  * fully-formed RPC error response when the payload is malformed.
  *
- * `null` is returned only for the "no id, nothing to reply to" case (a
- * raw event or garbage that isn't a request).
+ * `null` is returned when the payload isn't a request — either it's
+ * a notification (has `method` but no `id`), an event (has `event`),
+ * or plain junk. Callers should fall through to {@link tryParseEvent}
+ * + {@link tryParseMethodNotification} to route the non-request
+ * shapes.
+ *
+ * A notification is NOT classified as a malformed request — there's
+ * no peer to respond to, and the `Missing id` error path would
+ * otherwise cause the server to close the WS on every well-formed
+ * client notification (e.g. `streamEnd` after a `writeFile`).
  */
 export function tryParseRequest(raw: string | ArrayBuffer | Uint8Array): RpcRequest | RpcError | null {
-  const text = typeof raw === 'string' ? raw : new TextDecoder().decode(raw)
+  // Normalize to a Uint8Array. String inputs are UTF-8 encoded
+  // before msgpack decode — Bun's WS rarely delivers strings, but
+  // old debug clients (and tests) may send JSON text frames.
+  const buf = typeof raw === 'string' ? new TextEncoder().encode(raw) : raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw
   let parsed: unknown
   try {
-    parsed = JSON.parse(text)
+    parsed = decodeRpc(buf).value
   } catch {
-    return { code: RpcErrorCode.ParseError, message: 'Invalid JSON' }
+    return { code: RpcErrorCode.ParseError, message: 'Invalid msgpack' }
   }
   if (!parsed || typeof parsed !== 'object') {
-    return { code: RpcErrorCode.InvalidRequest, message: 'Request must be a JSON object' }
+    return { code: RpcErrorCode.InvalidRequest, message: 'Request must be an object' }
   }
   const obj = parsed as Record<string, unknown>
-  if (typeof obj.method !== 'string') {
+  const hasMethod = typeof obj.method === 'string'
+  const hasId = typeof obj.id === 'string' || typeof obj.id === 'number'
+  // No method AND no id → not a request (event, notification, or junk).
+  if (!hasMethod && !hasId) return null
+  // Has id but no method → malformed request (no one to notify).
+  if (!hasMethod) {
     return { code: RpcErrorCode.InvalidRequest, message: 'Missing method' }
   }
-  if (typeof obj.id !== 'string' && typeof obj.id !== 'number') {
-    return { code: RpcErrorCode.InvalidRequest, message: 'Missing id' }
-  }
+  // Has method but no id → notification. Return null so the caller
+  // routes via {@link tryParseMethodNotification}. Don't surface a
+  // `Missing id` parse error — there's no peer to send it to.
+  if (!hasId) return null
   // `method` is a wire string here — the server validates against
-  // `RpcMethod` via `narrowMethod` before invoking `dispatch`.
-  return { id: obj.id, method: obj.method as RpcMethod, params: obj.params }
+  // `RpcMethod` via `narrowMethod` before invoking `dispatch`. `id`
+  // is narrowed to `string | number` by the `hasId` check above.
+  return { id: obj.id as string | number, method: obj.method as RpcMethod, params: obj.params }
 }
 
 /**
- * Try to parse raw WS text into an {@link RpcEvent}. Returns null when
- * the payload isn't an event (i.e. it's a request/response — the caller
- * should route differently).
+ * Try to parse raw WS bytes into an {@link RpcEvent}. Returns null
+ * when the payload isn't an event (i.e. it's a request/response —
+ * the caller should route differently).
  */
 export function tryParseEvent(raw: string | ArrayBuffer | Uint8Array): RpcEvent | null {
-  const text = typeof raw === 'string' ? raw : new TextDecoder().decode(raw)
+  const buf = typeof raw === 'string' ? new TextEncoder().encode(raw) : raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw
   let parsed: unknown
   try {
-    parsed = JSON.parse(text)
+    parsed = decodeRpc(buf).value
   } catch {
     return null
   }
@@ -654,6 +725,32 @@ export function tryParseEvent(raw: string | ArrayBuffer | Uint8Array): RpcEvent 
   const obj = parsed as Record<string, unknown>
   if (typeof obj.event !== 'string') return null
   return { event: obj.event, data: obj.data }
+}
+
+/**
+ * Try to parse raw WS bytes into a JSON-RPC-style `{method, params}`
+ * NOTIFICATION (no `id`, no `event` discriminator). Returns null when
+ * the payload is a request (has `id`) or an event (has `event`).
+ *
+ * Used by the server's WS message handler to recognise the client's
+ * `streamEnd` notification — the client sends it as `{method:
+ * 'streamEnd', params: {streamId, bytes}}` (no id) after pumping the
+ * last writeFile chunk, so the server can finalise the host's
+ * WritableStream and fan a `streamEnd` envelope back.
+ */
+export function tryParseMethodNotification(raw: string | ArrayBuffer | Uint8Array): { method: string; params: unknown } | null {
+  const buf = typeof raw === 'string' ? new TextEncoder().encode(raw) : raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw
+  let parsed: unknown
+  try {
+    parsed = decodeRpc(buf).value
+  } catch {
+    return null
+  }
+  if (!parsed || typeof parsed !== 'object') return null
+  const obj = parsed as Record<string, unknown>
+  if (typeof obj.method !== 'string') return null
+  if ('id' in obj) return null
+  return { method: obj.method, params: obj.params }
 }
 
 // ---------------------------------------------------------------------------

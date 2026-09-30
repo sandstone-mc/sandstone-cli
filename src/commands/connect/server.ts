@@ -24,8 +24,10 @@ import {
   ok,
   err,
   tryParseEvent,
+  tryParseMethodNotification,
   tryParseRequest,
   type RpcError,
+  type RpcMethod,
   type RpcResponse,
   type WelcomeEvent,
 } from './rpc.js'
@@ -34,6 +36,8 @@ import { RpcHandlerError, ShutdownSignal, dispatch, narrowMethod, withHost, hand
 import type { ActiveConfig } from './active-config.js'
 import { type RebuildState, type WatcherStatus, notification } from './rpc.js'
 import { SubscriptionRegistry } from './subscriptions.js'
+import { StreamRegistry } from './streams.js'
+import { encodeRpc, decodeStreamChunk, streamIdHex } from './codec.js'
 import type { HostProvider } from '../../hosts/types.js'
 import type { SessionContext } from './types.js'
 
@@ -42,7 +46,7 @@ interface WsData {
   secret: string
 }
 
-/** Max payload for read/write — large enough for a full server jar base64'd. */
+/** Max payload for read/write — large enough for a full Minecraft server jar. */
 const MAX_PAYLOAD = 128 * 1024 * 1024
 
 /** Coalesce log lines across ≤50ms windows; also cap batch size. */
@@ -69,8 +73,13 @@ export interface ServerOptions {
    *
    * `undefined` only when the daemon was started without a project
    * root (unusual; handlers surface that as `NotConnected`).
+   *
+   * Implemented as a getter (not a snapshot) so each dispatch context
+   * reads the current value — `publishConfig` updates the closure-
+   * side variable and subsequent messages see the new config without
+   * requiring a daemon restart.
    */
-  activeConfig?: ActiveConfig
+  getActiveConfig?: () => ActiveConfig | undefined
   /**
    * Mutator for the live snapshot. The daemon holds the source of
    * truth and supplies this closure so `publishConfig` can atomically
@@ -134,6 +143,7 @@ export interface RunningServer {
 
 export function startServer(opts: ServerOptions): RunningServer {
   const subscriptions = new SubscriptionRegistry()
+  const streams = new StreamRegistry()
   const startedAt = Date.now()
   // Map (not WeakMap) so we can iterate for `broadcast` — teardown sends
   // a `daemonShutdown` event to every open session before closing the
@@ -152,12 +162,12 @@ export function startServer(opts: ServerOptions): RunningServer {
   // (publishLog, publishConfig, publishWatcherStatus) and any
   // broadcast between them would falsely reject the later ones.
   function broadcast(eventName: string, data: unknown): void {
-    const envelope = JSON.stringify(event(eventName, data))
+    const envelope = encodeRpc(event(eventName, data))
     const isShutdown = eventName === 'daemonShutdown'
     for (const [ws, ctx] of sessions) {
       if (isShutdown) ctx.shuttingDown = true
       try {
-        ws.sendText(envelope)
+        ws.send(envelope)
       } catch {
         // Client may have just disconnected; ignore — `close` will
         // clean up its session entry.
@@ -191,7 +201,7 @@ export function startServer(opts: ServerOptions): RunningServer {
         pid: process.pid,
         startedAt: new Date(startedAt).toISOString(),
       }
-      ws.sendText(JSON.stringify(event('welcome', welcome)))
+      ws.send(encodeRpc(event('welcome', welcome)))
     },
 
     async message(ws, raw) {
@@ -200,46 +210,54 @@ export function startServer(opts: ServerOptions): RunningServer {
         ws.close(1011, 'no session')
         return
       }
-      if (ctx.shuttingDown) {
-        // After daemonShutdown was sent, ignore further RPCs. Reply with
-        // a synthetic error so the client doesn't hang waiting on a
-        // request that will never resolve.
-        const parsed = tryParseRequest(raw)
-        if (parsed && 'method' in parsed && 'id' in parsed) {
-          ws.sendText(
-            JSON.stringify({
-              id: parsed.id,
-              error: { code: -32006, message: 'daemon shutting down' },
-            } satisfies RpcResponse),
-          )
+
+      // Binary frame: treat as a stream chunk ONLY when the first 16
+      // bytes match a registered `writeFile` stream. Control
+      // envelopes (request/response/event/notification) ride on
+      // msgpack-encoded binary frames too — they're typically ≥17
+      // bytes (welcome event is ~222 bytes) so a length check alone
+      // can't disambiguate. Peek the registry: an unknown streamId
+      // means this isn't a stream frame, fall through to envelope
+      // decoding.
+      if (typeof raw !== 'string' && raw.byteLength >= 17) {
+        const buf = raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw
+        const candidateStreamId = buf.slice(0, 16)
+        const candidateKey = streamIdHex(candidateStreamId)
+        const stream = streams.get(candidateKey)
+        if (stream && stream.kind === 'writeFile') {
+          const { chunk } = decodeStreamChunk(buf)
+          stream.bytes += chunk.byteLength
+          const writer = streams.writer(candidateKey)
+          if (writer) {
+            // `writer.write()` returns a promise that resolves when
+            // the chunk is accepted by the WritableStream's queue.
+            // We don't await — backpressure is naturally applied
+            // when the WritableStream's queue fills up.
+            void writer.write(chunk).catch((err: unknown) => {
+              streams.close(candidateKey, stream.bytes, err instanceof Error ? err : new Error(String(err)))
+            })
+          }
+          return
         }
-        return
+        // Not a registered stream frame — fall through to envelope
+        // decoding below. The first 16 bytes of a msgpack-encoded
+        // envelope don't collide with a streamId often enough to
+        // matter; if it does, the envelope decoder will surface a
+        // parse error and the caller can debug.
       }
 
-      const parsed = tryParseRequest(raw)
-      if (!parsed) {
-        if (tryParseEvent(raw)) return
-        return
-      }
-      if ('code' in parsed) {
-        // It's a parse-failure response from the codec — has no `id`
-        // for the malformed payload, so we just close.
-        const rpcErr = parsed as RpcError
-        if ('id' in rpcErr && typeof (rpcErr as { id?: unknown }).id !== 'undefined') {
-          ws.sendText(JSON.stringify(err((rpcErr as { id: string | number }).id, rpcErr)))
-        } else {
-          ws.close(1003, rpcErr.message)
-        }
-        return
-      }
-
+      // Build the dispatch context up front so both the request +
+      // notification branches can use it. Hoisted from below so
+      // the notification branch (which runs before the request
+      // handler declares it) doesn't hit a TDZ.
       const dispatchCtx: DispatchContext = {
         host: opts.host,
         subscriptions,
         ws,
+        streams,
         pushLog: (lines, subscriptionId) => pushLog(ctx, ws, subscriptionId, lines),
         startedAt,
-        activeConfig: opts.activeConfig,
+        activeConfig: opts.getActiveConfig?.(),
         setActiveConfig: opts.setActiveConfig,
         getRebuildState: opts.getRebuildState,
         setRebuildState: opts.setRebuildState,
@@ -255,14 +273,101 @@ export function startServer(opts: ServerOptions): RunningServer {
           // legacy `{event, data}` shape that `broadcast` uses for
           // custom events). Clients without a subscription for `uri`
           // ignore the notification per spec.
-          const envelope = JSON.stringify(notification(
+          const envelope = encodeRpc(notification(
             'notifications/resources/updated',
             { uri },
           ))
           for (const [ws] of sessions) {
-            try { ws.sendText(envelope) } catch { /* disconnected */ }
+            try { ws.send(envelope) } catch { /* disconnected */ }
           }
         },
+      }
+
+      if (ctx.shuttingDown) {
+        // After daemonShutdown was sent, ignore further RPCs. Reply with
+        // a synthetic error so the client doesn't hang waiting on a
+        // request that will never resolve.
+        const parsed = tryParseRequest(raw)
+        if (parsed && 'method' in parsed && 'id' in parsed) {
+          ws.send(encodeRpc({
+            id: parsed.id,
+            error: { code: -32006, message: 'daemon shutting down' },
+          } satisfies RpcResponse))
+        }
+        return
+      }
+
+      const parsed = tryParseRequest(raw)
+      if (!parsed) {
+        if (tryParseEvent(raw)) return
+        // JSON-RPC-style `{method, params}` notification (no id, no
+        // event). Today the only sender is the client pumping the
+        // last writeFile chunk — `streamEnd` signals the server to
+        // finalise the host's WritableStream and fan a `streamEnd`
+        // envelope back. Route through dispatch (with a synthetic id
+        // — dispatch doesn't read it) so the existing handler
+        // runs without a parallel code path.
+        const notif = tryParseMethodNotification(raw)
+        if (notif) {
+          const notifStart = Date.now()
+          let notifMethod: RpcMethod
+          try {
+            notifMethod = narrowMethod(notif.method)
+          } catch (e) {
+            const rpcErr = e instanceof RpcHandlerError ? e.rpc : {
+              code: -32603,
+              message: e instanceof Error ? e.message : String(e),
+            }
+            console.error(`[ws] ← notification ${notif.method} → err:${rpcErr.code} ${rpcErr.message} (${Date.now() - notifStart}ms) — unknown notification method`)
+            return
+          }
+          console.error(`[ws] ← notification ${notifMethod} params=${JSON.stringify(notif.params)}`)
+          try {
+            await withHost(opts.host, () =>
+              dispatch(dispatchCtx, {
+                id: `__notif_${Date.now()}_${Math.random()}`,
+                method: notifMethod,
+                params: notif.params,
+              }),
+            )
+            console.error(`[ws] → notification ${notifMethod} ok (${Date.now() - notifStart}ms)`)
+          } catch (e) {
+            if (e instanceof ShutdownSignal) {
+              // Notification-initiated shutdown (today: not used by
+              // streamEnd, but kept for forward-compat). Reply path
+              // is a no-op for notifications — just broadcast the
+              // shutdown event and let the rest of the path run.
+              broadcast('daemonShutdown', { reason: 'shutdown-rpc' })
+              console.error(`[ws] → notification ${notifMethod} shutdown-rpc (${Date.now() - notifStart}ms)`)
+              queueMicrotask(() => {
+                void opts.onShutdown()
+              })
+              return
+            }
+            const rpcErr = e instanceof RpcHandlerError ? e.rpc : {
+              code: -32603,
+              message: e instanceof Error ? e.message : String(e),
+            }
+            console.error(`[ws] → notification ${notifMethod} err:${rpcErr.code} ${rpcErr.message} (${Date.now() - notifStart}ms)`)
+            // Notification errors are not fatal — the sender can't
+            // receive a reply anyway, so logging is the only
+            // surface. Don't shut the daemon down on notification
+            // errors.
+          }
+          return
+        }
+        return
+      }
+      if ('code' in parsed) {
+        // It's a parse-failure response from the codec — has no `id`
+        // for the malformed payload, so we just close.
+        const rpcErr = parsed as RpcError
+        if ('id' in rpcErr && typeof (rpcErr as { id?: unknown }).id !== 'undefined') {
+          ws.send(encodeRpc(err((rpcErr as { id: string | number }).id, rpcErr)))
+        } else {
+          ws.close(1003, rpcErr.message)
+        }
+        return
       }
 
       // Narrow the wire-string method to RpcMethod so `dispatch<M>` is
@@ -281,13 +386,12 @@ export function startServer(opts: ServerOptions): RunningServer {
           dispatch(dispatchCtx, { ...parsed, method: typedMethod }),
         )
         response = ok(parsed.id, result)
-        response = ok(parsed.id, result)
       } catch (e) {
         if (e instanceof ShutdownSignal) {
           // Reply OK to the requester, then broadcast the shutdown
           // event to every session (including this one) so all clients
           // get a chance to flush + close cleanly.
-          ws.sendText(JSON.stringify(ok(parsed.id, null)))
+          ws.send(encodeRpc(ok(parsed.id, null)))
           for (const subId of ctx.pendingBySub.keys()) flushLogs(ctx, ws, subId)
           broadcast('daemonShutdown', { reason: 'shutdown-rpc' })
           console.error(`[ws] → ${parsed.method} id=${parsed.id} shutdown-rpc (${Date.now() - startMs}ms)`)
@@ -310,7 +414,7 @@ export function startServer(opts: ServerOptions): RunningServer {
           message: e instanceof Error ? e.message : String(e),
         }
         response = err(parsed.id, rpcErr)
-        ws.sendText(JSON.stringify(response))
+        ws.send(encodeRpc(response))
         const status = `err:${rpcErr.code}`
         if (opts.getExpectedShutdown?.()) {
           console.error(
@@ -326,7 +430,7 @@ export function startServer(opts: ServerOptions): RunningServer {
         })
         return
       }
-      ws.sendText(JSON.stringify(response))
+      ws.send(encodeRpc(response))
       const status = 'ok'
       console.error(
         `[ws] → ${parsed.method} id=${parsed.id} ${status} result=${JSON.stringify(response.result)} (${Date.now() - startMs}ms)`,
@@ -349,15 +453,19 @@ export function startServer(opts: ServerOptions): RunningServer {
         setWatcherStatus: opts.setWatcherStatus,
         getWatcherStatus: opts.getWatcherStatus,
         notifyResourceUpdated: (uri: string) => {
-          const envelope = JSON.stringify(notification(
+          const envelope = encodeRpc(notification(
             'notifications/resources/updated',
             { uri },
           ))
           for (const [session] of sessions) {
-            try { session.sendText(envelope) } catch { /* disconnected */ }
+            try { session.sendBinary(envelope) } catch { /* disconnected */ }
           }
         },
       } as unknown as DispatchContext)
+      // Force-close every stream belonging to this session. Rejects
+      // their `closed` promises so the originating RPC handlers can
+      // surface an error rather than hanging forever.
+      streams.closeAll(new Error('ws session closed'))
       console.log(`[ws] connection closed (${ws.remoteAddress})`)
     },
   }
@@ -435,7 +543,7 @@ function flushLogs(ctx: SessionContext, ws: ServerWebSocket<WsData>, subscriptio
   const pending = ctx.pendingBySub.get(subscriptionId)
   if (!pending || pending.length === 0) return
   const batch = pending.splice(0, LOG_MAX_BATCH)
-  ws.sendText(JSON.stringify(event('log', { subscriptionId, lines: batch })))
+  ws.send(encodeRpc(event('log', { subscriptionId, lines: batch })))
   if (pending.length > 0) {
     ctx.flushTimerBySub.set(subscriptionId, setTimeout(() => {
       ctx.flushTimerBySub.delete(subscriptionId)

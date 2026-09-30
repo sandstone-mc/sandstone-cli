@@ -1,5 +1,6 @@
 import { join as pathJoin } from 'node:path'
 import { createHash } from 'node:crypto'
+import { Readable, Writable } from 'node:stream'
 
 import { RconClient } from '../rcon-client.js'
 import { NotConnectedError } from '../errors.js'
@@ -712,6 +713,25 @@ export class IntegratedHost implements HostProvider {
     return await fs.readBytes(full)
   }
 
+  /**
+   * Stream the file directly from disk. Wraps `fs.createReadStream`
+   * in a web `ReadableStream` so the daemon can pipe chunks via the
+   * Web Streams API all the way through.
+   */
+  async readFileStream(path: ServerPath): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }> {
+    this.requireConnected('integrated')
+    const full = pathJoin(this.serverDir, path)
+    const { createReadStream, statSync } = await import('node:fs')
+    let size: number | undefined
+    try {
+      size = statSync(full).size
+    } catch {
+      // Best-effort; some callers don't have a meaningful size.
+    }
+    const node = createReadStream(full)
+    return { stream: Readable.toWeb(node) as ReadableStream<Uint8Array>, size }
+  }
+
   async writeFile(path: ServerPath, data: Buffer | string): Promise<void> {
     this.requireConnected('integrated')
     const full = pathJoin(this.serverDir, path)
@@ -719,6 +739,24 @@ export class IntegratedHost implements HostProvider {
     await (typeof data === 'string'
       ? fs.writeText(full, data)
       : fs.writeBytes(full, data))
+  }
+
+  /**
+   * Stream-write to disk. Returns a `WritableStream` the caller
+   * pipes chunks into; closing the stream finalises the file.
+   * Parent directory is created up front so the stream doesn't race
+   * with the daemon's `ensureDir`.
+   *
+   * `opts.size` is ignored — `fs.createWriteStream` is a true
+   * streaming sink.
+   */
+  async writeFileStream(path: ServerPath, _opts?: { size?: number }): Promise<WritableStream<Uint8Array>> {
+    this.requireConnected('integrated')
+    const full = pathJoin(this.serverDir, path)
+    await fs.ensureDir(pathJoin(full, '..'))
+    const { createWriteStream } = await import('node:fs')
+    const node = createWriteStream(full)
+    return Writable.toWeb(node) as WritableStream<Uint8Array>
   }
 
   /**

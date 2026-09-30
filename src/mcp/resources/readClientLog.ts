@@ -69,8 +69,12 @@ export async function read(
   const logRelative = 'logs/latest.log'
   let text: string
   try {
-    const result = await daemon.readFile({ path: logRelative })
-    text = Buffer.from(result.data, 'base64').toString('utf-8')
+    // `encode: 'utf-8'` consumes the streaming RPC server-side and
+    // returns a single string. If the caller forgot to pass
+    // `encode`, the daemon returns raw bytes — decode here so the
+    // MCP resource surface stays UTF-8.
+    const result = await daemon.readFile({ path: logRelative, encode: 'utf-8' })
+    text = typeof result.data === 'string' ? result.data : Buffer.from(result.data).toString('utf-8')
   } catch (err) {
     return {
       uri: FIXED_URI,

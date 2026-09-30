@@ -29,10 +29,12 @@ import {
   type ReadBuildLogParams,
   type ReadBuildLogResult,
   type ReadTestLogResult,
+  type ReadFileResult,
+  type ReadFileParams,
+  type WriteFileParams,
+  type WriteFileResult,
   type ReadServerLogParams,
   type ReadServerLogResult,
-  type ReadFileParams,
-  type ReadFileResult,
   type RebuildState,
   type RpcError,
   type TriggerBuildEvent,
@@ -43,10 +45,12 @@ import {
   type RpcResponse,
   type StopServerParams,
   type UnattachParams,
-  type WriteFileParams,
 } from './rpc.js'
 import type { SubscriptionRegistry } from './subscriptions.js'
-import { RpcErrorCode } from './rpc.js'
+import { StreamRegistry } from './streams.js'
+import { encodeStreamChunk, hexToBytes, newStreamId, streamIdHex } from './codec.js'
+import { RpcErrorCode, event } from './rpc.js'
+import { encodeRpc } from './codec.js'
 import { Capability, capabilitiesToRecord } from '../../hosts/types.js'
 import type { HostProvider, LogChunkHandler, ServerPath } from '../../hosts/types.js'
 import {
@@ -160,6 +164,17 @@ export interface DispatchContext {
     newestTs: string | null
     truncated: boolean
   }
+  /**
+   * Per-WS stream registry. Holds the open `readFile`/`writeFile`
+   * transfers for this session — both incoming (chunks arrive as
+   * binary WS frames, get written to a host Writable) and outgoing
+   * (chunks leave a host Readable, ride out as binary frames).
+   *
+   * Set by the server when constructing the dispatch context.
+   * Handlers `register` an entry when the RPC opens a stream and
+   * await the `closed` promise to finalise the response.
+   */
+  streams?: StreamRegistry
 }
 
 /**
@@ -213,6 +228,7 @@ const KNOWN_METHODS: ReadonlySet<string> = new Set<RpcMethod>([
   'stopServer',
   'readFile',
   'writeFile',
+  'streamEnd',
   'executeRawCommand',
   'attachLog',
   'unattach',
@@ -264,9 +280,11 @@ async function route(
     case 'stopServer':
       return handleStopServer(params)
     case 'readFile':
-      return handleReadFile(params)
+      return handleReadFile(ctx, params)
     case 'writeFile':
-      return handleWriteFile(params)
+      return handleWriteFile(ctx, params)
+    case 'streamEnd':
+      return handleStreamEnd(ctx, params)
     case 'executeRawCommand':
       return handleExecuteRawCommand(params)
     case 'attachLog':
@@ -349,20 +367,129 @@ async function handleStopServer(params: unknown): Promise<void> {
   await runHost((h) => (h.stopServer ?? notImplemented(Capability.StopServer)).bind(h)())
 }
 
-async function handleReadFile(params: unknown): Promise<ReadFileResult> {
+async function handleReadFile(ctx: DispatchContext, params: unknown): Promise<ReadFileResult> {
   if (!capable(Capability.ReadFile)) throw new UnsupportedCapabilityRpc(Capability.ReadFile)
   const { path } = parseParams<ReadFileParams>(params, ['path'])
-  const buf = await runHost<Buffer>((h) =>
-    (h.readFile ?? notImplemented(Capability.ReadFile)).bind(h)(path as ServerPath),
-  )
-  return { data: buf.toString('base64'), size: buf.length }
+  // Streaming only — the host must implement `readFileStream`.
+  if (!ctx.streams) throw rpcError(RpcErrorCode.InternalError, 'Server has no stream registry')
+  const streamInfo = await runHost<{ stream: ReadableStream<Uint8Array>; size?: number }>((h) => {
+    if (!h.readFileStream) {
+      throw new UnsupportedCapabilityRpc('readFileStream')
+    }
+    return Promise.resolve(h.readFileStream(path as ServerPath))
+  })
+  const streamId = streamIdHex(newStreamId())
+  const ws = ctx.ws as { send(data: Uint8Array): void } | undefined
+  // `onClose` bridges registry close events back to the WS
+  // transport. Fires for every close path (success, error,
+  // session-close) so the streamEnd envelope is sent exactly once
+  // without callers having to remember.
+  const record = ctx.streams.open({
+    streamId,
+    direction: 'incoming',
+    kind: 'readFile',
+    onClose: (bytes, err) => {
+      try {
+        if (err) {
+          // Host read failed — surface to the consumer instead of
+          // silently closing the stream. Client dispatches by
+          // streamId, errors its ReadableStream controller (if
+          // any) so the consumer's reader loop rejects, and rejects
+          // any pending resolvers.
+          ws?.send(encodeRpc(event('streamError', {
+            streamId,
+            code: 0,
+            message: err.message,
+          })))
+        } else {
+          ws?.send(encodeRpc(event('streamEnd', { streamId, bytes })))
+        }
+      } catch {
+        // Peer disconnected mid-close.
+      }
+    },
+  })
+  if (ws) {
+    const reader = streamInfo.stream.getReader()
+    void (async () => {
+      try {
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          record.bytes += value.byteLength
+          try { ws.send(encodeStreamChunk(hexToBytes(streamId), value)) } catch { /* disconnected */ }
+        }
+        ctx.streams!.close(streamId, record.bytes)
+      } catch (err) {
+        ctx.streams!.close(
+          streamId,
+          record.bytes,
+          err instanceof Error ? err : new Error(String(err)),
+        )
+      }
+    })()
+  }
+  return { streamId, totalSize: streamInfo.size }
 }
 
-async function handleWriteFile(params: unknown): Promise<void> {
+async function handleWriteFile(ctx: DispatchContext, params: unknown): Promise<WriteFileResult> {
   if (!capable(Capability.WriteFile)) throw new UnsupportedCapabilityRpc(Capability.WriteFile)
-  const { path, data, encoding } = parseParams<WriteFileParams>(params, ['path', 'data'])
-  const bytes = encoding === 'utf-8' ? Buffer.from(data, 'utf-8') : Buffer.from(data, 'base64')
-  await runHost((h) => (h.writeFile ?? notImplemented(Capability.WriteFile)).bind(h)(path as ServerPath, bytes))
+  const { path, size } = parseParams<WriteFileParams>(params, ['path'])
+  // Streaming only — the host must implement `writeFileStream`.
+  if (!ctx.streams) throw rpcError(RpcErrorCode.InternalError, 'Server has no stream registry')
+  const sink = await runHost<WritableStream<Uint8Array>>((h) => {
+    if (!h.writeFileStream) {
+      throw new UnsupportedCapabilityRpc('writeFileStream')
+    }
+    return Promise.resolve(h.writeFileStream(path as ServerPath, size !== undefined ? { size } : undefined))
+  })
+  const streamId = streamIdHex(newStreamId())
+  const ws = ctx.ws as { send(data: Uint8Array): void } | undefined
+  ctx.streams.open({
+    streamId,
+    direction: 'incoming',
+    kind: 'writeFile',
+    // Send `streamEnd` once the host writer has been finalised.
+    // Reached via the client's `streamEnd` notification
+    // (handleStreamEnd → streams.close) OR via the binary handler's
+    // writer-write error catch OR via the session-close cascade.
+    // On `err` we send a `streamError` envelope instead so the
+    // client surfaces the host failure to the caller instead of
+    // letting `result.done` resolve as if the write succeeded.
+    onClose: (bytes, err) => {
+      try {
+        if (err) {
+          ws?.send(encodeRpc(event('streamError', {
+            streamId,
+            code: 0,
+            message: err.message,
+          })))
+        } else {
+          ws?.send(encodeRpc(event('streamEnd', { streamId, bytes })))
+        }
+      } catch {
+        // Peer disconnected mid-close.
+      }
+    },
+  })
+  ctx.streams.attachWriter(streamId, sink.getWriter())
+  return { streamId }
+}
+
+/**
+ * Handle `streamEnd` — sent by the WS peer to signal the end of an
+ * outgoing stream they own. We close the corresponding registry
+ * entry (which closes the host stream via the registered `onClose`
+ * callback that fans the matching `streamEnd` envelope back).
+ */
+async function handleStreamEnd(ctx: DispatchContext, params: unknown): Promise<void> {
+  if (!ctx.streams) throw rpcError(RpcErrorCode.InternalError, 'Server has no stream registry')
+  const { streamId, bytes } = parseParams<{ streamId: string; bytes?: number }>(params, ['streamId'])
+  // The client doesn't track per-stream bytes — it sends 0 as a
+  // placeholder. Read the server-side accumulator so the envelope
+  // we fan back carries the real count.
+  const finalBytes = ctx.streams.get(streamId)?.bytes ?? bytes ?? 0
+  ctx.streams.close(streamId, finalBytes)
 }
 
 async function handleExecuteRawCommand(params: unknown): Promise<ExecuteRawCommandResult> {

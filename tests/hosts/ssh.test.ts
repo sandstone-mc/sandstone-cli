@@ -92,14 +92,13 @@ export function registerSshTests(
       try {
         const path = `${cfg.serverDir}/.ssh-rpc-roundtrip-${Date.now()}.txt`
         const payload = `ssh round-trip ${Date.now()}\n`
-        // writeFile RPC defaults to base64 — pass `encoding: 'utf-8'`
-        // so the string lands on disk as text rather than as the
-        // base64 representation of itself.
-        await client.writeFile({ path, data: payload, encoding: 'utf-8' })
-        const back = await client.readFile({ path })
-        // readFile RPC always returns base64. Decode before comparing.
-        const decoded = Buffer.from(back.data, 'base64').toString('utf-8')
-        expect(decoded).toBe(payload)
+        // `writeFile` accepts a string directly — UTF-8 encoded before
+        // streaming to the daemon.
+        await client.writeFile({ path, data: payload })
+        // `readFile({encode: 'utf-8'})` decodes the stream server-side
+        // and returns the file as a string.
+        const back = await client.readFile({ path, encode: 'utf-8' })
+        expect(back.data).toBe(payload)
       } finally {
         client.close()
         await daemon.shutdown()
@@ -117,10 +116,9 @@ export function registerSshTests(
       const client = await openDaemonClient(daemon)
       try {
         const path = `${cfg.serverDir}/server.properties`
-        const back = await client.readFile({ path })
-        const decoded = Buffer.from(back.data, 'base64').toString('utf-8')
-        expect(decoded).toContain('enable-rcon=true')
-        expect(decoded).toContain('rcon.port=25575')
+        const back = await client.readFile({ path, encode: 'utf-8' })
+        expect(back.data).toContain('enable-rcon=true')
+        expect(back.data).toContain('rcon.port=25575')
       } finally {
         client.close()
         await daemon.shutdown()
@@ -139,6 +137,133 @@ export function registerSshTests(
       try {
         const path = `${cfg.serverDir}/.ssh-rpc-missing-${Date.now()}.txt`
         await expect(client.readFile({ path })).rejects.toThrow()
+      } finally {
+        client.close()
+        await daemon.shutdown()
+      }
+    }, 30_000)
+
+    test('writeFileStream then readFileStream round-trip matches the original payload', async () => {
+      const cfg = getCfg()
+      const projectRoot = getProjectRoot()
+      const daemon = await startDaemon({
+        projectRoot,
+        hostType: 'ssh',
+        hostConfig: sshOnlyConfig(cfg),
+      })
+      const client = await openDaemonClient(daemon)
+      try {
+        const path = `${cfg.serverDir}/.ssh-stream-roundtrip-${Date.now()}.txt`
+        const payload = `ssh stream round-trip ${Date.now()}\n`
+        const bytes = new TextEncoder().encode(payload)
+        // Write via the streaming API — feed the source ReadableStream
+        // a single chunk (close signals end-of-write).
+        const writeSource = new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(bytes)
+            controller.close()
+          },
+        })
+        const writeResult = await client.writeFileStream({
+          path,
+          stream: writeSource,
+          size: bytes.byteLength,
+        })
+        const { bytesWritten } = await writeResult.done
+        expect(bytesWritten).toBe(bytes.byteLength)
+        // Read back via the streaming API — drain the ReadableStream
+        // and accumulate chunks into a single buffer.
+        const readResult = await client.readFileStream({ path })
+        const reader = readResult.stream.getReader()
+        let accumulated = new Uint8Array(0)
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          const next = new Uint8Array(accumulated.byteLength + value.byteLength)
+          next.set(accumulated, 0)
+          next.set(value, accumulated.byteLength)
+          accumulated = next
+        }
+        expect(new TextDecoder().decode(accumulated)).toBe(payload)
+      } finally {
+        client.close()
+        await daemon.shutdown()
+      }
+    }, 30_000)
+
+    test('writeFileStream coalesces a multi-chunk payload into the SFTP write stream', async () => {
+      const cfg = getCfg()
+      const projectRoot = getProjectRoot()
+      const daemon = await startDaemon({
+        projectRoot,
+        hostType: 'ssh',
+        hostConfig: sshOnlyConfig(cfg),
+      })
+      const client = await openDaemonClient(daemon)
+      try {
+        const path = `${cfg.serverDir}/.ssh-stream-multichunk-${Date.now()}.bin`
+        // 5 MiB split into 32 KiB frames — forces many WS chunks
+        // through ssh2's SFTP WriteStream and exercises the
+        // streaming path end-to-end.
+        const pieceA = new Uint8Array(2_097_374).fill(0x5a)
+        const pieceB = new Uint8Array(2_097_374).fill(0xa5)
+        const tail = new Uint8Array(2_097_374 - 1).fill(0x7e)
+        const payload = new Uint8Array(pieceA.byteLength + pieceB.byteLength + tail.byteLength)
+        payload.set(pieceA, 0)
+        payload.set(pieceB, pieceA.byteLength)
+        payload.set(tail, pieceA.byteLength + pieceB.byteLength)
+        const totalSize = payload.byteLength
+        const FRAME = 32 * 1024
+        const writeSource = new ReadableStream<Uint8Array>({
+          start(controller) {
+            for (let i = 0; i < totalSize; i += FRAME) {
+              controller.enqueue(payload.subarray(i, Math.min(i + FRAME, totalSize)))
+            }
+            controller.close()
+          },
+        })
+        const writeResult = await client.writeFileStream({
+          path,
+          stream: writeSource,
+          size: totalSize,
+        })
+        await writeResult.done
+        // Read back byte-for-byte.
+        const readResult = await client.readFileStream({ path })
+        const reader = readResult.stream.getReader()
+        let accumulated = new Uint8Array(0)
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          const next = new Uint8Array(accumulated.byteLength + value.byteLength)
+          next.set(accumulated, 0)
+          next.set(value, accumulated.byteLength)
+          accumulated = next
+        }
+        expect(accumulated.byteLength).toBe(totalSize)
+        expect(accumulated).toEqual(payload)
+      } finally {
+        client.close()
+        await daemon.shutdown()
+      }
+    }, 60_000)
+
+    test('readFileStream on a missing path surfaces an RPC error', async () => {
+      const cfg = getCfg()
+      const projectRoot = getProjectRoot()
+      const daemon = await startDaemon({
+        projectRoot,
+        hostType: 'ssh',
+        hostConfig: sshOnlyConfig(cfg),
+      })
+      const client = await openDaemonClient(daemon)
+      try {
+        const path = `${cfg.serverDir}/.ssh-stream-missing-${Date.now()}.txt`
+        // SSH's fast-fail on `stat()` means the dispatch throws
+        // synchronously and the readFile RPC error envelope arrives
+        // before `readFileStream` can resolve — so the surface-level
+        // promise rejects with the host error.
+        await expect(client.readFileStream({ path })).rejects.toThrow()
       } finally {
         client.close()
         await daemon.shutdown()

@@ -176,7 +176,9 @@ async function loadHostConfig(opts: ConnectCommandOptions): Promise<HostConfigIn
 }
 
 async function runShutdown(projectRoot: string): Promise<void> {
+  console.error('[shutdown-trace] runShutdown called')
   const endpoint = await readEndpoint(projectRoot)
+  console.error(`[shutdown-trace] endpoint=${!!endpoint} pid=${endpoint?.pid}`)
   if (!endpoint) {
     console.error(chalk`{red Error:} No endpoint file at ${projectRoot}/.sandstone/connect.url — no daemon to shut down`)
     process.exit(1)
@@ -186,8 +188,11 @@ async function runShutdown(projectRoot: string): Promise<void> {
     process.exit(1)
   }
   try {
+    console.error('[shutdown-trace] opening client')
     const client = await openClient({ endpoint })
+    console.error('[shutdown-trace] client open, calling shutdown')
     await client.shutdown()
+    console.error('[shutdown-trace] shutdown RPC returned')
     client.close()
     console.log(chalk`{cyan [connect]} shutdown sent to daemon (pid ${endpoint.pid})`)
   } catch (err) {

@@ -1,4 +1,5 @@
 import { NodeSSH, type Config as NodeSshConfig } from 'node-ssh'
+import { Readable, Writable } from 'node:stream'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
 import { RconClient } from '../rcon-client.js'
@@ -156,6 +157,45 @@ export class SshHost implements HostProvider {
     })
   }
 
+  /**
+   * Expose the underlying SFTP read stream directly so the daemon
+   * can pipe chunks out as they arrive. `size` is best-effort via
+   * `stat()` — left undefined on failure since the host runs on a
+   * remote filesystem where stat errors aren't fatal to the read.
+   */
+  async readFileStream(path: ServerPath): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }> {
+    this.requireConnected('ssh')
+    const sftp = await this.ssh.requestSFTP()
+    // Probe with `stat` first. ssh2's `createReadStream` opens the
+    // stream asynchronously and emits an `'error'` event on failure,
+    // but the SFTP protocol layer also rejects an internal Promise
+    // we have no handle on — that rejection is uncaught and crashes
+    // the daemon. By failing fast on `stat`, we never open the
+    // stream for a missing path; the consumer sees a clean RPC
+    // error via the dispatch handler's catch.
+    let size: number | undefined
+    try {
+      const stat = await new Promise<{ attrs?: { size?: number } }>((resolve, reject) => {
+        sftp.stat(this.resolvePath(path), (err: Error | undefined, stats: unknown) => {
+          if (err) reject(err)
+          else resolve(stats as { attrs?: { size?: number } })
+        })
+      })
+      size = stat.attrs?.size
+    } catch (err) {
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+    const node = sftp.createReadStream(this.resolvePath(path))
+    // Even after the stat check, attach a defensive listener so any
+    // error emitted after open (network drop mid-read, etc.) doesn't
+    // become uncaught. `Readable.toWeb()` is supposed to forward to
+    // the web stream's controller, but ssh2's internal Promise
+    // rejection is what we actually need to keep unhandled — this
+    // listener covers the raw `'error'` event half.
+    node.on('error', () => { /* handled via web stream controller */ })
+    return { stream: Readable.toWeb(node) as ReadableStream<Uint8Array>, size }
+  }
+
   async writeFile(path: ServerPath, data: Buffer | string): Promise<void> {
     this.requireConnected('ssh')
     const sftp = await this.ssh.requestSFTP()
@@ -165,6 +205,33 @@ export class SshHost implements HostProvider {
       stream.on('close', () => resolve())
       stream.end(typeof data === 'string' ? Buffer.from(data) : data)
     })
+  }
+
+  /**
+   * Open an SFTP write stream for the daemon to pipe chunks into.
+   * The returned `WritableStream` wraps the underlying SFTP stream
+   * via `Readable.toWeb` / `Writable.toWeb` — Bun implements both
+   * directions of the web stream API and the conversion is lossless.
+   *
+   * `opts.size` is ignored — ssh2's SFTP `WriteStream` is a true
+   * streaming sink, so the file size doesn't need to be known up
+   * front.
+   */
+  async writeFileStream(path: ServerPath, _opts?: { size?: number }): Promise<WritableStream<Uint8Array>> {
+    this.requireConnected('ssh')
+    const sftp = await this.ssh.requestSFTP()
+    const node = sftp.createWriteStream(this.resolvePath(path))
+    // Same rationale as readFileStream: `Writable.toWeb()` forwards
+    // the Node stream's `error` event to the web stream's writer,
+    // but the raw `error` event is still uncaught unless someone
+    // listens. Open failures (bad path, permission denied, etc.)
+    // would otherwise crash the daemon before the consumer's
+    // writer.write() rejection fires.
+    node.on('error', () => { /* handled via web stream */ })
+    // SFTP's createWriteStream returns a `WriteStream`. Cast through
+    // `unknown` because `Writable.toWeb`'s overload narrowing doesn't
+    // accept the SFTP-specific stream shape directly.
+    return Writable.toWeb(node as unknown as import('node:stream').Writable) as WritableStream<Uint8Array>
   }
 
   async executeRawCommand(command: string): Promise<string> {

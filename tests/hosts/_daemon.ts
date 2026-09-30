@@ -22,9 +22,17 @@ import type { HarnessConfig } from './_harness.ts'
 
 export type { HarnessConfig }
 
+// Use `Bun.which('bun')` with a `'bun'` fallback (matches the
+// pattern `helpers.ts` uses for `buildLibrary`/`runSand` which
+// work reliably). `which bun` / `process.execPath` / `realpathSync`
+// all resolve to `bun.exe` paths that `posix_spawn` rejects on
+// this host — `Bun.which` returns the same; the `'bun'` fallback
+// lets Bun's own PATH search take over.
+const BUN_BIN = (typeof Bun !== 'undefined' && typeof Bun.which === 'function' ? Bun.which('bun') : null) ?? 'bun'
+
 const __dirname = join(fileURLToPath(import.meta.url), '..', '..', '..')
 export const CLI_ROOT = __dirname
-export const SANDBIN = join(CLI_ROOT, 'lib', 'index.js')
+const SANDBIN = join(CLI_ROOT, 'lib', 'index.js')
 
 export interface DaemonOptions {
   /** Temp project root. The daemon writes `.sandstone/connect.url`
@@ -66,9 +74,19 @@ export async function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
   const { projectRoot, hostType, hostConfig, bind = '127.0.0.1', port = '0', extraEnv = {} } = opts
   await mkdir(join(projectRoot, '.sandstone'), { recursive: true })
   const portStr = String(port)
+  // Surface the exact binary + args so test failures can be
+  // reproduced manually.
+  console.error(`[test-trace] startDaemon bin=${BUN_BIN} cli=${SANDBIN} hostType=${hostType}`)
 
-  const cmd: string[] = [
-    Bun.which('bun') ?? 'bun',
+  // Resolve any symlinks in the bun binary path. `process.execPath`
+// returns the symlinked path (e.g. `~/.bun/bin/bun` → `.../bun.exe`)
+// which `posix_spawn` can't follow on some hosts — the child
+// process fails with ENOENT before it even starts. Resolving once
+// at module load makes subsequent `Bun.spawn` calls reliable.
+// (Uses the module-level BUN_BIN declared above.)
+
+const cmd: string[] = [
+    BUN_BIN,
     SANDBIN,
     'connect',
     '--path', projectRoot,
@@ -80,12 +98,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
   const proc = Bun.spawn({
     cmd,
     cwd: projectRoot,
-    stdout: 'pipe',
-    stderr: 'pipe',
+    stdout: 'inherit',
+    stderr: 'inherit',
     env: { ...process.env, FORCE_COLOR: '0', ...extraEnv },
     windowsHide: true,
     windowsVerbatimArguments: true,
   })
+  console.error(`[test-trace] spawned pid=${proc.pid}`)
 
   const endpointPath = join(projectRoot, '.sandstone', 'connect.url')
 
@@ -97,14 +116,21 @@ export async function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
   while (Date.now() < deadline) {
     if (existsSync(endpointPath)) break
     if (proc.exitCode !== null) {
-    const stderr = await new Response(proc.stderr).text()
+    // stdout/stderr were spawned with 'inherit' so `proc.stderr` may
+    // be null on this code path (rare — only when the daemon dies
+    // before writing the endpoint). Guard the read so a helpful
+    // error message survives even when no captured stderr is
+    // available.
+    const stderr = proc.stderr ? await new Response(proc.stderr).text() : '<stderr not captured (inherit)>'
+    console.error(`[test-trace] daemon exited early pid=${proc.pid} code=${proc.exitCode}\nstderr:\n${stderr}`)
     throw new Error(`daemon exited early (code ${proc.exitCode}):\n${stderr}`)
   }
     await new Promise((r) => setTimeout(r, 100))
   }
   if (!existsSync(endpointPath)) {
     // Surface daemon stderr so failures are debuggable from the test log.
-    const stderr = await new Response(proc.stderr).text()
+    const stderr = proc.stderr ? await new Response(proc.stderr).text() : '<stderr not captured (inherit)>'
+    console.error(`[test-trace] endpoint timeout — daemon stderr:\n${stderr}`)
     proc.kill()
     throw new Error(`daemon did not write endpoint file within 30s.\nstderr:\n${stderr}`)
   }
@@ -117,10 +143,13 @@ export async function startDaemon(opts: DaemonOptions): Promise<RunningDaemon> {
 
   const shutdown = async () => {
     const r = Bun.spawn({
-      cmd: [Bun.which('bun') ?? 'bun', SANDBIN, 'connect', '--path', projectRoot, '--shutdown'],
+      cmd: [BUN_BIN, SANDBIN, 'connect', '--path', projectRoot, '--shutdown'],
       cwd: projectRoot,
-      stdout: 'pipe',
-      stderr: 'pipe',
+      // Inherit so the shutdown child's stderr is visible to the
+      // test runner. Piped stderr can fill up and deadlock if nobody
+      // drains it (Bun's default for spawn is pipe).
+      stdout: 'inherit',
+      stderr: 'inherit',
       env: { ...process.env, FORCE_COLOR: '0' },
     })
     const code = await r.exited
@@ -150,7 +179,7 @@ export async function runSand(
   extraEnv: Record<string, string> = {},
 ): Promise<{ output: string; exitCode: number }> {
   const proc = Bun.spawn({
-    cmd: [Bun.which('bun') ?? 'bun', SANDBIN, 'run', ...args, '--path', cwd],
+    cmd: [BUN_BIN, SANDBIN, 'run', ...args, '--path', cwd],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',

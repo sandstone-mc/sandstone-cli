@@ -105,7 +105,28 @@ export interface HostProvider {
   startServer?(): Promise<void>
   stopServer?(): Promise<void>
   readFile?(path: ServerPath): Promise<Buffer>
+  /**
+   * Streaming variant of {@link readFile}. When the host exposes
+   * this, the daemon uses it directly (no buffer allocation in the
+   * daemon process). Otherwise the daemon falls back to the buffer
+   * variant and wraps the result in a one-shot `ReadableStream`.
+   */
+  readFileStream?(path: ServerPath): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }>
   writeFile?(path: ServerPath, data: Buffer | string): Promise<void>
+  /**
+   * Streaming variant of {@link writeFile}. Returns a
+   * `WritableStream` the daemon pipes binary-frame chunks into.
+   * Otherwise the daemon collects all chunks into a buffer and
+   * calls the buffer variant once.
+   *
+   * `opts.size` carries the final byte count when the caller knows
+   * it (e.g. the file lives at a known size on disk). Hosts whose
+   * upload protocol requires a known size up front (MCSManager's
+   * chunked-upload handshake) use this to avoid buffering the
+   * whole file in memory. Hosts with native streaming backends
+   * ignore it.
+   */
+  writeFileStream?(path: ServerPath, opts?: { size?: number }): Promise<WritableStream<Uint8Array>>
   attachLog?(onChunk: LogChunkHandler): Promise<LogSubscription>
   /**
    * Minecraft console command only. RCON / MCSManager WS. Returns the

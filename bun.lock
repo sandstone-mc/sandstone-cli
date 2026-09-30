@@ -35,7 +35,7 @@
         "bun-types": "^1.3.14",
         "node-pty": "^1.1.0",
         "prismarine-nbt": "^2.8.0",
-        "sandstone": "^1.2.34",
+        "sandstone": "^1.2.36",
         "typescript": "^6.0.3",
       },
     },
@@ -445,7 +445,7 @@
 
     "safer-buffer": ["safer-buffer@2.1.2", "", {}, "sha512-YZo3K82SD7Riyi0E1EQPojLz7kpepnSQI9IyPbHHg1XXXevb5dJI7tpyN2ADxGcQbHG7vcyRHk0cbwqcQriUtg=="],
 
-    "sandstone": ["sandstone@1.2.34", "", { "dependencies": { "@types/bun": "^1.3.14", "@types/nearley": "^2.11.5", "acorn": "^8.18.0", "adm-zip": "^0.6.0", "binary-extensions": "^3.1.0", "fs-extra": "^11.3.6", "isbinaryfile": "^6.0.0", "lodash": "^4.18.1", "nearley": "^2.20.1", "prismarine-nbt": "^2.8.0" } }, "sha512-enr560uD4S9shfv1I47ov08Q7134oL4fPVNtBVjUEGz85FMG6ck0J+YpKmTGQiHAV60XB+/tSaXmNPvB6hARmQ=="],
+    "sandstone": ["sandstone@1.2.36", "", { "dependencies": { "@types/bun": "^1.3.14", "@types/nearley": "^2.11.5", "acorn": "^8.18.0", "adm-zip": "^0.6.0", "binary-extensions": "^3.1.0", "fs-extra": "^11.3.6", "isbinaryfile": "^6.0.0", "lodash": "^4.18.1", "nearley": "^2.20.1", "prismarine-nbt": "^2.8.0" } }, "sha512-DW3SeDOkHHOGOEbG2MXVp0qhAtMqpGF8aQOh9sQre15/B9DBWyxSp1p33DK0xKq/WdLtHUDkLEueipmO8g2pPg=="],
 
     "sb-promise-queue": ["sb-promise-queue@2.1.1", "", {}, "sha512-qXfdcJQMxMljxmPprn4Q4hl3pJmoljSCzUvvEBa9Kscewnv56n0KqrO6yWSrGLOL9E021wcGdPa39CHGKA6G0w=="],
 

@@ -194,23 +194,6 @@ export class Client {
             return
           }
           case 'streamError': {
-            // Server-side host failure (SFTP drop, file deleted
-            // mid-read, disk full mid-write, etc.). Two paths:
-            //
-            //  - **Inbound** (readFile/readFileStream): error the
-            //    controller so the consumer's reader loop rejects.
-            //
-            //  - **Outbound** (writeFile/writeFileStream): there's no
-            //    consumer-side reader — reject the `done` promise so
-            //    the caller's `await result.done` settles with the
-            //    host error.
-            //
-            // Both are deferred via `queueMicrotask` so the rejection
-            // fires in a fresh microtask — after the consumer's catch
-            // handler is in place. Without the defer, bun:test's
-            // stricter unhandled-rejection check can fire before the
-            // consumer catches, miscounting an expected failure as a
-            // test-level unhandled error.
             const data = msg.data as { streamId: string; code: number; message: string }
             const record = this.streamsById.get(data.streamId)
             if (record) {
@@ -262,8 +245,6 @@ export class Client {
     }
   }
 
-  // ─── RPC ─────────────────────────────────────────────────────────
-
   private call<T>(method: string, params?: unknown): Promise<T> {
     if (this.closed) return Promise.reject(new Error('connection closed'))
     const id = this.nextId++
@@ -277,8 +258,6 @@ export class Client {
       this.ws.send(encodeRpc(req))
     })
   }
-
-  // ─── streams ─────────────────────────────────────────────────────
 
   private buildSingle(subscriptionId: string): AttachLogSubscription {
     let detached = false
@@ -453,8 +432,6 @@ export class Client {
       this.ws.send(encodeRpc(req))
     })
   }
-
-  // ─── public RPC methods ──────────────────────────────────────────
 
   ping(): Promise<rpc.PingResult> { return this.call<rpc.PingResult>('ping') }
   startServer(): Promise<void> { return this.call<void>('startServer') }

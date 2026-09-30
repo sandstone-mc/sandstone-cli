@@ -197,14 +197,6 @@ export class Dispatcher {
   static currentHost: HostProvider | null = null
 
   /**
-   * Per-process watcher-ws tracking. Lives outside `DispatchContext`
-   * because the tracking outlives any single request — the watcher
-   * connects once and may publish multiple `publishRebuild` events
-   * over its lifetime.
-   */
-  static watcherWs: unknown = undefined
-
-  /**
    * Single protected field holding every non-API helper — params
    * parsing, host scoping, log buffering, file IO, etc. Keeps the
    * public class surface limited to the RPC method names.
@@ -251,25 +243,6 @@ export class Dispatcher {
     } finally {
       Dispatcher.currentHost = null
     }
-  }
-
-  /**
-   * Called by the server when ANY WS session closes. If the closing ws
-   * is the one that published `WatcherStatus`, flip `connected: false`
-   * via `setWatcherStatus(undefined_ws)` and fire a resource notification.
-   *
-   * Static so server.ts's session-close handler can call it (the
-   * session close happens outside any request — no dispatcher in
-   * scope).
-   */
-  static sessionClose(ws: Bun.ServerWebSocket<WsData>, ctx: DispatcherContext): void {
-    if (Dispatcher.watcherWs !== ws) return
-    Dispatcher.watcherWs = undefined
-    if (!ctx.setWatcherStatus || !ctx.getWatcherStatus || !ctx.notifyResourceUpdated) return
-    const prev = ctx.getWatcherStatus()
-    if (prev === null) return
-    ctx.setWatcherStatus({ ...prev, connected: false }, undefined)
-    ctx.notifyResourceUpdated('sandstone://watcher-status')
   }
 
   // ─── RPC handlers (typed via `rpc.ts`) ─────────────────────────
@@ -726,15 +699,6 @@ export async function dispatch<Method extends rpc.RpcMethod>(
 /** Set the active host before dispatching; restore on the way out. */
 export async function withHost<T>(host: HostProvider, fn: () => Promise<T>): Promise<T> {
   return Dispatcher.withHost(host, fn)
-}
-
-/**
- * Called by the server when ANY WS session closes. If the closing ws
- * is the one that published `WatcherStatus`, flip `connected: false`
- * via `setWatcherStatus(undefined_ws)` and fire a resource notification.
- */
-export function handleSessionClose(ws: Bun.ServerWebSocket<WsData>, ctx: DispatcherContext): void {
-  Dispatcher.sessionClose(ws, ctx)
 }
 
 // (No top-level constants needed here; log buffer caps live in daemon.ts.)

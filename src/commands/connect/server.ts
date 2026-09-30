@@ -29,7 +29,7 @@ import {
   type WelcomeEvent,
 } from './rpc.js'
 import { capabilitiesToRecord } from '../../hosts/types.js'
-import { RpcHandlerError, ShutdownSignal, Dispatcher, dispatch, narrowMethod, withHost, handleSessionClose, type DispatcherContext } from './dispatch.js'
+import { RpcHandlerError, ShutdownSignal, Dispatcher, dispatch, narrowMethod, withHost, type DispatcherContext } from './dispatch.js'
 import type { ActiveConfig } from './active-config.js'
 import { type RebuildState, type WatcherStatus, notification } from './rpc.js'
 import { SubscriptionRegistry } from './subscriptions.js'
@@ -60,6 +60,8 @@ export interface ServerOptions {
   port: number
   /** Invoked when the first client sends `shutdown` RPC. */
   onShutdown: () => Promise<void>
+  /** Invoked when any WS session closes. */
+  onWsClose?: (ws: ServerWebSocket<WsData>) => void
   /**
    * Live `sandstone.config.ts` state. Seeded by the daemon at boot from
    * disk (`loadActiveConfigFromDisk`) and refreshed whenever the
@@ -136,6 +138,14 @@ export interface RunningServer {
    * before the WS is killed.
    */
   broadcast(eventName: string, data: unknown): void
+  /**
+   * Push an MCP `notifications/resources/updated` to every open WS
+   * session. Caller (e.g. daemon) uses this to fan out resource
+   * changes that originate outside the RPC pipeline (e.g. flipping
+   * `connected: false` on the cached `WatcherStatus` when the
+   * watcher's session drops).
+   */
+  notifyResourceUpdated(uri: string): void
 }
 
 export function startServer(opts: ServerOptions): RunningServer {
@@ -146,6 +156,13 @@ export function startServer(opts: ServerOptions): RunningServer {
   // a `daemonShutdown` event to every open session before closing the
   // WS so clients can flush state cleanly.
   const sessions = new Map<ServerWebSocket<WsData>, SessionContext>()
+
+  const notifyAll = (uri: string) => {
+    const envelope = encodeRpc(notification('notifications/resources/updated', { uri }))
+    for (const [session] of sessions) {
+      try { session.send(envelope) } catch { /* disconnected */ }
+    }
+  }
 
   // Hoisted helper used by both the shutdown-RPC path (below) and the
   // returned `RunningServer.broadcast`. Flips each session's
@@ -209,20 +226,7 @@ export function startServer(opts: ServerOptions): RunningServer {
         appendLogLines: opts.appendLogLines,
         readLogBuffer: opts.readLogBuffer,
         broadcast,
-        notifyResourceUpdated: (uri) => {
-          // Fire `notifications/resources/updated` to every connected
-          // session. Uses the JSON-RPC notification envelope (not the
-          // legacy `{event, data}` shape that `broadcast` uses for
-          // custom events). Clients without a subscription for `uri`
-          // ignore the notification per spec.
-          const envelope = encodeRpc(notification(
-            'notifications/resources/updated',
-            { uri },
-          ))
-          for (const [ws] of sessions) {
-            try { ws.send(envelope) } catch { /* disconnected */ }
-          }
-        },
+        notifyResourceUpdated: notifyAll,
       }
       ctx.dispatcher = new Dispatcher(dispatchCtx)
       sessions.set(ws, ctx)
@@ -419,22 +423,7 @@ export function startServer(opts: ServerOptions): RunningServer {
       await subscriptions.dropAllForWs(ws)
       // Daemon-supplied hook — used to detect watcher disconnects and
       // flip `connected: false` on the cached `WatcherStatus`.
-      // Build a minimal dispatchCtx with only the hooks
-      // `handleSessionClose` needs. The full ctx isn't available here
-      // because session close happens outside any request.
-      handleSessionClose(ws, {
-        setWatcherStatus: opts.setWatcherStatus,
-        getWatcherStatus: opts.getWatcherStatus,
-        notifyResourceUpdated: (uri: string) => {
-          const envelope = encodeRpc(notification(
-            'notifications/resources/updated',
-            { uri },
-          ))
-          for (const [session] of sessions) {
-            try { session.sendBinary(envelope) } catch { /* disconnected */ }
-          }
-        },
-      } as unknown as DispatcherContext)
+      opts.onWsClose?.(ws)
       // Force-close every stream belonging to this session. Rejects
       // their `closed` promises so the originating RPC handlers can
       // surface an error rather than hanging forever.
@@ -488,6 +477,7 @@ export function startServer(opts: ServerOptions): RunningServer {
       await server.stop()
     },
     broadcast,
+    notifyResourceUpdated: notifyAll,
   }
 }
 

@@ -35,7 +35,7 @@ import { loadActiveConfigFromDisk, type ActiveConfig } from './active-config.js'
 let expectedShutdown = false
 export const setExpectedShutdown = (v: boolean) => { expectedShutdown = v }
 export const getExpectedShutdown = () => expectedShutdown
-import { startServer } from './server.js'
+import { startServer, WsData } from './server.js'
 import type { RebuildState, WatcherStatus } from './rpc.js'
 import {
   deleteEndpoint,
@@ -164,7 +164,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
 
   let rebuildState: RebuildState | undefined
 
-  let watcherStatus: WatcherStatus | null = null
+  let watcherEntry: { status: WatcherStatus; ws: Bun.ServerWebSocket<WsData> } | null = null
 
   const pushTo = (target: 'build' | 'test' | 'server') => (entries: { line: string; ts: number }[]) => {
     const buf = target === 'server' ? serverBuffer : target === 'test' ? testBuffer : buildBuffer
@@ -202,10 +202,10 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     },
     getRebuildState: () => rebuildState,
     getExpectedShutdown,
-    setWatcherStatus: (status: WatcherStatus, _ws: unknown) => {
-      watcherStatus = status
+    setWatcherStatus: (status: WatcherStatus, ws: Bun.ServerWebSocket<WsData> | undefined) => {
+      watcherEntry = ws ? { status, ws } : null
     },
-    getWatcherStatus: () => watcherStatus,
+    getWatcherStatus: () => watcherEntry?.status ?? null,
     appendLogLines: (entries, target) => pushTo(target)(entries),
     readLogBuffer: (target, { tail, maxLines, range, since, until } = {}) => {
       const buf = target === 'server' ? serverBuffer : target === 'test' ? testBuffer : buildBuffer

@@ -28,31 +28,15 @@ import type { SandstoneConfig } from 'sandstone'
 import type { HostConfigInput, HostProvider, HostType } from '../../hosts/types.js'
 
 /**
- * Pure helper: pull `clientPath` out of an already-loaded
- * `SandstoneConfig` for the `local-client` host's default config.
- * Returns `null` when the config has no usable `saveOptions.clientPath`.
- *
- * Used by {@link bootstrapHosts} after it loads the project's
- * `sandstone.config.ts` for `sandstoneConfig` injection — re-using the
- * same load avoids a duplicate `import()` per invocation.
+ * Bootstrap options. Multi-host daemons are gone — `--host-type`
+ * accepts exactly one host type.
  */
-export function localClientConfigFromSandstoneConfig(
-  cfg: SandstoneConfig | undefined,
-): HostConfigInput | null {
-  const clientPath = cfg?.saveOptions?.clientPath
-  if (typeof clientPath !== 'string' || clientPath.length === 0) return null
-  return { clientPath } as HostConfigInput
-}
-
 export interface BootstrapOptions {
   hostType: HostType
   perHostConfig: Partial<Record<HostType, HostConfigInput>>
-  /**
-   * When true, the caller passed explicit `--host-type` / `--host-config` /
-   * `--host-config-file`. Suppresses the auto-`local-client` augmentation
-   * (explicit settings always win — the user may have intentionally
-   * omitted `local-client`).
-   */
+  /** When true, the caller passed explicit `--host-type` / `--host-config`
+   *  flags. Suppresses the bootstrap auto-config lookup — explicit
+   *  settings always win. */
   userProvidedHostSettings?: boolean
   /** When true, suppress the `[bootstrap]` informational logs (one-shot
    *  invocations like `sand run` shouldn't announce every default it
@@ -106,28 +90,8 @@ export async function bootstrapHosts(opts: BootstrapOptions): Promise<BootstrapR
   // Auto-include `local-client` when the user passed no host settings and
   // saveOptions.clientPath is set in the just-loaded config. Re-uses the
   // load above so we don't `import()` the config twice per invocation.
-  // The `userProvidedHostSettings` flag is the gate; explicit host flags
-  // always win, even if they happen to mention `local-client`.
-  // NOTE: must mutate the LOCAL `hostTypes` / `perHostConfig` (resolved
-  // copies), not `opts.*` — `resolveDefaults` deep-copies the caller's
-  // perHostConfig and the local instance loop reads from `perHostConfig`,
-  // so writing to `opts.perHostConfig` would leave the new member with
-  // undefined config and the LocalClientHost would throw on attachLog.
-  if (!opts.userProvidedHostSettings) {
-    const localClientCfg = localClientConfigFromSandstoneConfig(autocfg ?? undefined)
-    if (localClientCfg) {
-      // Auto-include local-client as a *second* host. Bootstrap
-      // returns just the primary host; local-client is bootstrapped
-      // separately for log attach. Single-host is the rule; the
-      // exception is local-client, which rides alongside for log
-      // streaming only.
-      const existing = perHostConfig['local-client']
-      perHostConfig['local-client'] = {
-        ...(existing ?? {}),
-        ...localClientCfg,
-      }
-    }
-  }
+  // The `userProvidedHostSettings` flag suppresses the auto-`saveConfig`
+  // injection — explicit host flags always win.
 
   // Instantiate the single requested provider. Multi-host daemons are
   // gone — `--host-type` accepts exactly one host type.

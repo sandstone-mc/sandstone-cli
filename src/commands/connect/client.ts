@@ -30,6 +30,8 @@ import {
   type ReadBuildLogResult,
   type ReadServerLogParams,
   type ReadServerLogResult,
+  type ReadClientLogParams,
+  type ReadClientLogResult,
   type GetWatcherStatusResult,
   type ReadTestLogResult,
   type ReadFileParams,
@@ -683,6 +685,7 @@ export async function connect(opts: ClientOptions): Promise<Client> {
     readBuildLog: (params: ReadBuildLogParams) => call<ReadBuildLogResult>('readBuildLog', params),
     readTestLog: (params: ReadBuildLogParams) => call<ReadTestLogResult>('readTestLog', params),
     readServerLog: (params: ReadServerLogParams) => call<ReadServerLogResult>('readServerLog', params),
+    readClientLog: (params: ReadClientLogParams) => call<ReadClientLogResult>('readClientLog', params),
     getWatchedFiles: () => call<GetWatchedFilesResult>('getWatchedFiles'),
     getRebuildState: () => call<GetRebuildStateResult>('getRebuildState'),
     getWatcherStatus: () => call<GetWatcherStatusResult>('getWatcherStatus'),
@@ -779,6 +782,13 @@ export interface Client {
    * `logs/latest.log` from disk. Same filtering shape as `readBuildLog`.
    */
   readServerLog(params?: ReadServerLogParams): Promise<ReadServerLogResult>
+  /**
+   * Read the Minecraft client launcher log. Intrinsic daemon
+   * capability — the daemon streams the file directly from
+   * `saveConfig.clientPath/logs/latest.log`. Same tail / maxLines /
+   * range semantics as `readBuildLog`.
+   */
+  readClientLog(params?: ReadClientLogParams): Promise<ReadClientLogResult>
   /**
    * List files the watcher is tracking. Currently a stub — returns
    * `{files: []}` because the daemon doesn't track per-file state.

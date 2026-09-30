@@ -63,6 +63,7 @@ export type RpcMethod =
   | 'readBuildLog'
   | 'readTestLog'
   | 'readServerLog'
+  | 'readClientLog'
   | 'getWatchedFiles'
   | 'publishConfig'
   | 'publishLog'
@@ -88,6 +89,7 @@ export type RpcResult =
   | ReadBuildLogResult
   | ReadTestLogResult
   | ReadServerLogResult
+  | ReadClientLogResult
   | GetWatchedFilesResult
   | GetRebuildStateResult
   | GetWatcherStatusResult
@@ -318,6 +320,15 @@ export interface GetActiveConfigResult {
   configPath: string
   /** Resolved deploy config (post-CLI-override). */
   saveConfig: ActiveSaveConfig | undefined
+  /**
+   * Whether the daemon can serve the Minecraft client launcher log
+   * via the intrinsic `readClientLog` RPC. `true` iff
+   * `saveConfig.clientPath` is a non-empty string. The actual file
+   * may still be missing at read time — the RPC surfaces that as
+   * an error. Useful for tools/resources that want to advertise
+   * availability up front instead of discovering it on first call.
+   */
+  clientLogAvailable: boolean
   /** Absolute path to the build output directory. */
   outputDir: string
   /** Absolute path to the project root. */
@@ -437,6 +448,40 @@ export interface ReadServerLogParams {
  * in-memory stream).
  */
 export type ReadServerLogResult = ReadBuildLogResult
+
+/**
+ * Client-log query parameters. Same shape as the server-log params
+ * minus `since`/`until` — the launcher log isn't timestamped in the
+ * daemon's sense, so a window-by-time filter wouldn't map cleanly.
+ * `tail`/`maxLines` cap the response; `range` selects a line-ID slice
+ * (inclusive, IDs count back from the newest line, `0` = newest).
+ */
+export interface ReadClientLogParams {
+  tail: number | null
+  maxLines: number | null
+  range: { from: number; to: number } | null
+}
+
+/**
+ * Client-log result. Read directly from the local Minecraft client's
+ * `logs/latest.log` (resolved via `saveConfig.clientPath`) — this is
+ * an intrinsic daemon capability, not a host provider feature, so
+ * the result is available even when the daemon's host provider is
+ * `integrated` / `ssh` / `ftp` / `mcsmanager-login` (none of which
+ * own the launcher).
+ *
+ * `path` is the resolved file path on disk. `lines` is the post-filter
+ * slice (newest at the end). `totalLines` is the file's line count
+ * (pre-filter); `matchedLines` is post-filter but pre-truncation;
+ * `truncated` indicates the `tail`/`maxLines` cap kicked in.
+ */
+export interface ReadClientLogResult {
+  path: string
+  lines: string[]
+  totalLines: number
+  matchedLines: number
+  truncated: boolean
+}
 
 export interface GetWatchedFilesResult {
   files: Array<{

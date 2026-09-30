@@ -18,7 +18,6 @@ export type {
   HostConfigInput,
   SshHostConfig,
   FtpHostConfig,
-  LocalClientHostConfig,
   IntegratedHostConfig,
   McsManagerHostConfig,
 } from './types.js'
@@ -32,7 +31,6 @@ export { UnsupportedCapabilityError, NotConnectedError, HostAuthError } from './
 import { registerProvider } from './registry.js'
 import { createSshHost } from './providers/ssh.js'
 import { createFtpHost } from './providers/ftp.js'
-import { createLocalClientHost } from './providers/local-client.js'
 import { createIntegratedHost } from './providers/integrated.js'
 import { createMcsManagerHost } from './providers/mcsmanager-login.js'
 import { Capability } from './types.js'
@@ -59,13 +57,6 @@ registerProvider({
     Capability.AttachLog,
   ]),
   create: createFtpHost,
-})
-
-registerProvider({
-  type: 'local-client',
-  displayName: 'Local Client',
-  capabilities: new Set([Capability.AttachLog]),
-  create: createLocalClientHost,
 })
 
 registerProvider({

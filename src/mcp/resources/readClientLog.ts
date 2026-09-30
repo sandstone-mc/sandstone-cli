@@ -2,11 +2,11 @@
  * `sandstone://client-log{?tail,from,to}` — Minecraft client
  * (launcher) log.
  *
- * Reads through the daemon's `readFile` RPC, which delegates to the
- * `local-client` host provider when the daemon is configured with one.
- * The MCP server never reads the file directly — that goes through the
- * host abstraction so the same path works for SSH/FTP daemons in the
- * future (reading logs on a remote server).
+ * Reads through the daemon's intrinsic `readClientLog` RPC, which
+ * reads directly from the local Minecraft client's
+ * `logs/latest.log` (resolved via `saveConfig.clientPath`). The MCP
+ * server never reads the file directly — the daemon owns the launcher
+ * log access regardless of which host provider owns the MC server.
  *
  * Query params (all three are REQUIRED on every call). Pass `-1` for
  * the line-ID bounds to skip the range filter:
@@ -18,8 +18,7 @@
  *
  * Returns a helpful message when:
  *   - mode is library (no client deploy target),
- *   - `saveConfig.clientPath` is unset (user hasn't configured one),
- *   - the daemon host doesn't advertise the `ReadFile` capability.
+ *   - `saveConfig.clientPath` is unset (user hasn't configured one).
  *
  * Resource URI: `sandstone://client-log{?tail,from,to}`
  * Format: `text/plain`
@@ -31,72 +30,7 @@ export const URI = 'sandstone://client-log{?tail,from,to}'
 export const FIXED_URI = 'sandstone://client-log'
 export const MIME = 'text/plain'
 export const NAME = 'client-log'
-export const DESCRIPTION = 'Minecraft client log, read through the daemon\'s host provider (local-client / ssh / ftp). All three query params required; pass `-1` to skip a filter.'
-
-export async function read(
-  ctx: McpContext,
-  params: { tail: number; from: number; to: number },
-): Promise<{ uri: string; mimeType: string; text: string }> {
-  const daemon = await requireDaemon(ctx.projectRoot)
-  const active = await daemon.getActiveConfig()
-  const saveConfig = active.saveConfig
-
-  if (active.mode === 'library') {
-    return {
-      uri: FIXED_URI,
-      mimeType: MIME,
-      text: 'Not applicable in library mode — libraries don\'t deploy to a Minecraft client.',
-    }
-  }
-  const clientPath = saveConfig?.clientPath
-  if (!clientPath) {
-    return {
-      uri: FIXED_URI,
-      mimeType: MIME,
-      text: '`saveOptions.clientPath` is not set in `sandstone.config.ts`. Set it to a Minecraft installation directory to enable this resource.',
-    }
-  }
-  if (!daemon.welcome.capabilities.readFile) {
-    return {
-      uri: FIXED_URI,
-      mimeType: MIME,
-      text: `Daemon host \`${daemon.welcome.hostType}\` does not support readFile. Use a host provider that can read files (e.g. \`local-client\`, \`ssh\`, \`ftp\`).`,
-    }
-  }
-
-  // Read the standard client log location. The local-client host resolves
-  // relative paths against `clientPath`; absolute paths read directly.
-  const logRelative = 'logs/latest.log'
-  let text: string
-  try {
-    // `encode: 'utf-8'` consumes the streaming RPC server-side and
-    // returns a single string. If the caller forgot to pass
-    // `encode`, the daemon returns raw bytes — decode here so the
-    // MCP resource surface stays UTF-8.
-    const result = await daemon.readFile({ path: logRelative, encode: 'utf-8' })
-    text = typeof result.data === 'string' ? result.data : Buffer.from(result.data).toString('utf-8')
-  } catch (err) {
-    return {
-      uri: FIXED_URI,
-      mimeType: MIME,
-      text: `Failed to read client log at \`${clientPath}/${logRelative}\`: ${err instanceof Error ? err.message : String(err)}`,
-    }
-  }
-
-  // Filter: split into lines (line 0 = last line = newest), apply
-  // range/tail in the MCP layer since the host provider only returns
-  // a byte buffer.
-  const allLines = text.split('\n')
-  // Drop a trailing empty produced by terminal newline (file ends with \n).
-  if (allLines.length > 0 && allLines[allLines.length - 1] === '') allLines.pop()
-  const filtered = applyLogRange(allLines, params)
-
-  return {
-    uri: FIXED_URI,
-    mimeType: MIME,
-    text: filtered.join('\n'),
-  }
-}
+export const DESCRIPTION = 'Minecraft client log, read via the daemon\'s intrinsic `readClientLog` RPC. All three query params required; pass `-1` to skip a filter.'
 
 /**
  * Apply tail / line ID range to a line array. `0` is the most recent
@@ -118,4 +52,53 @@ export function applyLogRange(
   }
   const want = params.tail === -1 ? 200 : params.tail
   return lines.slice(-want)
+}
+
+export async function read(
+  ctx: McpContext,
+  params: { tail: number; from: number; to: number },
+): Promise<{ uri: string; mimeType: string; text: string }> {
+  const daemon = await requireDaemon(ctx.projectRoot)
+  const active = await daemon.getActiveConfig()
+
+  if (active.mode === 'library') {
+    return {
+      uri: FIXED_URI,
+      mimeType: MIME,
+      text: 'Not applicable in library mode — libraries don\'t deploy to a Minecraft client.',
+    }
+  }
+  const clientPath = active.saveConfig?.clientPath
+  if (!clientPath) {
+    return {
+      uri: FIXED_URI,
+      mimeType: MIME,
+      text: '`saveOptions.clientPath` is not set in `sandstone.config.ts`. Set it to a Minecraft installation directory to enable this resource.',
+    }
+  }
+
+  // Delegate to the daemon's intrinsic `readClientLog` RPC. The
+  // daemon streams the file, applies tail/maxLines/range, and
+  // returns the filtered slice — we just re-shape the URI template
+  // sentinels (`-1` = "no filter") into the wire shape.
+  let result
+  try {
+    result = await daemon.readClientLog({
+      tail: params.tail === -1 ? null : params.tail,
+      maxLines: null,
+      range: params.from !== -1 && params.to !== -1 ? { from: params.from, to: params.to } : null,
+    })
+  } catch (err) {
+    return {
+      uri: FIXED_URI,
+      mimeType: MIME,
+      text: `Failed to read client log at \`${clientPath}/logs/latest.log\`: ${err instanceof Error ? err.message : String(err)}`,
+    }
+  }
+
+  return {
+    uri: FIXED_URI,
+    mimeType: MIME,
+    text: result.lines.join('\n'),
+  }
 }

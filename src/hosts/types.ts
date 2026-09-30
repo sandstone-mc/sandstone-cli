@@ -16,7 +16,6 @@ import type { SandstoneConfig } from 'sandstone'
 export type HostType =
   | 'ssh'
   | 'ftp'
-  | 'local-client'
   | 'integrated'
   | 'mcsmanager-login'
 
@@ -49,7 +48,6 @@ export const Capability = {
 export const HOST_TYPES = [
   'ssh',
   'ftp',
-  'local-client',
   'integrated',
   'mcsmanager-login',
 ] as const satisfies readonly HostType[]
@@ -233,13 +231,6 @@ export interface FtpHostConfig extends BaseHostConfig {
   rcon?: RconConfig
 }
 
-export interface LocalClientHostConfig extends BaseHostConfig {
-  /** Path to the launcher-managed Minecraft dir (saves/, logs/, etc). Comes from MinecraftInstance.minecraftPath. */
-  clientPath: string
-  /** Override the default log location. Default: `${clientPath}/logs/latest.log`. */
-  logPath?: string
-}
-
 export interface IntegratedHostConfig extends BaseHostConfig {
   /** Absolute path to the directory the CLI should manage the Fabric server inside. Default: `${projectRoot}/.sandstone/mc-server/`. */
   serverDir?: string
@@ -388,7 +379,6 @@ export interface CapabilityMethods {
 export type HostConfigInput = Partial<
   | SshHostConfig
   | FtpHostConfig
-  | LocalClientHostConfig
   | IntegratedHostConfig
   | McsManagerHostConfig
 >

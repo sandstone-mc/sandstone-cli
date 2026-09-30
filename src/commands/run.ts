@@ -68,7 +68,6 @@ const DEFAULT_TIMEOUT_SECONDS = 30
 const KNOWN_HOST_TYPES = new Set<HostType>([
   'ssh',
   'ftp',
-  'local-client',
   'integrated',
   'mcsmanager-login',
 ])
@@ -141,9 +140,9 @@ export async function runCommand(
       opts.hostConfig = JSON.stringify({})
     }
   }
-  // Forward to bootstrapHosts so it can auto-include `local-client` using
-  // the same sandstone.config.ts load that injects `sandstoneConfig` per
-  // host — no duplicate `import()` per invocation.
+  // Forward to bootstrapHosts so it can inject `sandstoneConfig` per
+  // host from the same sandstone.config.ts load — no duplicate
+  // `import()` per invocation.
   const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
 
   // 6. Daemon-mode fast path.

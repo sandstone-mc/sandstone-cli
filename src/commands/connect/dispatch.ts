@@ -35,6 +35,8 @@ import {
   type WriteFileResult,
   type ReadServerLogParams,
   type ReadServerLogResult,
+  type ReadClientLogParams,
+  type ReadClientLogResult,
   type RebuildState,
   type RpcError,
   type TriggerBuildEvent,
@@ -301,6 +303,8 @@ async function route(
       return handleReadTestLog(ctx, params)
     case 'readServerLog':
       return handleReadServerLog(ctx, params)
+    case 'readClientLog':
+      return handleReadClientLog(ctx, params)
     case 'getWatchedFiles':
       return handleGetWatchedFiles(ctx)
     case 'publishConfig':
@@ -569,10 +573,17 @@ async function requireActiveConfig(ctx: DispatchContext): Promise<ActiveConfig> 
 
 async function handleGetActiveConfig(ctx: DispatchContext): Promise<GetActiveConfigResult> {
   const cfg = await requireActiveConfig(ctx)
+  const clientPath = cfg.saveConfig?.clientPath
   return {
     mode: cfg.mode,
     configPath: cfg.configPath,
     saveConfig: cfg.saveConfig,
+    // The intrinsic client-log RPC can serve a log iff
+    // `saveConfig.clientPath` is configured. The actual file may
+    // still be missing at read time — the RPC surfaces that — but
+    // availability here lets tools advertise / pre-check before
+    // attempting the read.
+    clientLogAvailable: typeof clientPath === 'string' && clientPath.length > 0,
     outputDir: cfg.outputDir,
     projectRoot: cfg.projectRoot,
     loadedAt: cfg.loadedAt,
@@ -665,6 +676,97 @@ async function handleReadServerLog(
     newestTs: buf.newestTs,
     truncated: buf.truncated,
   }
+}
+
+/**
+ * Read the Minecraft client launcher log — intrinsic daemon capability,
+ * NOT a host provider feature. The daemon reads directly from the
+ * configured `clientPath/logs/latest.log` (resolved via the active
+ * sandstone.config.ts) since the launcher lives on the machine the
+ * daemon runs on, regardless of where the MC server itself runs.
+ *
+ * Streams the file via `fs.createReadStream` + `TextDecoder(stream:
+ * true)` so multi-MB log files don't materialise in memory before
+ * filtering. Tail / maxLines / range filter the resulting line array.
+ */
+async function handleReadClientLog(
+  ctx: DispatchContext,
+  params: unknown,
+): Promise<ReadClientLogResult> {
+  const cfg = await requireActiveConfig(ctx)
+  const clientPath = cfg.saveConfig?.clientPath
+  if (!clientPath) {
+    throw rpcError(
+      RpcErrorCode.InvalidParams,
+      'No `saveConfig.clientPath` configured in sandstone.config.ts',
+    )
+  }
+  const { tail, maxLines, range } = parseParams<ReadClientLogParams>(
+    params,
+    ['tail', 'maxLines', 'range'],
+  )
+  const logPath = `${clientPath}/logs/latest.log`
+  const lines = await readLinesFromFile(logPath)
+  const totalLines = lines.length
+
+  // Range filter: `0` = most recent line in the file. Negative
+  // counts from the end (per the existing log RPC conventions).
+  let selected = lines
+  if (range && range.from !== -1 && range.to !== -1) {
+    const len = selected.length
+    const startIdx = len - 1 - Math.min(range.from, len - 1)
+    const endIdx = len - 1 - Math.min(range.to, len - 1)
+    const lo = Math.max(0, Math.min(startIdx, endIdx))
+    const hi = Math.min(len - 1, Math.max(startIdx, endIdx))
+    selected = selected.slice(lo, hi + 1)
+  }
+  const matchedLines = selected.length
+
+  // Tail / maxLines cap the final slice.
+  const want = tail ?? maxLines ?? 200
+  const truncated = selected.length > want
+  const finalLines = truncated ? selected.slice(-want) : selected
+
+  return {
+    path: logPath,
+    lines: finalLines,
+    totalLines,
+    matchedLines,
+    truncated,
+  }
+}
+
+/**
+ * Read a text file as an array of complete lines. Multi-byte-safe via
+ * `TextDecoder({ stream: true })` — bytes split mid-UTF-8-character
+ * are buffered across reads until the next chunk arrives. The
+ * trailing partial line (no terminating `\n`) is preserved.
+ */
+async function readLinesFromFile(path: string): Promise<string[]> {
+  const { createReadStream } = await import('node:fs')
+  const stream = createReadStream(path)
+  const decoder = new TextDecoder('utf-8')
+  const lines: string[] = []
+  let pending = ''
+  try {
+    for await (const chunk of stream) {
+      pending += decoder.decode(chunk, { stream: true })
+      const parts = pending.split('\n')
+      pending = parts.pop() ?? ''
+      if (parts.length > 0) lines.push(...parts)
+    }
+    // Flush the decoder so any bytes still buffered internally land
+    // in `pending`, then emit the trailing partial line if any.
+    pending += decoder.decode()
+    if (pending.length > 0) lines.push(pending)
+  } catch (err) {
+    // Re-throw with the file path for diagnosability — the MCP layer
+    // surfaces the message verbatim in the resource response.
+    throw new Error(
+      `Failed to read log at ${path}: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+  return lines
 }
 
 async function handlePublishLog(

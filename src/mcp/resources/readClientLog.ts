@@ -19,7 +19,7 @@
  * Format: `text/plain`
  */
 
-import { withDaemon, type McpContext } from '../daemon-client.js'
+import { type McpBridge } from '../bridge.js'
 import { coerceClientLogParams } from '../../utils/logParams.js'
 
 export const URI = 'sandstone://client-log{?tail,from,to}'
@@ -29,10 +29,10 @@ export const NAME = 'client-log'
 export const DESCRIPTION = 'Minecraft client log, read via the daemon\'s intrinsic `readClientLog` RPC. All three query params required; pass `-1` to skip a filter.'
 
 export async function read(
-  ctx: McpContext,
+  bridge: McpBridge,
   params: { tail: number; from: number; to: number },
 ): Promise<{ uri: string; mimeType: string; text: string }> {
-  return withDaemon(ctx, async (daemon) => {
+  return bridge.withDaemon(async (daemon) => {
     const active = await daemon.getActiveConfig()
     if (active.mode === 'library') {
       return {

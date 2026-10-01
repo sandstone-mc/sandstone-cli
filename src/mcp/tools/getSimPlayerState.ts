@@ -2,14 +2,14 @@
  * `getSimPlayerState` tool — backend not implemented yet.
  */
 
-import type { McpContext } from '../daemon-client.js'
+import type { McpBridge } from '../bridge.js'
 
 export const NAME = 'getSimPlayerState'
 export const DESCRIPTION =
   'Query the simPlayer runtime state. SimPlayer backend not implemented yet.'
 
 export async function call(
-  _ctx: McpContext,
+  _bridge: McpBridge,
   _args: Record<string, never>,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   return {

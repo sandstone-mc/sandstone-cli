@@ -24,7 +24,7 @@ import { bootstrapHost, BootstrapError } from '../../commands/connect/bootstrap.
 import { connect as openClient } from '../../commands/connect/client.js'
 import { endpointStatus, readEndpoint } from '../../commands/connect/endpoint-file.js'
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
-import type { McpContext } from '../daemon-client.js'
+import type { McpBridge } from '../bridge.js'
 import type { HostProvider, HostType, HostConfigInput } from '../../hosts/types.js'
 import { DEFAULT_HOST_TYPE } from '../../commands/connect/index.js'
 
@@ -33,7 +33,7 @@ export const DESCRIPTION =
   'Send a Minecraft console command via the host daemon. Bootstrap behaviour: connects to `sand connect` if alive, otherwise spawns a direct host connection (matches `sand run` semantics).'
 
 export async function call(
-  ctx: McpContext,
+  bridge: McpBridge,
   args: {
     command: string
     hostType?: string
@@ -49,9 +49,9 @@ export async function call(
   }
 
   // 1. Daemon path — preferred when alive.
-  const status = await endpointStatus(ctx.projectRoot)
+  const status = await endpointStatus(bridge.ctx.projectRoot)
   if (status === 'live') {
-    const endpoint = await readEndpoint(ctx.projectRoot)
+    const endpoint = await readEndpoint(bridge.ctx.projectRoot)
     if (endpoint) {
       // Two distinct failure modes must NOT be conflated:
       //   - `openClient` throws  → daemon is unreachable, fall through
@@ -113,7 +113,7 @@ export async function call(
     : DEFAULT_HOST_TYPE
   const userProvidedHostSettings = !!args.hostType || !!args.hostConfig
 
-  if (args.hostConfig && args.hostConfig.projectRoot === undefined) args.hostConfig.projectRoot = ctx.projectRoot
+  if (args.hostConfig && args.hostConfig.projectRoot === undefined) args.hostConfig.projectRoot = bridge.ctx.projectRoot
 
   let host: HostProvider
   let weStarted = false

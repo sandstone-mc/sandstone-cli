@@ -11,7 +11,7 @@
  * Format: `text/plain`
  */
 
-import { withDaemon, type McpContext } from '../daemon-client.js'
+import { type McpBridge } from '../bridge.js'
 import { coerceFileLogParams, formatLogHeader } from '../../utils/logParams.js'
 
 export const URI = 'sandstone://build-log{?tail,maxLines,from,to,since,until}'
@@ -21,10 +21,10 @@ export const NAME = 'sandstone-log'
 export const DESCRIPTION = 'Watcher log buffer (pushed via `publishLog`). All six query params required; pass `-1` to skip a filter.'
 
 export async function read(
-  ctx: McpContext,
+  bridge: McpBridge,
   params: { tail: number; maxLines: number; from: number; to: number; since: number; until: number },
 ): Promise<{ uri: string; mimeType: string; text: string }> {
-  return withDaemon(ctx, async (daemon) => {
+  return bridge.withDaemon(async (daemon) => {
     const result = await daemon.readBuildLog(coerceFileLogParams(params))
     return {
       uri: FIXED_URI,

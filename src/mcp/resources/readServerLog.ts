@@ -13,7 +13,7 @@
  * Format: `text/plain`
  */
 
-import { withDaemon, type McpContext } from '../daemon-client.js'
+import { type McpBridge } from '../bridge.js'
 import { coerceFileLogParams, formatLogHeader } from '../../utils/logParams.js'
 
 export const URI = 'sandstone://server-log{?tail,maxLines,from,to,since,until}'
@@ -23,10 +23,10 @@ export const NAME = 'server-log'
 export const DESCRIPTION = 'Minecraft server log, read from the daemon\'s in-memory buffer (populated via the host\'s `attachLog` at daemon boot). All six query params required; pass `-1` to skip a filter.'
 
 export async function read(
-  ctx: McpContext,
+  bridge: McpBridge,
   params: { tail: number; maxLines: number; from: number; to: number; since: number; until: number },
 ): Promise<{ uri: string; mimeType: string; text: string }> {
-  return withDaemon(ctx, async (daemon) => {
+  return bridge.withDaemon(async (daemon) => {
     const result = await daemon.readServerLog(coerceFileLogParams(params))
     return {
       uri: FIXED_URI,

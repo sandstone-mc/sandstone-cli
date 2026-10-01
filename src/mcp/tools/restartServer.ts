@@ -1,5 +1,5 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
-import { requireDaemon, type McpContext } from '../daemon-client.js'
+import { type McpBridge } from '../bridge.js'
 import { restartServer as runRestart, checkRestartCapabilities } from '../../commands/restart-server.js'
 
 export const NAME = 'restartServer'
@@ -15,10 +15,10 @@ export const DESCRIPTION =
   'or `resources/read sandstone://server-log` afterwards to confirm clean restart.'
 
 export async function call(
-  ctx: McpContext,
+  ctx: McpBridge,
   _args: Record<string, never> = {},
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
-  const daemon = await requireDaemon(ctx.projectRoot)
+  const daemon = await ctx.requireDaemon()
 
   const capabilityError = checkRestartCapabilities(daemon.welcome)
   if (capabilityError) {

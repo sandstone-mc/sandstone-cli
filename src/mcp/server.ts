@@ -55,17 +55,13 @@ import * as runTest from './tools/runTest.js'
 import * as runSimPlayerPlan from './tools/runSimPlayerPlan.js'
 import * as getSimPlayerState from './tools/getSimPlayerState.js'
 
-import {
-  forwardConfigChangedToResource,
-  forwardNotificationsToStdio,
-  makeContext,
-  requireDaemon,
-  type McpContext,
-} from './daemon-client.js'
+import { makeContext } from './daemon-client.js'
+import { McpBridge } from './bridge.js'
 
 /** Build, register, and return an `McpServer` ready to connect. */
-export async function buildMcpServer(opts: { path: string; version: string }): Promise<McpServer> {
+export async function buildMcpServer(opts: { path: string; version: string }): Promise<{ server: McpServer; bridge: McpBridge }> {
   const ctx = makeContext(opts)
+  const bridge = new McpBridge(ctx)
 
   const server = new McpServer(
     {
@@ -88,69 +84,76 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
   // -----------------------------------------------------------------
   // Resources
   // -----------------------------------------------------------------
-  server.resource(
+  server.registerResource(
     getSaveConfig.NAME,
     getSaveConfig.URI,
-    async (uri) => {
-      const r = await getSaveConfig.read(ctx)
+    { title: getSaveConfig.NAME, description: getSaveConfig.DESCRIPTION },
+    async (_uri) => {
+      const r = await getSaveConfig.read(bridge)
       return { contents: [r] }
     },
   )
   // Log readers use URI templates so callers can pass `tail` / `rangeFrom` /
-// `rangeTo` / `since` / `until` query params. RFC 6570 expansion gives
-// us `params` as a `{key: string}[]` we coerce to numbers for the
-// handlers below.
-  server.resource(
+  // `rangeTo` / `since` / `until` query params. RFC 6570 expansion gives
+  // us `params` as a `{key: string}[]` we coerce to numbers for the
+  // handlers below.
+  server.registerResource(
     readSandstoneLog.NAME,
     new ResourceTemplate(readSandstoneLog.URI, { list: undefined }),
-    async (uri, params) => {
-      const r = await readSandstoneLog.read(ctx, coerceLogParams(params))
+    { title: readSandstoneLog.NAME, description: readSandstoneLog.DESCRIPTION },
+    async (_uri, params) => {
+      const r = await readSandstoneLog.read(bridge, coerceLogParams(params))
       return { contents: [r] }
     },
   )
   // Fixed URI for the build-output root. The template `{path}` below
   // can't match zero-length segments, so the root is registered twice:
   // once as a fixed URI, once as the template for descendants.
-  server.resource(
+  server.registerResource(
     `${readSandstoneOutput.NAME}-root`,
     readSandstoneOutput.FIXED_URI,
-    async (uri) => {
-      const r = await readSandstoneOutput.read(ctx, '')
+    { title: `${readSandstoneOutput.NAME} root`, description: readSandstoneOutput.DESCRIPTION },
+    async (_uri) => {
+      const r = await readSandstoneOutput.read(bridge, '')
       return { contents: [r] }
     },
   )
   // Template: `sandstone://build-output/{path}` — agents descend with
   // subpaths. `{path}` matches exactly one segment.
-  server.resource(
+  server.registerResource(
     readSandstoneOutput.NAME,
     new ResourceTemplate(readSandstoneOutput.TEMPLATE_URI, { list: undefined }),
-    async (uri, params) => {
+    { title: readSandstoneOutput.NAME, description: readSandstoneOutput.DESCRIPTION },
+    async (_uri, params) => {
       const path = typeof params.path === 'string' ? params.path : ''
-      const r = await readSandstoneOutput.read(ctx, path)
+      const r = await readSandstoneOutput.read(bridge, path)
       return { contents: [r] }
     },
   )
-  server.resource(
+  server.registerResource(
     readClientLog.NAME,
     new ResourceTemplate(readClientLog.URI, { list: undefined }),
-    async (uri, params) => {
-      const r = await readClientLog.read(ctx, coerceFileLogParams(params))
+    { title: readClientLog.NAME, description: readClientLog.DESCRIPTION },
+    async (_uri, params) => {
+      const r = await readClientLog.read(bridge, coerceFileLogParams(params))
       return { contents: [r] }
     },
   )
-  server.resource(
+  server.registerResource(
     readServerLog.NAME,
     new ResourceTemplate(readServerLog.URI, { list: undefined }),
-    async (uri, params) => {
-      const r = await readServerLog.read(ctx, coerceLogParams(params))
+    { title: readServerLog.NAME, description: readServerLog.DESCRIPTION },
+    async (_uri, params) => {
+      const r = await readServerLog.read(bridge, coerceLogParams(params))
       return { contents: [r] }
     },
   )
-  server.resource(
+  server.registerResource(
     readTestLog.NAME,
     new ResourceTemplate(readTestLog.URI, { list: undefined }),
-    async (uri, params) => {
-      const r = await readTestLog.read(ctx, coerceLogParams(params))
+    { title: readTestLog.NAME, description: readTestLog.DESCRIPTION },
+    async (_uri, params) => {
+      const r = await readTestLog.read(bridge, coerceLogParams(params))
       return { contents: [r] }
     },
   )
@@ -158,22 +161,24 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
   // the daemon's latest `publishRebuild` snapshot. Watcher pushes
   // state at build start + finish; daemon fires
   // `notifications/resources/updated` to every subscribed client.
-  server.resource(
+  server.registerResource(
     rebuildState.NAME,
     rebuildState.URI,
-    async (uri) => {
-      const r = await rebuildState.read(ctx)
+    { title: rebuildState.NAME, description: rebuildState.DESCRIPTION },
+    async (_uri) => {
+      const r = await rebuildState.read(bridge)
       return { contents: [r] }
     },
   )
   // Fixed URI: synthetic `sandstone://watcher-status` resource. Watcher
   // publishes its runtime state on connect; daemon flips
   // `connected: false` when the watcher's WS session closes.
-  server.resource(
+  server.registerResource(
     watcherStatus.NAME,
     watcherStatus.URI,
-    async (uri) => {
-      const r = await watcherStatus.read(ctx)
+    { title: watcherStatus.NAME, description: watcherStatus.DESCRIPTION },
+    async (_uri) => {
+      const r = await watcherStatus.read(bridge)
       return { contents: [r] }
     },
   )
@@ -181,52 +186,57 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
   // -----------------------------------------------------------------
   // Tools
   // -----------------------------------------------------------------
-  server.tool(
+  server.registerTool(
     runWorkspaceBuild.NAME,
-    runWorkspaceBuild.DESCRIPTION,
-    {},
-    async (_args, _extra) => runWorkspaceBuild.call(ctx),
+    { title: runWorkspaceBuild.NAME, description: runWorkspaceBuild.DESCRIPTION },
+    async () => runWorkspaceBuild.call(bridge),
   )
-  server.tool(
+  server.registerTool(
     deployToServer.NAME,
-    deployToServer.DESCRIPTION,
-    {},
-    async (args) => deployToServer.call(ctx, args),
+    { title: deployToServer.NAME, description: deployToServer.DESCRIPTION },
+    async () => deployToServer.call(bridge, {}),
   )
-  server.tool(
+  server.registerTool(
     restartServer.NAME,
-    restartServer.DESCRIPTION,
-    {},
-    async (args) => restartServer.call(ctx, args as Record<string, never>),
+    { title: restartServer.NAME, description: restartServer.DESCRIPTION },
+    async () => restartServer.call(bridge, {}),
   )
-  server.tool(
+  server.registerTool(
     runServerCommand.NAME,
-    runServerCommand.DESCRIPTION,
     {
-      command: z.string(),
-      hostType: z.string().optional(),
-      hostConfig: z.record(z.string(), z.unknown()).optional(),
-      expect: z.string().optional(),
+      title: runServerCommand.NAME,
+      description: runServerCommand.DESCRIPTION,
+      inputSchema: {
+        command: z.string(),
+        hostType: z.string().optional(),
+        hostConfig: z.record(z.string(), z.unknown()).optional(),
+        expect: z.string().optional(),
+      },
     },
-    async (args) => runServerCommand.call(ctx, args as Parameters<typeof runServerCommand.call>[1]),
+    async (args) => runServerCommand.call(bridge, args as Parameters<typeof runServerCommand.call>[1]),
   )
-  server.tool(
+  server.registerTool(
     runTest.NAME,
-    runTest.DESCRIPTION,
-    { path: z.string() },
-    async (args) => runTest.call(ctx, args as { path: string }),
+    {
+      title: runTest.NAME,
+      description: runTest.DESCRIPTION,
+      inputSchema: { path: z.string() },
+    },
+    async (args) => runTest.call(bridge, args as { path: string }),
   )
-  server.tool(
+  server.registerTool(
     runSimPlayerPlan.NAME,
-    runSimPlayerPlan.DESCRIPTION,
-    { plan: z.string() },
-    async (args) => runSimPlayerPlan.call(ctx, args as { plan: string }),
+    {
+      title: runSimPlayerPlan.NAME,
+      description: runSimPlayerPlan.DESCRIPTION,
+      inputSchema: { plan: z.string() },
+    },
+    async (args) => runSimPlayerPlan.call(bridge, args),
   )
-  server.tool(
+  server.registerTool(
     getSimPlayerState.NAME,
-    getSimPlayerState.DESCRIPTION,
-    {},
-    async () => getSimPlayerState.call(ctx, {}),
+    { title: getSimPlayerState.NAME, description: getSimPlayerState.DESCRIPTION },
+    async () => getSimPlayerState.call(bridge, {}),
   )
 
   // -----------------------------------------------------------------
@@ -244,45 +254,26 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
   // Daemon event forwarding (best-effort)
   // -----------------------------------------------------------------
   // Don't block server startup if the daemon is down — most resources
-  // will surface the error per-call.
-  console.error(`[mcp-debug] buildMcpServer: registering daemon forwarders @ ${Date.now()}`)
-  try {
-    const daemon = await requireDaemon(ctx.projectRoot)
-    console.error(`[mcp-debug] buildMcpServer: daemon acquired @ ${Date.now()}`)
-    forwardConfigChangedToResource(server.server, daemon)
-    // Bridge WS-received notifications → stdio output. Without this,
-    // daemon-pushed notifications (e.g. `notifications/resources/updated`
-    // for `sandstone://rebuild-state`) die in the WS receive path —
-    // the SDK's typed handlers cover configChanged/log, but generic
-    // resource notifications have nowhere to go.
-    forwardNotificationsToStdio(daemon, server)
-    console.error(`[mcp-debug] buildMcpServer: forwarders wired @ ${Date.now()}`)
-  } catch (e) {
-    console.error(`[mcp-debug] buildMcpServer: requireDaemon failed @ ${Date.now()}:`, e instanceof Error ? e.message : e)
-    // No daemon — agent will discover this when it calls a resource.
-  }
-  console.error(`[mcp-debug] buildMcpServer: returning server @ ${Date.now()}`)
+  // will surface the error per-call. The bridge caches the client
+  // across tool/resource calls; this is just the initial wire-up.
+  bridge.attachForwarders(server)
 
-  return server
+  return { server, bridge }
 }
 
 /**
  * Start the MCP server on stdio. Blocks until stdin closes.
  */
 export async function runMcpServer(opts: { path: string; version: string }): Promise<void> {
-  console.error(`[mcp-debug] runMcpServer start @ ${Date.now()}`)
-  const server = await buildMcpServer(opts)
-  console.error(`[mcp-debug] buildMcpServer done @ ${Date.now()}`)
+  const { server, bridge } = await buildMcpServer(opts)
   const transport = new StdioServerTransport()
-  console.error(`[mcp-debug] transport created @ ${Date.now()}; calling server.connect()`)
   await server.connect(transport)
-  console.error(`[mcp-debug] server.connect() RESOLVED @ ${Date.now()}; awaiting transport close`)
   // `server.connect()` resolves once the transport is wired — it does
   // NOT block until stdin closes. Wait for the transport's `onclose`
   // callback so the process stays alive while the parent is connected.
   await new Promise<void>((resolve) => {
     transport.onclose = () => {
-      console.error(`[mcp-debug] transport onclose @ ${Date.now()}`)
+      bridge.dispose()
       resolve()
     }
   })

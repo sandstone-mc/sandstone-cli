@@ -24,7 +24,7 @@
  */
 
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
-import { requireDaemon, type McpContext } from '../daemon-client.js'
+import { type McpBridge } from '../bridge.js'
 
 export const NAME = 'runWorkspaceBuild'
 
@@ -35,9 +35,9 @@ export const DESCRIPTION =
   'Pairs with subscribing to `sandstone://rebuild-state` for the build result; this tool returns immediately when the trigger is accepted and exactly one notification fires per build (when it completes or fails).'
 
 export async function call(
-  ctx: McpContext,
+  bridge: McpBridge,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
-  const daemon = await requireDaemon(ctx.projectRoot)
+  const daemon = await bridge.requireDaemon()
 
   // Need watcher status to decide the branch. We can't proceed without
   // it — surface a clean error if the daemon refuses to answer.

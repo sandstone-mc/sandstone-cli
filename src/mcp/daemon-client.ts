@@ -1,33 +1,10 @@
-/**
- * Daemon client wrapper for the MCP server.
- *
- * The MCP server is a *consumer* of `sand connect` — it connects to the
- * daemon's WebSocket and translates MCP `resources/*` / `tools/*`
- * requests into daemon RPCs. This module:
- *   - reads the endpoint file (`.sandstone/connect.url`) to discover
- *     the daemon's URL + secret,
- *   - opens a `Client` connection via the existing `connect/client.ts`,
- *   - exposes typed helpers (`getActiveConfig`, `getBuildOutputTree`,
- *     `readBuildLog`) that resource/tool handlers can call,
- *   - subscribes to `configChanged` events and republishes them as
- *     `notifications/resources/updated` on the MCP server.
- *
- * Bootstrap behaviour: when the daemon isn't running, callers should
- * surface an MCP `McpError` (NOT try to spawn the daemon — that's
- * `sand run`'s job, and only for tools that actually need a host). The
- * {@link requireDaemon} helper throws a `DaemonUnavailableError` with
- * structured `data` so the MCP SDK maps it to a protocol-level error
- * the agent can act on.
- */
-
 import { resolve } from 'node:path'
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
-import { connect as openClient, type Client } from '../commands/connect/client.js'
-import { endpointStatus, endpointPath, readEndpoint } from '../commands/connect/endpoint-file.js'
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js'
+import type { Client } from '../commands/connect/client.js'
 
 /**
- * Thrown by {@link requireDaemon} when no `sand connect` daemon is
+ * Thrown by `McpBridge.requireDaemon` when no `sand connect` daemon is
  * running for the project. The MCP SDK maps any thrown error to a
  * JSON-RPC error envelope; the `code` and `data` properties survive
  * (the SDK respects `McpError.code`/`data`).
@@ -44,30 +21,6 @@ export class DaemonUnavailableError extends McpError {
     })
     this.name = 'DaemonUnavailableError'
   }
-}
-
-/**
- * Bootstrap a daemon `Client`. Throws {@link DaemonUnavailableError}
- * when the daemon isn't running for the project. Returns the underlying
- * `Client` so callers can also subscribe to events (e.g.
- * `onConfigChanged`).
- */
-export async function requireDaemon(projectRoot: string): Promise<Client> {
-  const status = await endpointStatus(projectRoot)
-  if (status !== 'live') {
-    throw new DaemonUnavailableError(
-      `sand connect daemon not running. Start it with \`sand connect\` from the project root.`,
-      endpointPath(projectRoot),
-    )
-  }
-  const endpoint = await readEndpoint(projectRoot)
-  if (!endpoint) {
-    throw new DaemonUnavailableError(
-      `sand connect daemon not running (no endpoint file). Start it with \`sand connect\`.`,
-      endpointPath(projectRoot),
-    )
-  }
-  return openClient({ endpoint })
 }
 
 /**
@@ -95,15 +48,14 @@ export function mcpErrorData(err: unknown): Record<string, unknown> {
  * re-emit.
  *
  * The fallback handler installed here catches every unhandled WS
- * notification and re-emits it on the MCP server's stdio transport
- * via `server.server.notification(...)`. Subscribed MCP clients see
- * the events live.
+ * notification and re-emits it on the MCP server's stdio transport.
+ * Subscribed MCP clients see the events live.
  */
 export function forwardNotificationsToStdio(
   daemonClient: Client,
   mcpServer: { server: { notification(notif: { method: string; params?: unknown }): Promise<void> } },
 ): void {
-  daemonClient.setFallbackNotificationHandler(async (notif) => {
+  daemonClient.setFallbackNotificationHandler(async (notif: { method: string; params?: unknown }) => {
     await mcpServer.server.notification({ method: notif.method, params: notif.params })
   })
 }
@@ -133,7 +85,7 @@ export function makeContext(opts: { path: string }): McpContext {
  */
 export function forwardConfigChangedToResource(
   server: Server,
-  client: Client,
+  client: { onConfigChanged: (cb: () => void) => () => void },
   uri: string = 'sandstone://save-config',
 ): () => void {
   return client.onConfigChanged(() => {
@@ -143,5 +95,3 @@ export function forwardConfigChangedToResource(
     })
   })
 }
-
-export { withDaemon } from './with-daemon.js'

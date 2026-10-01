@@ -18,7 +18,7 @@
  */
 
 import { formatConfigAsToml, sentinelizeNullish } from '../serialize-config.js'
-import { requireDaemon, type McpContext } from '../daemon-client.js'
+import { type McpBridge } from '../bridge.js'
 import type { RebuildState } from '../../commands/connect/rpc.js'
 
 export const URI = 'sandstone://rebuild-state'
@@ -27,8 +27,8 @@ export const MIME = 'application/toml'
 export const NAME = 'rebuild-state'
 export const DESCRIPTION = 'Current build state pushed by the watcher via `publishRebuild`. Subscribe to receive live start/finish events.'
 
-export async function read(ctx: McpContext): Promise<{ uri: string; mimeType: string; text: string }> {
-  const daemon = await requireDaemon(ctx.projectRoot)
+export async function read(bridge: McpBridge): Promise<{ uri: string; mimeType: string; text: string }> {
+  const daemon = await bridge.requireDaemon()
   const result = await daemon.getRebuildState()
   const state: RebuildState | null = result.state
   const body = sentinelizeNullish(state ?? { state: 'none', note: 'no watcher has pushed a build state yet' })

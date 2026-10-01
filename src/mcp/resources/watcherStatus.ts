@@ -19,7 +19,7 @@
  */
 
 import { formatConfigAsToml, sentinelizeNullish } from '../serialize-config.js'
-import { requireDaemon, type McpContext } from '../daemon-client.js'
+import { type McpBridge } from '../bridge.js'
 import type { WatcherStatus } from '../../commands/connect/rpc.js'
 
 export const URI = 'sandstone://watcher-status'
@@ -28,8 +28,8 @@ export const MIME = 'application/toml'
 export const NAME = 'watcher-status'
 export const DESCRIPTION = 'Current `sand watch` connection state (connected/mode/manual/path/pid). Subscribe for live connect/disconnect events.'
 
-export async function read(ctx: McpContext): Promise<{ uri: string; mimeType: string; text: string }> {
-  const daemon = await requireDaemon(ctx.projectRoot)
+export async function read(bridge: McpBridge): Promise<{ uri: string; mimeType: string; text: string }> {
+  const daemon = await bridge.requireDaemon()
   const result = await daemon.getWatcherStatus()
   const status: WatcherStatus | null = result.status
   const body = sentinelizeNullish(status ?? {

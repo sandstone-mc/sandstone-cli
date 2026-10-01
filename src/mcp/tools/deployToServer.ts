@@ -1,5 +1,5 @@
-import { requireDaemon, DaemonUnavailableError } from '../daemon-client.js'
-import type { McpContext } from '../daemon-client.js'
+import { DaemonUnavailableError } from '../daemon-client.js'
+import { type McpBridge } from '../bridge.js'
 import { deployDatapack, type DeployResult } from '../../commands/deploy.js'
 
 export const NAME = 'deployToServer'
@@ -51,12 +51,12 @@ function summarize(result: DeployResult): string {
 }
 
 export async function call(
-  ctx: McpContext,
+  bridge: McpBridge,
   _args: Record<string, never>,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   let daemonClient
   try {
-    daemonClient = await requireDaemon(ctx.projectRoot)
+    daemonClient = await bridge.requireDaemon()
   } catch (err) {
     if (err instanceof DaemonUnavailableError) throw err
     const message = err instanceof Error ? err.message : String(err)
@@ -91,7 +91,7 @@ export async function call(
   }
 
   try {
-    const result = await deployDatapack({ daemon: daemonClient, projectRoot: ctx.projectRoot })
+    const result = await deployDatapack({ daemon: daemonClient, projectRoot: bridge.ctx.projectRoot })
     return {
       content: [{
         type: 'text',

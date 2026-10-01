@@ -16,7 +16,7 @@
  */
 
 import { formatConfigAsToml } from '../serialize-config.js'
-import { requireDaemon, type McpContext } from '../daemon-client.js'
+import { type McpBridge } from '../bridge.js'
 
 export const URI = 'sandstone://save-config'
 export const MIME = 'application/toml'
@@ -24,8 +24,8 @@ export const NAME = 'save-config'
 export const DESCRIPTION =
   'The live `sandstone.config.ts` snapshot the watcher published to the `sand connect` daemon. Falls back to the daemon\'s boot-time disk load when no watcher is running.'
 
-export async function read(ctx: McpContext): Promise<{ uri: string; mimeType: string; text: string }> {
-  const daemon = await requireDaemon(ctx.projectRoot)
+export async function read(bridge: McpBridge): Promise<{ uri: string; mimeType: string; text: string }> {
+  const daemon = await bridge.requireDaemon()
   const active = await daemon.getActiveConfig()
   return {
     uri: URI,

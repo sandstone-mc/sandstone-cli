@@ -12,7 +12,7 @@
  */
 
 import { formatConfigAsToml, sentinelizeNullish } from '../serialize-config.js'
-import { requireDaemon, type McpContext } from '../daemon-client.js'
+import { type McpBridge } from '../bridge.js'
 
 /**
  * Template URI for paths under the build output directory.
@@ -30,8 +30,8 @@ export const DESCRIPTION = 'One level of the watcher\'s build output tree. Use t
 /**
  * Read at a specific subpath. Returns the entries as TOML.
  */
-export async function read(ctx: McpContext, subpath = ''): Promise<{ uri: string; mimeType: string; text: string }> {
-  const daemon = await requireDaemon(ctx.projectRoot)
+export async function read(bridge: McpBridge, subpath = ''): Promise<{ uri: string; mimeType: string; text: string }> {
+  const daemon = await bridge.requireDaemon()
   const tree = await daemon.getBuildOutputTree({ path: subpath, limit: 1000 })
   return {
     uri: `sandstone://build-output/${subpath}`,
@@ -48,8 +48,8 @@ export async function read(ctx: McpContext, subpath = ''): Promise<{ uri: string
  * List mode + base output directory without listing entries. Useful for
  * clients that want a quick overview.
  */
-export async function summary(ctx: McpContext): Promise<{ uri: string; mimeType: string; text: string }> {
-  const daemon = await requireDaemon(ctx.projectRoot)
+export async function summary(bridge: McpBridge): Promise<{ uri: string; mimeType: string; text: string }> {
+  const daemon = await bridge.requireDaemon()
   const active = await daemon.getActiveConfig()
   return {
     uri: 'sandstone://build-output',

@@ -5,14 +5,14 @@
  * datapack testing. No backend exists yet.
  */
 
-import type { McpContext } from '../daemon-client.js'
+import type { McpBridge } from '../bridge.js'
 
 export const NAME = 'runSimPlayerPlan'
 export const DESCRIPTION =
   'Execute a simPlayer automation plan. SimPlayer backend not implemented yet.'
 
 export async function call(
-  _ctx: McpContext,
+  _bridge: McpBridge,
   _args: { plan: string },
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   return {

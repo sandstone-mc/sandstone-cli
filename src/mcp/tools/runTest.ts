@@ -2,14 +2,14 @@
  * `runTest` tool — backend not implemented yet.
  */
 
-import type { McpContext } from '../daemon-client.js'
+import type { McpBridge } from '../bridge.js'
 
 export const NAME = 'runTest'
 export const DESCRIPTION =
   'Run a test file. Backend not implemented yet — there is no test runner wired into the CLI today. Tracking issue: TBD.'
 
 export async function call(
-  _ctx: McpContext,
+  _bridge: McpBridge,
   _args: { path: string },
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   return {

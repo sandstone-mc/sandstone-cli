@@ -248,7 +248,7 @@ export async function runCommand(
   // The bootstrap already started any StartServer-capable member
   // (idempotent — calling again is a no-op).
 
-  let output: string
+  let output: string | undefined
   try {
     output = await host.executeRawCommand!(command)
   } catch (err) {
@@ -261,7 +261,7 @@ export async function runCommand(
 
   if (expectRegex) {
     if (hasResponse) {
-      if (!expectRegex.test(output)) {
+      if (!expectRegex.test(output!)) {
         console.error(chalk`{red [run]} --expect did not match command response`)
         await safeDisconnect(host)
         process.exit(1)
@@ -788,7 +788,7 @@ async function runOneDirect(
 ): Promise<void> {
   const watcher =
     expectRegex && !hasResponse ? await attachAwaitHost(host, expectRegex, timeoutMs) : null
-  let output: string
+  let output: string | undefined
   try {
     output = await host.executeRawCommand!(command)
   } catch (err) {
@@ -803,7 +803,7 @@ async function runOneDirect(
   }
   if (hasResponse) {
     if (watcher) await watcher.cleanup().catch(() => {})
-    if (!expectRegex.test(output)) {
+    if (!expectRegex.test(output!)) {
       console.error(chalk`{red [run]} --expect did not match command response`)
       process.exit(1)
     }

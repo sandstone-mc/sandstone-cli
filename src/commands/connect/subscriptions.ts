@@ -1,23 +1,20 @@
-/**
- * Per-WebSocket subscription registry.
- *
- * Tracks live `attachLog` subscriptions so we can:
- *  - Resolve `subscriptionId` → owning ws + unattach thunk
- *  - Cascade-unattach everything on ws close (no leaked log handlers
- *    if the consumer disconnects without sending `unattach`)
- *
- * Server-side only — consumers shouldn't need to know about this.
- */
-
 import { randomUUID } from 'node:crypto'
 import { WsData } from './server.js'
 
 export interface SubscriptionRecord {
   subscriptionId: string
-  /** Opaque WebSocket handle (Bun's `ServerWebSocket`). Typed as `unknown` so this module stays host-agnostic. */
   ws: Bun.ServerWebSocket<WsData>
-  /** Provider's LogSubscription.unattach thunk. */
-  unattach: () => Promise<void>
+  /** Provider's LogSubscription.unattach thunk. Set by `setUnattach`; undefined before then. */
+  unattach?: () => Promise<void>
+  /**
+   * `true` between `registerWithId` and `setUnattach`. Cascade-cleanup
+   * during this window marks the record `cancelled` instead of calling
+   * the placeholder, so `setUnattach` can fire the real unattach
+   * immediately when the host finally resolves.
+   */
+  pending: boolean
+  /** Set by cascade-cleanup that arrived while still `pending`. */
+  cancelled: boolean
 }
 
 export class SubscriptionRegistry {
@@ -25,24 +22,20 @@ export class SubscriptionRegistry {
   /** Reverse lookup for cascade cleanup. */
   private readonly byWs = new WeakMap<object, Set<string>>()
 
-  /**
-   * Register a subscription. Returns the assigned id (which the caller
-   * will hand to the consumer in the `attachLog` response).
-   */
-  register(ws: Bun.ServerWebSocket<WsData>, unattach: () => Promise<void>): string {
-    return this.registerWithId(randomUUID(), ws, unattach)
+  register(ws: Bun.ServerWebSocket<WsData>): string {
+    return this.registerWithId(randomUUID(), ws)
   }
 
-  /**
-   * Register with an explicit subscription id. Used when the handler
-   * closure needs to reference the id before the underlying provider
-   * subscription is created (so its pushLog calls can tag batches).
-   */
-  registerWithId(subscriptionId: string, ws: Bun.ServerWebSocket<WsData>, unattach: () => Promise<void>): string {
+  registerWithId(subscriptionId: string, ws: Bun.ServerWebSocket<WsData>): string {
     if (this.byId.has(subscriptionId)) {
       throw new Error(`subscription id collision: ${subscriptionId}`)
     }
-    const record: SubscriptionRecord = { subscriptionId, ws, unattach }
+    const record: SubscriptionRecord = {
+      subscriptionId,
+      ws,
+      pending: true,
+      cancelled: false,
+    }
     this.byId.set(subscriptionId, record)
     const key = ws as object
     let set = this.byWs.get(key)
@@ -64,36 +57,57 @@ export class SubscriptionRegistry {
    * `attachLog` / `attachLogs` which register a placeholder before
    * calling the host (so the handler closure can reference the id) and
    * then replace it with the real provider unattach once it resolves.
-   * No-op if the id isn't registered.
+   *
+   * If cascade-cleanup arrived during the placeholder window (the
+   * record was marked `cancelled`), the new unattach is fired
+   * immediately and the record dropped — the host's log handler isn't
+   * orphaned. No-op if the id isn't registered.
    */
-  replaceUnattach(subscriptionId: string, unattach: () => Promise<void>): void {
+  setUnattach(subscriptionId: string, unattach: () => Promise<void>): void {
     const record = this.byId.get(subscriptionId)
     if (!record) return
     record.unattach = unattach
+    record.pending = false
+    if (record.cancelled) {
+      this.dropAndUnattach(record, unattach)
+    }
   }
 
   /**
    * Unattach + drop a single subscription. Safe to call for unknown ids
    * (returns false rather than throwing). The provider's `unattach` is
    * awaited; errors are swallowed to keep the cleanup path robust.
+   *
+   * If the subscription is still `pending` (placeholder not yet
+   * replaced), marks it `cancelled` instead of calling the placeholder
+   * and deleting — `setUnattach` will clean up when the host
+   * resolves.
    */
   async unattach(subscriptionId: string): Promise<boolean> {
     const record = this.byId.get(subscriptionId)
     if (!record) return false
-    this.byId.delete(subscriptionId)
-    const set = this.byWs.get(record.ws as object)
-    set?.delete(subscriptionId)
-    try {
-      await record.unattach()
-    } catch {
-      // provider is already gone; nothing to do
+    if (record.pending) {
+      record.cancelled = true
+      return true
     }
+    if (!record.unattach) {
+      // Non-pending but no unattach installed — should never happen
+      // because `setUnattach` is the only path that clears
+      // `pending`. Drop the record defensively.
+      this.dropAndUnattach(record, async () => {})
+      return true
+    }
+    this.dropAndUnattach(record, record.unattach)
     return true
   }
 
   /**
    * Cascade-unattach every subscription owned by `ws`. Called from the
    * server's ws.close hook so a dropped client can't leak log handlers.
+   *
+   * Pending subscriptions are marked `cancelled` rather than dropped —
+   * `setUnattach` will fire the real unattach when the host
+   * finally resolves, so the host's log handler isn't orphaned.
    */
   async dropAllForWs(ws: Bun.ServerWebSocket<WsData>): Promise<void> {
     const key = ws as object
@@ -103,14 +117,26 @@ export class SubscriptionRegistry {
     this.byWs.delete(key)
     for (const id of ids) {
       const record = this.byId.get(id)
-      this.byId.delete(id)
       if (!record) continue
+      if (record.pending) {
+        record.cancelled = true
+        continue
+      }
+      this.byId.delete(id)
+      if (!record.unattach) continue
       try {
         await record.unattach()
       } catch {
         // provider is already gone; nothing to do
       }
     }
+  }
+
+  private dropAndUnattach(record: SubscriptionRecord, unattach: () => Promise<void>): void {
+    this.byId.delete(record.subscriptionId)
+    const set = this.byWs.get(record.ws as object)
+    set?.delete(record.subscriptionId)
+    unattach().catch(() => {})
   }
 
   /** Test helper: how many live subscriptions? */

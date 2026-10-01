@@ -128,10 +128,12 @@ export interface HostProvider {
   attachLog?(onChunk: LogChunkHandler): Promise<LogSubscription>
   /**
    * Minecraft console command only. RCON / MCSManager WS. Returns the
-   * server's response when the underlying transport supports it; an
-   * empty string otherwise.
+   * server's response when the underlying transport supports it;
+   * `undefined` when the transport is fire-and-forget (e.g. SSH driving
+   * a screen/tmux session — the response, if any, streams to the
+   * attached server log instead of being capturable inline).
    */
-  executeRawCommand?(command: string): Promise<string>
+  executeRawCommand?(command: string): Promise<string | undefined>
   /**
    * Subscribe to unexpected liveness loss — the spawned child exited,
    * the socket disconnected, etc. The daemon uses this to detect when
@@ -367,7 +369,7 @@ export interface CapabilityMethods {
   readFile(path: ServerPath): Promise<Buffer>
   writeFile(path: ServerPath, data: Buffer | string): Promise<void>
   attachLog(onChunk: LogChunkHandler): Promise<LogSubscription>
-  executeRawCommand(command: string): Promise<string>
+  executeRawCommand(command: string): Promise<string | undefined>
 }
 
 /**

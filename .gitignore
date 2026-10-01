@@ -131,3 +131,6 @@ dist
 /patches
 
 .sandstone/
+
+# Agent scratch dir
+.temp/

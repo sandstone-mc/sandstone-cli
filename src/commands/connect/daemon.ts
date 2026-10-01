@@ -74,9 +74,8 @@ export interface DaemonHandle {
    */
   shutdown(): Promise<void>
   /**
-   * Resolves once the daemon has begun its shutdown sequence (whether
-   * triggered by signal or by the `shutdown` RPC). Use this to await
-   * teardown completion before calling `process.exit`.
+   * Resolves once teardown finishes. Fires for any shutdown trigger
+   * (signal, `shutdown` RPC, host loss).
    */
   done: Promise<void>
 }
@@ -103,11 +102,6 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     )
   }
   if (status === 'stale' || status === 'live-recent') {
-    // Stale (pid dead + old file) → safe to clear. live-recent is
-    // ambiguous; clear it too — the new daemon will win. Pass our pid
-    // so deleteEndpoint refuses to remove a file owned by a still-live
-    // different daemon (the previous owner's pid is gone in 'stale'
-    // and usually gone in 'live-recent', but be defensive).
     await deleteEndpoint(opts.projectRoot, process.pid)
   }
 

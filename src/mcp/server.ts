@@ -196,8 +196,8 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
   server.tool(
     restartServer.NAME,
     restartServer.DESCRIPTION,
-    { timeoutSeconds: z.number().optional() },
-    async (args) => restartServer.call(ctx, args as { timeoutSeconds?: number }),
+    {},
+    async (args) => restartServer.call(ctx, args as Record<string, never>),
   )
   server.tool(
     runServerCommand.NAME,
@@ -207,7 +207,6 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
       hostType: z.string().optional(),
       hostConfig: z.record(z.string(), z.unknown()).optional(),
       expect: z.string().optional(),
-      timeoutSeconds: z.number().optional(),
     },
     async (args) => runServerCommand.call(ctx, args as Parameters<typeof runServerCommand.call>[1]),
   )

@@ -5,14 +5,13 @@ import * as fs from '../../utils/fs.js'
 import type * as rpc from './rpc.js'
 import { PROTOCOL_VERSION, RpcErrorCode, errorToRpc } from './rpc.js'
 import type { SubscriptionRegistry } from './subscriptions.js'
-import type { StreamRegistry } from './streams.js'
+import { type StreamRegistry, type OpenStream, makeStreamEndBridge } from './streams.js'
 import { encodeStreamChunk, hexToBytes, newStreamId, streamIdHex } from './codec.js'
 import { Capability, capabilitiesToRecord } from '../../hosts/types.js'
 import type { HostProvider, LogChunkHandler, ServerPath } from '../../hosts/types.js'
 import type { ActiveConfig } from './active-config.js'
 import { setExpectedShutdown } from './daemon.js'
 import { UnsupportedCapabilityRpc, rpcError } from './host-capability.js'
-import { makeStreamEndBridge } from './stream-bridge.js'
 import { WsData } from './server.js'
 
 /**
@@ -55,6 +54,7 @@ export class DispatcherContext {
      * via `publishConfig` mid-session).
      */
     public readonly getActiveConfig: () => ActiveConfig | undefined,
+    public readonly streams: StreamRegistry,
     public readonly broadcast?: (eventName: string, data: unknown) => void,
     public readonly notifyResourceUpdated?: (uri: string) => void,
     public readonly setActiveConfig?: (cfg: ActiveConfig) => void,
@@ -78,7 +78,6 @@ export class DispatcherContext {
       newestTs: string | null
       truncated: boolean
     },
-    public readonly streams?: StreamRegistry,
   ) {}
 
 }
@@ -107,12 +106,6 @@ export class DispatcherInternals {
   get appendLogLines() { return this.context.appendLogLines }
   get readLogBuffer() { return this.context.readLogBuffer }
   get streams() { return this.context.streams }
-
-  runHost<T>(op: (h: HostProvider) => Promise<T>): Promise<T> {
-    const host = Dispatcher.currentHost
-    if (!host) throw rpcError(RpcErrorCode.NotConnected, 'No host available')
-    return op(host)
-  }
 
   async requireActiveConfig(): Promise<ActiveConfig> {
     if (!this.activeConfig) {
@@ -191,22 +184,49 @@ export class DispatcherInternals {
     }))
     return { baseDir, entries, truncated }
   }
+
+  /**
+   * Pump `stream` into WS chunks tagged with `streamId`, updating
+   * `record.bytes`. Calls `streams.close(...)` on completion so the
+   * `streamEnd`/`streamError` notification fires back to the client.
+   *
+   * Fire-and-forget. Run after the RPC response carrying the streamId
+   * has already been sent. Pumping in-line races the response on the
+   * wire and orphans the early chunks on the client, whose
+   * `streamsById` only populates after parsing the response.
+   */
+  async pumpReadStream(
+    stream: ReadableStream<Uint8Array>,
+    streamId: string,
+    record: OpenStream,
+  ): Promise<void> {
+    const reader = stream.getReader()
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        record.bytes += value.byteLength
+        try {
+          this.context.ws.send(encodeStreamChunk(hexToBytes(streamId), value))
+        } catch {
+          /* disconnected — close path below will fan the error out */
+        }
+      }
+      this.context.streams.close(streamId, record.bytes)
+    } catch (err) {
+      this.context.streams.close(
+        streamId,
+        record.bytes,
+        err instanceof Error ? err : new Error(String(err)),
+      )
+    }
+  }
 }
 
 export class Dispatcher {
-  static currentHost: HostProvider | null = null
-
-  /**
-   * Single protected field holding every non-API helper — params
-   * parsing, host scoping, log buffering, file IO, etc. Keeps the
-   * public class surface limited to the RPC method names.
-   */
   protected readonly internals: DispatcherInternals
 
   constructor(ctx: DispatcherContext) {
-    // Pass the caller's `getActiveConfig` closure straight through so
-    // handlers always see the latest snapshot (the watcher may
-    // hot-reload the config mid-session via `publishConfig`).
     const context = new DispatcherContext(
       ctx.host,
       ctx.subscriptions,
@@ -214,6 +234,7 @@ export class Dispatcher {
       ctx.pushLog,
       ctx.startedAt,
       ctx.getActiveConfig ?? (() => undefined),
+      ctx.streams,
       ctx.broadcast,
       ctx.notifyResourceUpdated,
       ctx.setActiveConfig,
@@ -224,28 +245,9 @@ export class Dispatcher {
       ctx.getExpectedShutdown,
       ctx.appendLogLines,
       ctx.readLogBuffer,
-      ctx.streams,
     )
     this.internals = new DispatcherInternals(this, context)
   }
-
-  // ─── host scoping ──────────────────────────────────────────────
-
-  /**
-   * Scope the active host for the duration of `fn` so handlers can
-   * reach it via `internals.runHost`. Set BEFORE delegating so a JVM
-   * exit (triggered by e.g. `stop` reaching the server) doesn't race.
-   */
-  static async withHost<T>(host: HostProvider, fn: () => Promise<T>): Promise<T> {
-    Dispatcher.currentHost = host
-    try {
-      return await fn()
-    } finally {
-      Dispatcher.currentHost = null
-    }
-  }
-
-  // ─── RPC handlers (typed via `rpc.ts`) ─────────────────────────
 
   async ping(_params: undefined): Promise<rpc.PingResult> {
     const caps = capabilitiesToRecord(this.internals.host.capabilities)
@@ -260,127 +262,75 @@ export class Dispatcher {
   }
 
   async startServer(_params: undefined): Promise<void> {
-    await this.internals.runHost(async (h) => {
-      if (!h.startServer) throw new UnsupportedCapabilityRpc(Capability.StartServer)
-      await h.startServer()
-    })
+    const host = this.internals.host
+    if (!host.startServer) throw new UnsupportedCapabilityRpc(Capability.StartServer)
+    await host.startServer()
   }
 
-  async stopServer(params: rpc.StopServerParams | undefined): Promise<void> {
-    // Reset the flag from any prior cycle before re-arming. The flag
-    // covers ALL member disconnects during the cycle — without the
-    // reset, a leftover `true` from a prior run would suppress
-    // disconnect handling for an unrelated later event.
-    setExpectedShutdown(false)
-    // Mark the imminent disconnect as expected so the host-lost
-    // watcher leaves the daemon alive. Covers MCP `restartServer`,
-    // `runServerCommand("stop")` (which routes here), etc.
+  async stopServer(_params?: undefined): Promise<void> {
+    // Graceful stop timeout is host-configured (`gracefulStopTimeoutSeconds`).
+    // See `integrated.stopServer` and `ssh.stopServer` for the per-host
+    // graceful-then-forceful logic.
     setExpectedShutdown(true)
-    await this.internals.runHost(async (h) => {
-      if (!h.stopServer) throw new UnsupportedCapabilityRpc(Capability.StopServer)
-      await h.stopServer()
-    })
-    // Touch `params` so the typed signature is acknowledged; the
-    // daemon ignores the timeout today (host has its own) but the
-    // wire shape accepts it for forward compat.
-    void params
+    const host = this.internals.host
+    if (!host.stopServer) throw new UnsupportedCapabilityRpc(Capability.StopServer)
+    await host.stopServer()
   }
 
   async readFile(params: rpc.ReadFileParams): Promise<rpc.RpcReadFileStream> {
     const ctx = this.internals
-    if (!ctx.streams) throw rpcError(RpcErrorCode.InternalError, 'Server has no stream registry')
-    const streamInfo = await this.internals.runHost<{ stream: ReadableStream<Uint8Array>; size?: number }>(
-      async (h) => {
-        if (!h.readFileStream) throw new UnsupportedCapabilityRpc('readFileStream')
-        return h.readFileStream(params.path as ServerPath)
-      },
-    )
+    const host = this.internals.host
+    if (!host.readFileStream) throw new UnsupportedCapabilityRpc('readFileStream')
+    const streamInfo: { stream: ReadableStream<Uint8Array>; size?: number } = await host.readFileStream(params.path as ServerPath)
     const streamId = streamIdHex(newStreamId())
-    const ws = ctx.ws as { send(data: Uint8Array): void } | undefined
-    // `onClose` bridges registry close events back to the WS
-    // transport. Fires for every close path (success, error,
-    // session-close) so the streamEnd envelope is sent exactly once
-    // without callers having to remember.
     const record = ctx.streams.open({
       streamId,
       direction: 'incoming',
       kind: 'readFile',
-      onClose: makeStreamEndBridge(ws, streamId),
+      onClose: makeStreamEndBridge(ctx.ws, streamId),
     })
-    if (ws) {
-      const reader = streamInfo.stream.getReader();
-      (async () => {
-        try {
-          while (true) {
-            const { value, done } = await reader.read()
-            if (done) break
-            record.bytes += value.byteLength
-            try { ws.send(encodeStreamChunk(hexToBytes(streamId), value)) } catch { /* disconnected */ }
-          }
-          ctx.streams!.close(streamId, record.bytes)
-        } catch (err) {
-          ctx.streams!.close(
-            streamId,
-            record.bytes,
-            err instanceof Error ? err : new Error(String(err)),
-          )
-        }
-      })()
-    }
+    // Fire-and-forget. See `pumpReadStream` for the ordering rationale.
+    // Errors surface through `streams.close`.
+    this.internals.pumpReadStream(streamInfo.stream, streamId, record)
     return { streamId, totalSize: streamInfo.size }
   }
 
   async writeFile(params: rpc.WriteFileParams): Promise<rpc.WriteFileResult> {
     const ctx = this.internals
-    if (!ctx.streams) throw rpcError(RpcErrorCode.InternalError, 'Server has no stream registry')
-    const sink = await this.internals.runHost<WritableStream<Uint8Array>>(async (h) => {
-      if (!h.writeFileStream) throw new UnsupportedCapabilityRpc('writeFileStream')
-      return h.writeFileStream(params.path as ServerPath, params.size !== undefined ? { size: params.size } : undefined)
-    })
+    const host = this.internals.host
+    if (!host.writeFileStream) throw new UnsupportedCapabilityRpc('writeFileStream')
+    const sink: WritableStream<Uint8Array> = await host.writeFileStream(params.path as ServerPath, params.size !== undefined ? { size: params.size } : undefined)
     const streamId = streamIdHex(newStreamId())
     const ws = ctx.ws as { send(data: Uint8Array): void } | undefined
     ctx.streams.open({
       streamId,
       direction: 'incoming',
       kind: 'writeFile',
-      // `onClose` bridges registry close events back to the WS
-      // transport. Reached via the client's `streamEnd` notification
-      // OR via the binary handler's writer-write error catch OR via
-      // the session-close cascade.
       onClose: makeStreamEndBridge(ws, streamId),
     })
     ctx.streams.attachWriter(streamId, sink.getWriter())
     return { streamId }
   }
 
-  /**
-   * `streamEnd` — sent by the WS peer to signal the end of an
-   * outgoing stream they own. We close the corresponding registry
-   * entry (which closes the host stream via the registered `onClose`
-   * callback that fans the matching `streamEnd` envelope back).
-   */
   async streamEnd(params: { streamId: string; bytes?: number }): Promise<void> {
     const ctx = this.internals
-    if (!ctx.streams) throw rpcError(RpcErrorCode.InternalError, 'Server has no stream registry')
-    // The client doesn't track per-stream bytes — it sends 0 as a
-    // placeholder. Read the server-side accumulator so the envelope
-    // we fan back carries the real count.
-    const finalBytes = ctx.streams.get(params.streamId)?.bytes ?? params.bytes ?? 0
+    const finalBytes = ctx.streams.get(params.streamId)!.bytes!
+    if (params.bytes !== undefined && finalBytes !== params.bytes) {
+      throw rpcError(
+        RpcErrorCode.InternalError,
+        `streamEnd byte count mismatch for ${params.streamId}: server tracked ${finalBytes}, client claimed ${params.bytes}`,
+      )
+    }
     ctx.streams.close(params.streamId, finalBytes)
   }
 
   async executeRawCommand(params: rpc.ExecuteRawCommandParams): Promise<rpc.ExecuteRawCommandResult> {
-    // `stop` triggers an intentional MC server shutdown. Mark the
-    // imminent disconnect as expected so the host-lost watcher leaves
-    // the daemon alive. Set BEFORE delegating to the host so the JVM
-    // exit (triggered by `stop` reaching the server) doesn't race us.
     if (params.command.trim().toLowerCase() === 'stop') {
       setExpectedShutdown(true)
     }
-    const output = await this.internals.runHost<string>(async (h) => {
-      if (!h.executeRawCommand) throw new UnsupportedCapabilityRpc(Capability.ExecuteRawCommand)
-      return h.executeRawCommand(params.command)
-    })
+    const host = this.internals.host
+    if (!host.executeRawCommand) throw new UnsupportedCapabilityRpc(Capability.ExecuteRawCommand)
+    const output = (await host.executeRawCommand(params.command)) ?? ''
     return { output }
   }
 
@@ -388,22 +338,8 @@ export class Dispatcher {
     const filter = params?.regex ? new RegExp(params.regex) : null
     const ctx = this.internals
 
-    // Generate the wire subscription id BEFORE wiring the handler so the
-    // handler's pushLog calls can tag batches with it. The host's attachLog
-    // returns its own subscription handle, but the wire identifier the
-    // client sees comes from our registry.
-    const subscriptionId = ctx.subscriptions.registerWithId(
-      crypto.randomUUID(),
-      ctx.ws,
-      // Placeholder — replaced once attachLog resolves. If unattach is
-      // called before then (extremely unlikely), the registry will just
-      // try to no-op the dangling record.
-      async () => {},
-    )
+    const subscriptionId = ctx.subscriptions.registerWithId(crypto.randomUUID(), ctx.ws)
 
-    // We hand the host a handler that pushes through the per-ws coalescer.
-    // That way every consumer gets the same coalesced + filtered stream
-    // and the host stays oblivious to N subscribers.
     const handler: LogChunkHandler = (lines) => {
       if (filter) {
         const matched = lines.filter((l) => filter.test(l))
@@ -412,14 +348,10 @@ export class Dispatcher {
         ctx.pushLog(lines, subscriptionId)
       }
     }
-    const subscription = await this.internals.runHost(async (h) => {
-      if (!h.attachLog) throw new UnsupportedCapabilityRpc('attachLog')
-      return h.attachLog(handler)
-    })
-    // Replace the placeholder unattach with the real provider thunk so the
-    // ws close cascade (dropAllForWs) and explicit `unattach` RPCs both
-    // reach the host's subscription.
-    ctx.subscriptions.replaceUnattach(subscriptionId, () => subscription.unattach())
+    const host = this.internals.host
+    if (!host.attachLog) throw new UnsupportedCapabilityRpc('attachLog')
+    const subscription = await host.attachLog(handler)
+    ctx.subscriptions.setUnattach(subscriptionId, () => subscription.unattach())
     return { subscriptionId }
   }
 
@@ -428,8 +360,6 @@ export class Dispatcher {
     if (!ok) throw rpcError(RpcErrorCode.UnknownSubscription, `Unknown subscription: ${params.subscriptionId}`)
   }
 
-  // ─── project-state handlers (consumed by `sand mcp` and other observers) ──
-
   async getActiveConfig(_params: undefined): Promise<rpc.GetActiveConfigResult> {
     const cfg = await this.internals.requireActiveConfig()
     const clientPath = cfg.saveConfig?.clientPath
@@ -437,11 +367,6 @@ export class Dispatcher {
       mode: cfg.mode,
       configPath: cfg.configPath,
       saveConfig: cfg.saveConfig,
-      // The intrinsic client-log RPC can serve a log iff
-      // `saveConfig.clientPath` is configured. The actual file may
-      // still be missing at read time — the RPC surfaces that — but
-      // availability here lets tools advertise / pre-check before
-      // attempting the read.
       clientLogAvailable: typeof clientPath === 'string' && clientPath.length > 0,
       outputDir: cfg.outputDir,
       projectRoot: cfg.projectRoot,
@@ -468,18 +393,8 @@ export class Dispatcher {
     return this.internals.readBufferLog(params, 'server') as Promise<rpc.ReadServerLogResult>
   }
 
-  /**
-   * Read the Minecraft client launcher log — intrinsic daemon capability,
-   * NOT a host provider feature. The daemon reads directly from the
-   * configured `clientPath/logs/latest.log` (resolved via the active
-   * sandstone.config.ts) since the launcher lives on the machine the
-   * daemon runs on, regardless of where the MC server itself runs.
-   *
-   * Streams the file via `fs.createReadStream` + `TextDecoder(stream:
-   * true)` so multi-MB log files don't materialise in memory before
-   * filtering. Tail / maxLines / range filter the resulting line array.
-   */
   async readClientLog(params: rpc.ReadClientLogParams | undefined): Promise<rpc.ReadClientLogResult> {
+    // TODO: Implement an actual tail and buffer for this.
     const cfg = await this.internals.requireActiveConfig()
     const clientPath = cfg.saveConfig?.clientPath
     if (!clientPath) {
@@ -496,7 +411,7 @@ export class Dispatcher {
     const totalLines = lines.length
 
     // Range filter: `0` = most recent line in the file. Negative
-    // counts from the end (per the existing log RPC conventions).
+    // counts from the end.
     let selected = lines
     if (range && range.from !== -1 && range.to !== -1) {
       const len = selected.length
@@ -522,16 +437,7 @@ export class Dispatcher {
     }
   }
 
-  async getWatchedFiles(_params: undefined): Promise<rpc.GetWatchedFilesResult> {
-    // The daemon doesn't track per-file watcher state itself — the watcher
-    // pushes `rebuildComplete` events, not per-file deltas. Return an
-    // empty list rather than 501-ing; clients that want fine-grained
-    // events should subscribe to `rebuildComplete` and diff the output
-    // tree themselves.
-    return { files: [] }
-  }
-
-  async publishConfig(params: rpc.PublishConfigParams): Promise<void> {
+  async publishConfig(params: rpc.PublishConfigParams) {
     const ctx = this.internals
     if (!ctx.setActiveConfig) {
       throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to accept published configs')
@@ -558,7 +464,7 @@ export class Dispatcher {
     })
   }
 
-  async publishLog(params: rpc.PublishLogParams): Promise<void> {
+  async publishLog(params: rpc.PublishLogParams) {
     const ctx = this.internals
     if (!ctx.appendLogLines) {
       throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to accept log lines')
@@ -566,7 +472,7 @@ export class Dispatcher {
     ctx.appendLogLines(params.entries, params.target ?? 'build')
   }
 
-  async publishRebuild(params: rpc.PublishRebuildParams): Promise<void> {
+  async publishRebuild(params: rpc.PublishRebuildParams) {
     const ctx = this.internals
     if (!ctx.setRebuildState) {
       throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to track rebuild state')
@@ -595,7 +501,7 @@ export class Dispatcher {
     return { state: ctx.getRebuildState() ?? null }
   }
 
-  async publishWatcherStatus(params: rpc.PublishWatcherStatusParams): Promise<void> {
+  async publishWatcherStatus(params: rpc.PublishWatcherStatusParams) {
     const ctx = this.internals
     if (!ctx.setWatcherStatus) {
       throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to track watcher status')
@@ -636,10 +542,6 @@ export class Dispatcher {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Backwards-compatible exports (server.ts + tests still use these)
-// ---------------------------------------------------------------------------
-
 /**
  * Methods on `Dispatcher.prototype` that are NOT RPC handlers — the
  * RPC-name set is derived at runtime from the prototype, minus these
@@ -664,14 +566,6 @@ export function narrowMethod(method: string): rpc.RpcMethod {
   return method as rpc.RpcMethod
 }
 
-/**
- * Dispatch one parsed request. Returns the handler's result value,
- * fully typesafe end-to-end — `Method` narrows `params` to the
- * matching `rpc.XxxParams` and the return type to `rpc.XxxResult`.
- * Throws {@link ShutdownSignal} for the `shutdown` method and
- * {@link RpcHandlerError} for any handler error so the server can
- * react.
- */
 export async function dispatch<Method extends rpc.RpcMethod>(
   dispatcher: Dispatcher,
   method: Method,
@@ -679,11 +573,6 @@ export async function dispatch<Method extends rpc.RpcMethod>(
 ) {
   if (method === 'shutdown') throw new ShutdownSignal()
   try {
-    // Cast the dispatcher to a method-shaped object keyed by `method`
-    // so the call resolves to the matching typed handler signature
-    // — params type and return type both narrow in lockstep with
-    // `method`. The runtime call is identical to
-    // `dispatcher[method](params)`.
     type TypedHandler = {
       [M in Extract<Method, keyof Dispatcher>]: (
         p: Parameters<Dispatcher[M]>[0],
@@ -696,9 +585,3 @@ export async function dispatch<Method extends rpc.RpcMethod>(
   }
 }
 
-/** Set the active host before dispatching; restore on the way out. */
-export async function withHost<T>(host: HostProvider, fn: () => Promise<T>): Promise<T> {
-  return Dispatcher.withHost(host, fn)
-}
-
-// (No top-level constants needed here; log buffer caps live in daemon.ts.)

@@ -1,6 +1,8 @@
+import { encodeRpc } from './codec.js'
+import { event } from './rpc.js'
+
 export type StreamDirection = 'incoming' | 'outgoing'
 
-/** What the underlying stream represents. */
 export type StreamKind = 'writeFile' | 'readFile'
 
 export interface OpenStream {
@@ -109,4 +111,32 @@ export class StreamRegistry {
   size(): number {
     return this.byId.size
   }
+}
+
+export interface StreamEndBridge {
+  (bytes: number): void
+  (bytes: number, err: Error): void
+}
+
+export function makeStreamEndBridge(
+  ws: { send(data: Uint8Array): void } | undefined,
+  streamId: string,
+): StreamEndBridge {
+  return ((bytes: number, err?: Error) => {
+    try {
+      if (err) {
+        ws?.send(
+          encodeRpc(
+            event('streamError', {
+              streamId,
+              code: 0,
+              message: err.message,
+            }),
+          ),
+        )
+      } else {
+        ws?.send(encodeRpc(event('streamEnd', { streamId, bytes })))
+      }
+    } catch {}
+  }) as StreamEndBridge
 }

@@ -1,19 +1,3 @@
-/**
- * `sand connect` — long-lived host daemon over WebSocket.
- *
- * Two modes:
- *   - Default: spawn a daemon that hosts the chosen provider and listens
- *     on a local WS port. Endpoint file written to
- *     `<projectRoot>/.sandstone/connect.url`.
- *   - `--shutdown`: read the endpoint file and send the daemon the
- *     `shutdown` RPC. Exits 0 on success, 1 if the file is missing or
- *     the daemon can't be reached.
- *
- * `--host-type` accepts a single provider (`--host-type integrated`).
- * Defaults to `integrated` when omitted. `--host-config` is the
- * provider's JSON config; `--host-config-file` reads it from disk.
- */
-
 import { resolve } from 'node:path'
 import { connect as openClient } from './client.js'
 import { startDaemon } from './daemon.js'
@@ -25,19 +9,15 @@ import { printSplash } from '../../utils/index.js'
 import chalk from 'chalk-template'
 
 export interface ConnectCommandOptions {
-  /** `--host-type <type>` — single provider. */
   hostType?: string
-  /** `--host-config <json>` (flat single config) */
   hostConfig?: string
-  /** `--host-config-file <path>` */
   hostConfigFile?: string
   /** `--bind <addr>` */
   bind?: string
   /** `--port <n>` */
   port?: string
-  /** `--shutdown` flag */
   shutdown?: boolean
-  /** `--path <path>` (re-used from BuildOptions) — project root. */
+  /** Project root */
   path: string
 }
 
@@ -49,11 +29,8 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     return
   }
 
-  // Banner — only the long-running daemon command gets the splash.
   printSplash()
 
-  // Parse --host-type. Default to `integrated` when omitted. Reject
-  // multi-host-type values — composite daemons are gone.
   const hostType = parseHostType(opts.hostType)
   if (!KNOWN_HOST_TYPES.has(hostType)) {
     console.error(
@@ -62,12 +39,8 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     process.exit(2)
   }
 
-  // Forward whether the user passed any host-setting flag so the
-  // bootstrap knows when to skip auto-config injection.
   const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
 
-  // Parse --host-config / --host-config-file. Throws HostConfigCliError
-  // on bad JSON / wrong shape / both-passed; we exit(2) on it.
   let parsedConfig
   try {
     parsedConfig = await parseHostConfig(opts.hostConfig, opts.hostConfigFile)

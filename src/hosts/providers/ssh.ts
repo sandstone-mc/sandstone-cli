@@ -9,9 +9,16 @@ import { Capability, type HostCapabilities, type HostProvider, type LogChunkHand
 /**
  * SSH provider — file I/O (SFTP), shell exec, and log attachment via the
  * `node-ssh` library. Optionally exposes `executeRawCommand` over RCON
- * when `config.rcon` is set with `enabled !== false` — SSH's built-in
+ * when `config.rcon` is set with `enabled !== false`. SSH's built-in
  * `execCommand` is reserved for `startCommand`/`stopCommand` (those
  * aren't `executeRawCommand` — they're lifecycle hooks).
+ *
+ * If `config.rcon` is absent but `config.consoleSession` is set,
+ * `executeRawCommand` falls back to driving the named screen/tmux
+ * session — same path `stopServer` uses for graceful shutdown. Console
+ * sessions are fire-and-forget (no command output), so this path does
+ * NOT advertise `ExecuteRawCommandHasResponse`; only `executeRawCommand`
+ * over RCON does.
  *
  * Lifecycle:
  *  - `startServer`: runs `startCommand` via `execCommand`.
@@ -20,8 +27,8 @@ import { Capability, type HostCapabilities, type HostProvider, type LogChunkHand
  *    falls back to `stopCommand` after `gracefulStopTimeoutSeconds`.
  *  - `attachLog`: runs `tail -F -n 0` over SSH and forwards each new
  *    line.
- *  - `executeRawCommand` (optional): forwards through the persistent
- *    RCON client opened in `connect()`.
+ *  - `executeRawCommand` (optional): RCON when configured, otherwise
+ *    the console session if set, otherwise absent.
  */
 export class SshHost implements HostProvider {
   readonly type = 'ssh' as const
@@ -42,6 +49,13 @@ export class SshHost implements HostProvider {
 
   constructor(config: SshHostConfig) {
     this.config = config
+    // Advertise `executeRawCommand` early when the console-session
+    // fallback is available; the richer `ExecuteRawCommandHasResponse`
+    // capability is added later by `attachRconIfConfigured` if RCON is
+    // also configured (it supersedes the fire-and-forget path).
+    if (config.consoleSession) {
+      this.capabilities.add(Capability.ExecuteRawCommand)
+    }
   }
 
   async connect(): Promise<void> {
@@ -112,7 +126,7 @@ export class SshHost implements HostProvider {
       // server can flush + save before exiting. This is internal-only — we
       // do NOT expose this via `executeRawCommand`.
       const session = this.config.consoleSession
-      const keystroke = await this.trySendStopToConsole(session)
+      const keystroke = await this.sendToConsole(session, 'stop')
       if (keystroke) {
         const exited = await this.waitForProcessExit(timeoutMs)
         if (exited) return
@@ -218,17 +232,29 @@ export class SshHost implements HostProvider {
     // SFTP's createWriteStream returns a `WriteStream`. Cast through
     // `unknown` because `Writable.toWeb`'s overload narrowing doesn't
     // accept the SFTP-specific stream shape directly.
-    return Writable.toWeb(node as unknown as import('node:stream').Writable) as WritableStream<Uint8Array>
+    return Writable.toWeb(node) as WritableStream<Uint8Array>
   }
 
-  async executeRawCommand(command: string): Promise<string> {
+  async executeRawCommand(command: string): Promise<string | undefined> {
     this.requireConnected('ssh')
-    if (!this.rcon) {
-      throw new Error(
-        `SSH host has no RCON configured — set \`rcon\` in the host config to enable executeRawCommand.`,
-      )
+    if (this.rcon) {
+      return await this.rcon.execute(command)
     }
-    return await this.rcon.execute(command)
+    if (this.config.consoleSession) {
+      const ok = await this.sendToConsole(this.config.consoleSession, command)
+      if (!ok) {
+        throw new Error(
+          `SSH host could not deliver \`${command}\` via console session \`${this.config.consoleSession}\` (no \`screen\` or \`tmux\` available on the remote host).`,
+        )
+      }
+      // Console sessions are fire-and-forget — there's no response
+      // channel. The command's output, if any, streams through the
+      // attached server log.
+      return undefined
+    }
+    throw new Error(
+      `SSH host has neither \`rcon\` nor \`consoleSession\` configured — set one in the host config to enable executeRawCommand.`,
+    )
   }
 
   async attachLog(onChunk: LogChunkHandler): Promise<LogSubscription> {
@@ -256,14 +282,15 @@ export class SshHost implements HostProvider {
     if (!this.connected) throw new NotConnectedError(label)
   }
 
-  private async trySendStopToConsole(session: string): Promise<boolean> {
-    // Try `screen` first, fall back to `tmux`. Each sends the `stop` mc
-    // console command + Enter to the named session. Either returning
-    // non-zero is treated as "couldn't drive the session" and we skip
-    // straight to `stopCommand`.
+  private async sendToConsole(session: string, command: string): Promise<boolean> {
+    // Try `screen` first, fall back to `tmux`. Each delivers `command` +
+    // Enter to the named session. Either returning non-zero is treated as
+    // "couldn't drive the session" and the caller falls back to its
+    // alternative path (hard-stop command, or the MCP tool surfaces the
+    // failure).
     try {
       const screen = await this.ssh.execCommand(
-        `screen -S ${JSON.stringify(session)} -X stuff "stop\\n"`,
+        `screen -S ${JSON.stringify(session)} -X stuff ${JSON.stringify(command + '\\n')}`,
       )
       if (screen.code === 0) return true
     } catch {
@@ -271,7 +298,7 @@ export class SshHost implements HostProvider {
     }
     try {
       const tmux = await this.ssh.execCommand(
-        `tmux send-keys -t ${JSON.stringify(session)} 'stop' Enter`,
+        `tmux send-keys -t ${JSON.stringify(session)} ${JSON.stringify(command)} Enter`,
       )
       return tmux.code === 0
     } catch {

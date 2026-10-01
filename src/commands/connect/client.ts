@@ -113,8 +113,21 @@ export class Client {
     const buf = Bytes(ev.data)
     if (typeof ev.data !== 'string' && buf.byteLength >= 17 && buf[0] === STREAM_MAGIC) {
       const { streamId, chunk } = decodeStreamChunk(buf)
-      const record = this.streamsById.get(hexFromBytes(streamId))!
-      record.controller!.enqueue(chunk)
+      const id = hexFromBytes(streamId)
+      const record = this.streamsById.get(id)
+      if (!record?.controller) {
+        // Orphan chunk — either the stream was already closed via
+        // `streamEnd`/`streamError`, the caller cancelled, or the
+        // server is sending chunks for a stream we never opened
+        // (cross-tenant, stale conn). Log and drop rather than
+        // throw; the RPC layer surfaces the real failure via
+        // `streamEnd`/`streamError`.
+        console.error(
+          `[ws] orphan stream chunk for id=${id} (known streams: ${this.streamsById.size}) — dropping ${chunk.byteLength} bytes`,
+        )
+        return
+      }
+      record.controller.enqueue(chunk)
       return
     }
     const msg = classifyWsMessage(buf)
@@ -337,15 +350,19 @@ export class Client {
     });
     (async () => {
       const reader = args.stream.getReader()
+      let bytesSent = 0
       try {
         while (true) {
           const { value, done: chunkDone } = await reader.read()
           if (chunkDone) break
           this.ws.send(encodeStreamChunk(hexToBytes(streamId), value))
+          bytesSent += value.byteLength
         }
         this.ws.send(encodeRpc({
           method: 'streamEnd',
-          params: { streamId, bytes: 0 },
+          params: bytesSent > 0
+            ? { streamId, bytes: bytesSent }
+            : { streamId },
         }))
         args.rpcResolve(undefined)
       } catch (err) {
@@ -423,7 +440,7 @@ export class Client {
 
   ping(): Promise<rpc.PingResult> { return this.call<rpc.PingResult>('ping') }
   startServer(): Promise<void> { return this.call<void>('startServer') }
-  stopServer(params?: { timeoutSeconds?: number }): Promise<void> { return this.call<void>('stopServer', params) }
+  stopServer(): Promise<void> { return this.call<void>('stopServer') }
 
   async readFile(params: { path: string }): Promise<Uint8Array>
   async readFile(params: { path: string; encode: 'utf-8' }): Promise<string>
@@ -482,7 +499,6 @@ export class Client {
   readTestLog(params?: rpc.ReadBuildLogParams) { return this.call<rpc.ReadTestLogResult>('readTestLog', params) }
   readServerLog(params?: rpc.ReadServerLogParams) { return this.call<rpc.ReadServerLogResult>('readServerLog', params) }
   readClientLog(params?: rpc.ReadClientLogParams) { return this.call<rpc.ReadClientLogResult>('readClientLog', params) }
-  getWatchedFiles() { return this.call<rpc.GetWatchedFilesResult>('getWatchedFiles') }
   getRebuildState() { return this.call<rpc.GetRebuildStateResult>('getRebuildState') }
   getWatcherStatus() { return this.call<rpc.GetWatcherStatusResult>('getWatcherStatus') }
   publishConfig(params: rpc.PublishConfigParams) { return this.call<void>('publishConfig', params) }

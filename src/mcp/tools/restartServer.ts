@@ -9,9 +9,11 @@
  *
  * # How it works
  *
- *   1. `daemon.stopServer({timeoutSeconds})` — host provider stops the
- *      MC server. For `integrated`, this sends `stop` via RCON
- *      (graceful: MC saves worlds, broadcasts goodbye, JVM exits).
+ *   1. `daemon.stopServer()` — host provider stops the MC server. The
+ *      graceful-vs-forceful timeout is host-configured via
+ *      `gracefulStopTimeoutSeconds` (see `integrated` and `ssh`). For
+ *      `integrated`, this sends `stop` via RCON (graceful: MC saves
+ *      worlds, broadcasts goodbye, JVM exits).
  *
  *   2. `daemon.startServer()` — host provider starts it back up.
  *      `integrated.startServer` respawns the child JVM. The
@@ -54,7 +56,7 @@ export const DESCRIPTION =
 
 export async function call(
   ctx: McpContext,
-  args: { timeoutSeconds?: number } = {},
+  _args: Record<string, never> = {},
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   const daemon = await requireDaemon(ctx.projectRoot)
   const welcome = daemon.welcome
@@ -98,11 +100,9 @@ export async function call(
     }
   }
 
-  const timeoutSeconds = args.timeoutSeconds ?? 30
-
   const stopStart = Date.now()
   try {
-    await daemon.stopServer({ timeoutSeconds })
+    await daemon.stopServer()
   } catch (err) {
     throw new McpError(
       ErrorCode.InternalError,

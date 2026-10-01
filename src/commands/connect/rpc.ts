@@ -64,7 +64,6 @@ export type RpcMethod =
   | 'readTestLog'
   | 'readServerLog'
   | 'readClientLog'
-  | 'getWatchedFiles'
   | 'publishConfig'
   | 'publishLog'
   | 'publishRebuild'
@@ -90,7 +89,6 @@ export type RpcResult =
   | ReadTestLogResult
   | ReadServerLogResult
   | ReadClientLogResult
-  | GetWatchedFilesResult
   | GetRebuildStateResult
   | GetWatcherStatusResult
   | PublishTriggerBuildResult
@@ -189,10 +187,6 @@ export interface RebuildCompleteEvent {
 // ---------------------------------------------------------------------------
 // Methods (params + results)
 // ---------------------------------------------------------------------------
-
-export interface StopServerParams {
-  timeoutSeconds?: number
-}
 
 export interface ReadFileParams {
   path: string
@@ -478,17 +472,6 @@ export interface ReadClientLogResult {
   totalLines: number
   matchedLines: number
   truncated: boolean
-}
-
-export interface GetWatchedFilesResult {
-  files: Array<{
-    /** Absolute path. */
-    path: string
-    /** Last event type observed. */
-    lastEvent: 'create' | 'update' | 'delete'
-    /** ISO timestamp. */
-    lastEventAt: string
-  }>
 }
 
 /**

@@ -1,13 +1,3 @@
-/**
- * Shared `--host-config` / `--host-config-file` parsing.
- *
- * Used by `sand connect` (src/commands/connect/index.ts) and
- * `sand run` (src/commands/run.ts). Centralises:
- *   - JSON shape validation (must be an object),
- *   - sensitive-key warning (ps aux can see argv),
- *   - "exactly one of --host-config / --host-config-file" check.
- */
-
 import { isObject } from '../../utils/guards.js'
 import type { HostConfigInput } from '../../hosts/types.js'
 
@@ -19,16 +9,6 @@ export interface HostConfigParseResult {
   /** Sensitive-key warnings to surface to the user. */
   warnings: string[]
 }
-
-/**
- * Parse either `--host-config <json>` or `--host-config-file <path>`.
- * Exactly one must be supplied; both throws `HostConfigCliError`
- * with a user-actionable message. JSON that isn't an object throws
- * with the same. Sensitive-key hits generate warnings (non-fatal).
- *
- * On no-input, returns `{}` (empty config — caller applies defaults
- * via `bootstrap.resolveDefaults`).
- */
 export class HostConfigCliError extends Error {
   constructor(message: string) {
     super(message)

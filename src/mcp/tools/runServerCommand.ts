@@ -39,7 +39,6 @@ export async function call(
     hostType?: string
     hostConfig?: HostConfigInput
     expect?: string
-    timeoutSeconds?: number
   },
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   if (!args.command || !args.command.trim()) {

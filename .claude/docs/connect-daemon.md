@@ -74,7 +74,6 @@ Full surface in `src/commands/connect/rpc.ts` (`RpcMethod`, `RpcResult`, the var
 | `getBuildOutputTree` | request | One level of the watcher's output dir. |
 | `readBuildLog` / `readTestLog` / `readServerLog` | request | Filtered slices of the daemon's in-memory log buffers (1000-line circular cap per target). |
 | `readClientLog` | request | **Intrinsic daemon capability** — reads the local Minecraft client's `logs/latest.log` (resolved via `saveConfig.clientPath`). The file is on the daemon's machine, regardless of which host provider owns the MC server. |
-| `getWatchedFiles` | request | Watcher's tracked files. |
 | `publishConfig` / `publishLog` / `publishRebuild` / `publishWatcherStatus` | notification (client → server) | Watcher → daemon updates the in-memory state. |
 | `getRebuildState` / `getWatcherStatus` | request | Snapshot reads. |
 | `publishTriggerBuild` | request | MCP `runWorkspaceBuild` tool → daemon → watcher rebuild path. |

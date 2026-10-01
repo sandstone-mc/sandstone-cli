@@ -47,6 +47,8 @@ const options = {
   bind: opt('--bind <addr>', 'Bind address for the daemon WS server (default 127.0.0.1).', { env: 'BIND' }),
   port: opt('--port <n>', 'Bind port. 0 picks a free port (default 0).', { env: 'PORT' }),
   shutdown: opt('--shutdown', 'With `sand connect`, read the project endpoint file and ask the running daemon to shut down.', { env: 'CONNECT_SHUTDOWN' }),
+  deploy: opt('--deploy', 'With `sand connect`, upload the datapack zip from .sandstone/output to <serverPath>/world/datapacks/ via the host after the daemon starts.', { env: 'CONNECT_DEPLOY' }),
+  restartServer: opt('--restart-server', 'With `sand connect`, stop and start the MC server after the daemon connects.', { env: 'CONNECT_RESTART_SERVER' }),
 
   // sand run — wait for a log-line match after sending the command.
   expect: opt('--expect <pattern>', 'With `sand run`, regex matched against subsequent log lines. Exits 0 on first match, 1 on timeout.', { env: 'RUN_EXPECT' }),

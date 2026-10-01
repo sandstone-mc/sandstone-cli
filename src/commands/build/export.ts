@@ -194,6 +194,7 @@ export async function createSymlink(
     }
 
     for (const childName of perChildEntries) {
+      if (childName.includes(sep)) continue
       const childTarget = path.join(targetPath, childName)
       const childLink = path.join(linkPath, childName)
 

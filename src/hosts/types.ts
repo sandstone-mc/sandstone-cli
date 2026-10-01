@@ -33,6 +33,7 @@ export const Capability = {
   StopServer: 'stopServer',
   ReadFile: 'readFile',
   WriteFile: 'writeFile',
+  WriteFileStream: 'writeFileStream',
   AttachLog: 'attachLog',
   ExecuteRawCommand: 'executeRawCommand',
   /**
@@ -219,8 +220,13 @@ export interface FtpHostConfig extends BaseHostConfig {
   port?: number
   user: string
   password: string
-  basePath?: string
-  /** Path to the log file relative to basePath. Default: 'logs/latest.log'. */
+  /**
+   * Server working directory on the remote host. All read/write paths
+   * are resolved relative to this directory (matching how SSH /
+   * MCSManager handle `serverDir`). Required.
+   */
+  serverPath: string
+  /** Path to the log file relative to serverPath. Default: 'logs/latest.log'. */
   logPath?: string
   /** How often to poll the log file for new bytes. Default 500ms. */
   pollIntervalMs?: number
@@ -390,6 +396,7 @@ export const ALL_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   Capability.StopServer,
   Capability.ReadFile,
   Capability.WriteFile,
+  Capability.WriteFileStream,
   Capability.AttachLog,
   Capability.ExecuteRawCommand,
   Capability.ExecuteRawCommandHasResponse,

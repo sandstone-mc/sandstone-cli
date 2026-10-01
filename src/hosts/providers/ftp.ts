@@ -26,6 +26,7 @@ export class FtpHost implements HostProvider {
     const set: HostCapabilities = new Set([
       Capability.ReadFile,
       Capability.WriteFile,
+      Capability.WriteFileStream,
       Capability.AttachLog,
     ])
     return set
@@ -299,8 +300,7 @@ export class FtpHost implements HostProvider {
   }
 
   private resolvePath(path: ServerPath): string {
-    const base = this.config.basePath?.replace(/\/+$/, '') ?? ''
-    if (!base) return path
+    const base = this.config.serverPath.replace(/\/+$/, '')
     if (path.startsWith('/')) return `${base}${path}`
     return `${base}/${path}`.replace(/\/+/g, '/')
   }

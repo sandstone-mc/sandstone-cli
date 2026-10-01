@@ -4,8 +4,10 @@ import { startDaemon } from './daemon.js'
 import { readEndpoint, pidAlive } from './endpoint-file.js'
 import { isObject } from '../../utils/guards.js'
 import { HostConfigCliError, parseHostConfig } from './host-config.js'
-import { KNOWN_HOST_TYPES, type HostConfigInput, type HostType } from '../../hosts/types.js'
+import { Capability, KNOWN_HOST_TYPES, capabilitiesToRecord, type HostConfigInput, type HostType } from '../../hosts/types.js'
 import { printSplash } from '../../utils/index.js'
+import { deployDatapack } from '../deploy.js'
+import { restartServer, checkRestartCapabilities } from '../restart-server.js'
 import chalk from 'chalk-template'
 
 export interface ConnectCommandOptions {
@@ -17,6 +19,8 @@ export interface ConnectCommandOptions {
   /** `--port <n>` */
   port?: string
   shutdown?: boolean
+  deploy?: boolean
+  restartServer?: boolean
   /** Project root */
   path: string
 }
@@ -35,6 +39,13 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
   if (!KNOWN_HOST_TYPES.has(hostType)) {
     console.error(
       chalk`{red Error:} Unknown --host-type '${hostType}' (one of: ssh, ftp, integrated, mcsmanager-login)`,
+    )
+    process.exit(2)
+  }
+
+  if (opts.deploy && hostType === 'integrated') {
+    console.error(
+      chalk`{red Error:} --deploy is not supported with --host-type integrated. The integrated host exposes build output via symlink; there is nothing to push.`,
     )
     process.exit(2)
   }
@@ -71,6 +82,110 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     port,
     userProvidedHostSettings,
   })
+
+  if (opts.deploy) {
+    if (!handle.host.capabilities.has(Capability.WriteFileStream) || !handle.host.writeFileStream) {
+      await handle.shutdown()
+      console.error(
+        chalk`{red Error:} --deploy needs a host that supports writeFileStream. '${hostType}' does not (capabilities: ${JSON.stringify([...handle.host.capabilities])}).`,
+      )
+      process.exit(2)
+    }
+
+    let deployErr: unknown
+    try {
+      const client = await openClient({ endpoint: handle.endpoint })
+      try {
+        const result = await deployDatapack({
+          daemon: client,
+          projectRoot,
+        })
+        const uploaded = [result, ...result.dependencies].filter((r) => !r.unchanged)
+        const skipped = [result, ...result.dependencies].filter((r) => r.unchanged)
+        if (uploaded.length === 0) {
+          console.log(
+            chalk`{cyan [connect]} nothing to deploy — ${skipped.length} archive(s) already match the server`,
+          )
+        } else {
+          console.log(
+            chalk`{cyan [connect]} deployed ${uploaded.length} archive(s):`,
+          )
+          if (!result.unchanged) {
+            console.log(
+              chalk`{cyan [connect]}   ${result.archiveName} -> ${result.remotePath} (${result.bytesWritten} bytes)`,
+            )
+          }
+          for (const dep of result.dependencies) {
+            if (dep.unchanged) continue
+            console.log(
+              chalk`{cyan [connect]}   ${dep.name} -> ${dep.remotePath} (${dep.bytesWritten} bytes)`,
+            )
+          }
+          if (skipped.length > 0) {
+            console.log(
+              chalk`{cyan [connect]}   skipped (unchanged): ${skipped.length} archive(s)`,
+            )
+          }
+        }
+        if (result.reloaded) {
+          console.log(chalk`{cyan [connect]} reload: ok`)
+        } else if (uploaded.length > 0) {
+          console.log(chalk`{cyan [connect]} reload: skipped (daemon has no executeRawCommand — run /reload manually)`)
+        }
+      } finally {
+        client.close()
+      }
+    } catch (err) {
+      deployErr = err
+    }
+    if (deployErr !== undefined) {
+      await handle.shutdown()
+      const message = deployErr instanceof Error ? deployErr.message : String(deployErr)
+      if (message.startsWith('deployed but reload failed')) {
+        console.error(
+          chalk`{red Error:} ${message}\n\nThe deploy itself succeeded; the server didn't reload. Run \`/reload\` manually.`,
+        )
+      } else {
+        console.error(chalk`{red Error:} deploy failed: ${message}`)
+      }
+      process.exit(1)
+    }
+  }
+
+  if (opts.restartServer) {
+    const capabilityError = checkRestartCapabilities({
+      hostType: handle.host.type,
+      capabilities: capabilitiesToRecord(handle.host.capabilities),
+    })
+    if (capabilityError) {
+      await handle.shutdown()
+      console.error(chalk`{red Error:} ${capabilityError}`)
+      process.exit(2)
+    }
+
+    let restartErr: unknown
+    try {
+      const client = await openClient({ endpoint: handle.endpoint })
+      try {
+        const result = await restartServer(client, {
+          log: (line) => console.log(chalk`{cyan [connect]} ${line}`),
+        })
+        console.log(
+          chalk`{cyan [connect]} server restarted on \`${result.hostType}\` in ${result.elapsedMs}ms`,
+        )
+      } finally {
+        client.close()
+      }
+    } catch (err) {
+      restartErr = err
+    }
+    if (restartErr !== undefined) {
+      await handle.shutdown()
+      const message = restartErr instanceof Error ? restartErr.message : String(restartErr)
+      console.error(chalk`{red Error:} ${message}`)
+      process.exit(1)
+    }
+  }
 
   // Print a single line with the URL + pid so the user knows where to
   // connect. Don't print the secret — it lives in the endpoint file.

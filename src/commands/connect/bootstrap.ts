@@ -117,7 +117,7 @@ async function resolveDefaults(
   const log = silent ? () => {} : console.log
 
   if (hostType === 'integrated') {
-    const integratedCfg = {} as Record<string, unknown>
+    const integratedCfg = { ...(out as Record<string, unknown>) }
     if (typeof integratedCfg.sandstoneVersion !== 'string') {
       try {
         const pkg = await fs.readJSON<{ version?: string }>(
@@ -142,7 +142,6 @@ async function resolveDefaults(
           )
         }
       }
-      out = integratedCfg as HostConfigInput
     }
 
     const existing = (integratedCfg.rcon as Record<string, unknown> | undefined) ?? {}

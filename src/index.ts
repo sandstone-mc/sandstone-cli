@@ -116,6 +116,8 @@ CLI
   .addOption(BuildOptions.get('bind'))
   .addOption(BuildOptions.get('port'))
   .addOption(BuildOptions.get('shutdown'))
+  .addOption(BuildOptions.get('deploy'))
+  .addOption(BuildOptions.get('restartServer'))
   .action(connectCommand)
 
 CLI

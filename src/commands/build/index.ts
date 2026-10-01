@@ -275,7 +275,18 @@ async function _buildProject(
   resetSandstonePack()
 
   const { scripts, resources } = sandstoneConfig
-  const saveOptions = sandstoneConfig.saveOptions || {}
+  let saveOptions = sandstoneConfig.saveOptions || {}
+  // Auto-detect an integrated-style `serverPath` when `.sandstone/mc-server/`
+  // exists. Created by `sand connect --host-type integrated`, so its
+  // presence signals "user wants this pack symlinked into the integrated
+  // server's world/datapacks/". User-defined `serverPath` (in
+  // sandstone.config.ts or via CLI) wins.
+  if (!saveOptions.serverPath && !cliOptions.serverPath) {
+    const mcServerPath = path.join(folder, '.sandstone', 'mc-server')
+    if (await fs.pathExists(mcServerPath)) {
+      saveOptions = { ...saveOptions, serverPath: mcServerPath }
+    }
+  }
   // Resolve the deployment targets once. Same helper the watcher uses
   // when publishing to the `sand connect` daemon — keeps both sites in
   // lockstep if the merge rules change.
@@ -520,6 +531,25 @@ async function _buildProject(
         const entries = Object.keys(local.newCache.files)
           .filter((k) => k.startsWith(packTypePrefix))
           .map((k) => k.slice(packTypePrefix.length))
+
+        if (packType.type === 'datapack_dependencies') {
+          const packTypeOutputDir = path.join(local.outputFolder, packType.type)
+          if (await local.fs.pathExists(packTypeOutputDir)) {
+            const names = await local.fs.readDirNames(packTypeOutputDir)
+            for (const name of names) {
+              if (name.includes('/') || name.includes('\\')) continue
+              if (entries.includes(name)) continue
+              try {
+                const s = await local.fs.fileStat(path.join(packTypeOutputDir, name))
+                if (!s.isDirectory()) continue
+              } catch {
+                continue
+              }
+              entries.push(name)
+            }
+          }
+        }
+
         if (entries.length > 0) {
           local.newCache.perChildEntries ??= {}
           if (clientIsDir) local.newCache.perChildEntries[clientDest!] = entries

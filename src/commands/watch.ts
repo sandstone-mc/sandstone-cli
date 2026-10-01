@@ -17,6 +17,7 @@ import * as fs from '../utils/fs.js'
 import { run, spawn } from '../utils/shell.js'
 import { connect as openDaemonClient, type Client as DaemonClient } from './connect/client.js'
 import { endpointStatus, readEndpoint } from './connect/endpoint-file.js'
+import { deployDatapack, checkDeployState } from './deploy.js'
 
 // Minecraft prefixes every stdout line with `[HH:MM:SS] [Thread/LEVEL]: `.
 // Strip just the timestamp — keep `[Server thread/INFO]: ` (and friends)
@@ -124,19 +125,52 @@ export async function watchCommand(opts: WatchOptions) {
     }
   }
 
+  const handleDeploy = async () => {
+    if (!daemonClient) {
+      daemonLog('[watch] no sand connect daemon running — start one with `sand connect` to enable deploy')
+      return
+    }
+    try {
+      const result = await deployDatapack({ daemon: daemonClient, projectRoot: opts.path })
+      daemonLog(`[watch] deployed ${result.archiveName} -> ${result.remotePath} (${result.bytesWritten} bytes)`)
+      for (const dep of result.dependencies) {
+        daemonLog(`[watch]   dep ${dep.name} -> ${dep.remotePath} (${dep.bytesWritten} bytes)`)
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      daemonLog(`[watch] deploy failed: ${message}`)
+    }
+    void refreshDeployHasChanges()
+  }
+
+  const refreshDeployHasChanges = async () => {
+    if (!deployAvailable) {
+      getWatchUIAPI()?.setDeployHasChanges(false)
+      return
+    }
+    try {
+      const state = await checkDeployState({ projectRoot: opts.path })
+      const hasChanges =
+        (state.main !== undefined && !state.main.unchanged) ||
+        state.folderDeps.some((d) => !d.unchanged) ||
+        state.zipDeps.some((d) => !d.unchanged)
+      getWatchUIAPI()?.setDeployHasChanges(hasChanges)
+    } catch {
+      getWatchUIAPI()?.setDeployHasChanges(false)
+    }
+  }
+
   const { unmount } = render(
     React.createElement(WatchUI, {
       manual: opts.manual ?? false,
       onManualRebuild: handleManualRebuild,
+      onDeploy: handleDeploy,
       cwd: opts.path,
       // Since this isn't SIGINT, its fine that we don't await this
       exit: () => exit(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient),
       // Cancels the watcher + unmounts the UI, runs the update commands,
       // then exits the process.
       onRunUpdates: async (commands) => {
-        // Fully stop the FS watcher + ink BEFORE running commands — file
-        // system changes from the update commands shouldn't re-trigger a
-        // rebuild or cause the UI to flicker.
         await cleanup(subscription, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
         // Pick a shell that runs the user's command natively per platform.
         // POSIX: `sh -c <cmd>`; Windows: `cmd /c <cmd>`.
@@ -277,6 +311,7 @@ export async function watchCommand(opts: WatchOptions) {
       // — `resolveActiveSaveConfig` alone wouldn't see them).
       lastBuildSaveConfig = result.activeSaveConfig
       lastBuildConfigPath = resolve(folder, 'sandstone.config.ts')
+      void refreshDeployHasChanges()
     }
 
     api?.setBuildResult(result)
@@ -308,9 +343,16 @@ export async function watchCommand(opts: WatchOptions) {
         // finish reloading, which can take seconds. Awaiting it stalls
         // the watcher (and any subsequent rebuilds queued behind it).
         daemonLog('Sent /reload to host daemon')
+        const packName = result.sandstoneConfig?.name
+        daemonClient
+          .executeRawCommand({ command: `say [Sandstone @ ${packName}] Updated pack(s) deployed, reloading...` })
+          .catch(() => {})
         daemonClient.executeRawCommand({ command: 'reload' }).catch((err) => {
           logWarn(`[watch] daemon reload failed: ${err instanceof Error ? err.message : String(err)}`)
         })
+        daemonClient
+          .executeRawCommand({ command: `say [Sandstone @ ${packName}] Reload Finished!` })
+          .catch(() => {})
       }
     } else {
       logError(result.error)
@@ -507,6 +549,7 @@ export async function watchCommand(opts: WatchOptions) {
   // (daemonClient/daemonPoll declared at top — referenced by the exit
   // arrow passed to render())
   let daemonConnected = false
+  let deployAvailable = false
   // Active log subscription + its unsubscribe + the daemonShutdown
   // unsubscribe — held so the shutdown handler (and `cleanup`) can
   // release them in one place.
@@ -524,6 +567,11 @@ export async function watchCommand(opts: WatchOptions) {
         daemonClient = await openDaemonClient({ endpoint })
         daemonConnected = true
         daemonLog('Connected to host daemon')
+        const welcome = daemonClient.welcome
+        const canStream = welcome.capabilities['writeFileStream'] === true && welcome.hostType !== 'integrated'
+        deployAvailable = canStream
+        getWatchUIAPI()?.setDeployAvailable(canStream)
+        void refreshDeployHasChanges()
         // Publish the active saveConfig so the daemon (and any MCP
         // client attached to it) sees what the watcher will actually
         // deploy to. Resolved via the shared helper so the values
@@ -598,6 +646,9 @@ export async function watchCommand(opts: WatchOptions) {
           daemonClient?.close()
           daemonClient = undefined
           daemonConnected = false
+          deployAvailable = false
+          getWatchUIAPI()?.setDeployAvailable(false)
+          getWatchUIAPI()?.setDeployHasChanges(false)
           if (!daemonPoll) daemonPoll = setInterval(tryConnectDaemon, 5_000)
         })
         // Stop polling — connection succeeded. The onShutdown handler

@@ -47,6 +47,7 @@ export class McsManagerLoginHost implements HostProvider {
   readonly capabilities: HostCapabilities = new Set([
     Capability.ReadFile,
     Capability.WriteFile,
+    Capability.WriteFileStream,
     Capability.AttachLog,
     Capability.ExecuteRawCommand,
     Capability.ExecuteRawCommandHasResponse,

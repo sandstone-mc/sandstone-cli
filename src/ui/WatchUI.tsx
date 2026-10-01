@@ -20,6 +20,11 @@ interface WatchUIProps {
    * spawning the commands, then exiting.
    */
   onRunUpdates?: (commands: string[]) => void
+  /**
+   * Called when the user presses `d`. The parent should attempt to deploy
+   * the rebuilt pack via a running `sand connect` daemon.
+   */
+  onDeploy?: () => void
 }
 
 function formatChangedFiles(files: TrackedChange[]): string {
@@ -130,9 +135,11 @@ function ContentDisplay({ mode, logLines, errorText, changes, scrollOffset, maxL
   )
 }
 
-export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: WatchUIProps) {
+export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDeploy }: WatchUIProps) {
   const [status, setStatusState] = useState<WatchStatus>(manual ? 'pending' : 'watching')
   const [reason, setReason] = useState<string>()
+  const [deployAvailable, setDeployAvailableState] = useState(false)
+  const [deployHasChanges, setDeployHasChangesState] = useState(false)
   const [changedFiles, setChangedFilesState] = useState<TrackedChange[]>([])
   const [buildResult, setBuildResultState] = useState<BuildResult | null>(null)
   const [logLines, setLogLinesState] = useState<string[]>([])
@@ -199,6 +206,14 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: Wa
     })
   }, [])
 
+  const setDeployAvailable = useCallback((available: boolean) => {
+    setDeployAvailableState(available)
+  }, [])
+
+  const setDeployHasChanges = useCallback((hasChanges: boolean) => {
+    setDeployHasChangesState(hasChanges)
+  }, [])
+
   // Reserve space for elements above the content area to keep total line
   // count stable when an MC header or update-commands appear or disappear.
   const extraReservedLines =
@@ -248,6 +263,10 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: Wa
         onManualRebuild?.()
       }
     }
+
+    if (input === 'd' && deployAvailable && deployHasChanges) {
+      onDeploy?.()
+    }
   })
 
   useEffect(() => {
@@ -256,6 +275,8 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: Wa
       setChangedFiles,
       setBuildResult,
       setLiveLog,
+      setDeployAvailable,
+      setDeployHasChanges,
       exit: () => exit!(),
     }
     ;(globalThis as Record<string, unknown>).__watchUIAPI = api
@@ -263,7 +284,7 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: Wa
     return () => {
       delete (globalThis as Record<string, unknown>).__watchUIAPI
     }
-  }, [setStatus, setChangedFiles, setBuildResult, setLiveLog])
+  }, [setStatus, setChangedFiles, setBuildResult, setLiveLog, setDeployAvailable, setDeployHasChanges])
 
   const statusText: Record<WatchStatus, string> = {
     watching: 'Watching for changes...',
@@ -281,6 +302,7 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates }: Wa
     footerParts.push('↑↓: scroll')
   }
   footerParts.push('U: update+exit')
+  if (deployAvailable && deployHasChanges) footerParts.push('D: deploy')
   footerParts.push('Q: exit')
 
   return (

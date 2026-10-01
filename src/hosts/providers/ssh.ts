@@ -38,6 +38,7 @@ export class SshHost implements HostProvider {
     Capability.StopServer,
     Capability.ReadFile,
     Capability.WriteFile,
+    Capability.WriteFileStream,
     Capability.AttachLog,
   ])
 

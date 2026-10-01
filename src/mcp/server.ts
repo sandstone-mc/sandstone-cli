@@ -190,8 +190,8 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
   server.tool(
     deployToServer.NAME,
     deployToServer.DESCRIPTION,
-    { dry: z.boolean().optional() },
-    async (args) => deployToServer.call(ctx, args as { dry?: boolean }),
+    {},
+    async (args) => deployToServer.call(ctx, args),
   )
   server.tool(
     restartServer.NAME,

@@ -44,9 +44,10 @@ import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
 import { BootstrapError, bootstrapHost } from './connect/bootstrap.js'
 import type { HostConfigInput, HostProvider, HostType, LogChunkHandler } from '../hosts/types.js'
 import { DEFAULT_HOST_TYPE } from './connect/index.js'
-import { createSandstonePack, type SandstoneContext } from 'sandstone'
+import type { SandstoneContext } from 'sandstone'
 import { randomUUID as nodeRandomUUID } from 'node:crypto'
 import chalk from 'chalk-template'
+import { parseHostConfig } from './connect/host-config.js'
 
 export interface RunCommandOptions {
   /** `--host-type <type>` — required (same set as `sand connect`). */
@@ -441,7 +442,6 @@ async function attachAwaitHost(
 }
 
 async function loadHostConfig(opts: RunCommandOptions): Promise<HostConfigInput> {
-  const { parseHostConfig } = await import('./connect/host-config.js')
   return (await parseHostConfig(opts.hostConfig, opts.hostConfigFile)).config
 }
 

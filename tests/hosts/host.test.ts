@@ -24,9 +24,9 @@ import {
   beforeAll,
   beforeEach,
 } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
+import { cwd } from 'node:process'
 
 import { loadHostConfig } from './_harness.ts'
 import {
@@ -79,7 +79,8 @@ afterAll(async () => {
 }, 30_000)
 
 beforeEach(() => {
-  projectRoot = mkdtempSync(join(tmpdir(), 'sandstone-host-'))
+  mkdirSync(join(cwd(), '.temp', 'test-hosts'), { recursive: true })
+  projectRoot = mkdtempSync(join(cwd(), '.temp', 'test-hosts', 'sandstone-host-'))
 })
 
 afterEach(async () => {

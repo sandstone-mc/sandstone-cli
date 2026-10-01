@@ -58,8 +58,8 @@ export interface SessionContext {
   dispatcher: Dispatcher
 }
 
-/** Max payload for read/write. */
-const MAX_PAYLOAD = 4 * 1024 * 1024 * 1024
+/** Max WS payload size. */
+const MAX_PAYLOAD = 128 * 1024 * 1024
 
 /** Coalesce log lines across ≤50ms windows; also cap batch size. */
 const LOG_FLUSH_MS = 50

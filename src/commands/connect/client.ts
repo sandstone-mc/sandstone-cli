@@ -475,11 +475,14 @@ export class Client {
       : params.data
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(bytes)
+        const CHUNK = 64 * 1024 * 1024
+        for (let off = 0; off < bytes.byteLength; off += CHUNK) {
+          controller.enqueue(bytes.subarray(off, Math.min(off + CHUNK, bytes.byteLength)))
+        }
         controller.close()
       },
     })
-    const result = await this.writeFileStreamImpl({ path: params.path, stream })
+    const result = await this.writeFileStreamImpl({ path: params.path, stream, size: bytes.byteLength })
     return { bytesWritten: (await result.done).bytesWritten }
   }
 

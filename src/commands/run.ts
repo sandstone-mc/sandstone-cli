@@ -101,8 +101,7 @@ export async function runCommand(
     return
   }
 
-  // 3. Compile --expect + resolve timeout (validity only — we may
-  // decide later that --expect isn't needed).
+  // 3. Compile --expect + resolve timeout.
   const expectRegex = opts.expect ? compileRegex(opts.expect) : null
   const timeoutMs = parseTimeoutMs(opts.timeout)
 
@@ -111,17 +110,9 @@ export async function runCommand(
   const endpoint = await readEndpoint(projectRoot)
   const daemonAlive = !!(endpoint && (await pidAlive(endpoint.pid)))
 
-  // 5. Direct-mode host type resolution. Default to `integrated` so the
-  // direct path matches what `sand connect` would do without a daemon.
-  // Reject multi-host-type values — composite daemons are gone.
+  // 5. Direct-mode host type resolution.
   let hostType: HostType | undefined
   if (opts.hostType) {
-    if (opts.hostType.includes(',')) {
-      console.error(
-        chalk`{red Error:} Only one --host-type is supported, got '${opts.hostType}'. Composite daemons were removed.`,
-      )
-      process.exit(2)
-    }
     hostType = opts.hostType as HostType
   }
   if (!daemonAlive) {
@@ -135,9 +126,6 @@ export async function runCommand(
       process.exit(2)
     }
   }
-  // Forward to bootstrapHosts so it can inject `sandstoneConfig` per
-  // host from the same sandstone.config.ts load — no duplicate
-  // `import()` per invocation.
   const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
 
   // 6. Daemon-mode fast path.
@@ -158,8 +146,6 @@ export async function runCommand(
           ? await attachAwaitClient(client, expectRegex, timeoutMs)
           : null
 
-      // Ensure the server is up before issuing the command. Idempotent:
-      // joins an in-flight startServer instead of crashing.
       if (client.welcome.capabilities.startServer) {
         await client.startServer().catch(() => {})
       }
@@ -169,7 +155,6 @@ export async function runCommand(
 
       if (expectRegex) {
         if (hasResponse) {
-          // Match against the built-in response directly.
           if (!expectRegex.test(result.output)) {
             client.close()
             console.error(
@@ -180,7 +165,6 @@ export async function runCommand(
           client.close()
           return
         }
-        // No built-in response: await the matching log line.
         try {
           const line = await watcher!.promise
           console.log(stripMinecraftPrefix(line))
@@ -201,7 +185,6 @@ export async function runCommand(
       console.error(
         chalk`{yellow [run]} daemon unreachable (${err instanceof Error ? err.message : String(err)}); falling back to direct connect`,
       )
-      // fall through to direct mode
     }
   }
 
@@ -210,8 +193,6 @@ export async function runCommand(
   // RCON port/password auto-derive), same member lifecycle.
   const directHostType = hostType ?? DEFAULT_HOST_TYPE
   const hostConfig = await loadHostConfig(opts)
-  // Project root injection (the bootstrap also handles this, but we
-  // need it here too so the merged config is right for logging).
   if (hostConfig.projectRoot === undefined) hostConfig.projectRoot = projectRoot
   let host: HostProvider
   let weStarted = false
@@ -241,13 +222,8 @@ export async function runCommand(
     process.exit(1)
   }
 
-  // Same gating as daemon mode.
   const hasResponse = host.capabilities.has('executeRawCommandHasResponse')
-  const watcher =
-    expectRegex && !hasResponse ? await attachAwaitHost(host, expectRegex, timeoutMs) : null
-
-  // The bootstrap already started any StartServer-capable member
-  // (idempotent — calling again is a no-op).
+  const watcher = expectRegex && !hasResponse ? await attachAwaitHost(host, expectRegex, timeoutMs) : null
 
   let output: string | undefined
   try {
@@ -282,24 +258,13 @@ export async function runCommand(
     }
   }
 
-  // Graceful stop before disconnect — but ONLY if we spawned the
-  // server in this invocation. If the user launched integrated
-  // manually (e.g. via VS Code), sending `stop` would kill their
-  // session. `weStarted` is populated by `bootstrapHosts` from the
-  // integrated provider's `weStartedThisCall()` flag.
   if (weStarted && host.stopServer && host.capabilities.has('stopServer')) {
     try {
       await host.stopServer()
-    } catch {
-      // ignore — disconnect cleanup still runs
-    }
+    } catch {}
   }
   await safeDisconnect(host)
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function compileRegex(pattern: string): RegExp {
   try {
@@ -320,13 +285,6 @@ function parseTimeoutMs(raw: string | undefined): number {
   return n * 1000
 }
 
-/**
- * Strip Minecraft's log prefix from a line. The server emits
- * `[HH:MM:SS] [Thread/LEVEL]: <message>` — everything up to and
- * including the first `]: ` is server formatting, the rest is the
- * actual message. When `--expect` matches, the user wants the message,
- * not the wrapping.
- */
 export const MINECRAFT_LOG_PREFIX = String.raw`^\[\d{2}:\d{2}:\d{2}\] \[[^\]]+\/\w+\]: `
 
 const MinecraftLogPrefixRegex = new RegExp(`${MINECRAFT_LOG_PREFIX}`)
@@ -337,30 +295,15 @@ export function stripMinecraftPrefix(line: string): string {
 }
 
 interface ClientLogWatcher {
-  /** Resolves with the first matching line; rejects on timeout/attach error. */
   promise: Promise<string>
-  /** Unattach when done (or on failure). Available only after the
-   *  underlying attachLog RPC resolves — callers that need to unattach
-   *  before resolving the matching line should still `await` the
-   *  `subscription` promise first. */
   subscription: Promise<{ unattach(): Promise<void> }>
 }
 
-/**
- * Subscribe to a WS client's log stream and resolve on the first line
- * matching `regex`, or reject after `timeoutMs`. Attaches BEFORE
- * returning the watcher so no lines are missed between subscribe and
- * the caller sending the command.
- */
 async function attachAwaitClient(
   client: Client,
   regex: RegExp,
   timeoutMs: number,
 ): Promise<ClientLogWatcher> {
-  // Attach first so we have the subscription handle to register the
-  // line listener on. The `attachLog` RPC both subscribes server-side
-  // and returns an id, so the moment the promise resolves lines start
-  // flowing — registering onLines immediately keeps the gap minimal.
   const subscriptionPromise = client.attachLog({ regex: regex.source })
 
   let matched = false
@@ -395,14 +338,13 @@ interface HostLogWatcher {
   cleanup(): Promise<void>
 }
 
-/** Same pattern as {@link attachAwaitClient} but for a directly-held HostProvider. */
 async function attachAwaitHost(
   host: HostProvider,
   regex: RegExp,
   timeoutMs: number,
 ): Promise<HostLogWatcher> {
   if (!host.attachLog) {
-    throw new Error('Host does not support attachLog — cannot use --expect')
+    throw new Error('Host does not support attachLog; cannot use --expect')
   }
   let matched = false
   let subscription: { unattach: () => Promise<void> } | null = null
@@ -448,15 +390,8 @@ async function loadHostConfig(opts: RunCommandOptions): Promise<HostConfigInput>
 async function safeDisconnect(host: HostProvider): Promise<void> {
   try {
     await host.disconnect()
-  } catch {
-    // ignore
-  }
+  } catch {}
 }
-
-// ---------------------------------------------------------------------------
-// File-mode: expand a `.mcfunction` or `.ts` file into a sequence of
-// console commands, then run them through the host.
-// ---------------------------------------------------------------------------
 
 /**
  * Trim, drop blanks, drop `#`-prefixed comments. Mirrors Minecraft's
@@ -498,24 +433,10 @@ async function readMcfunctionFile(filePath: string): Promise<string[]> {
   return parseMcfunctionLines(text)
 }
 
-/**
- * `import()` the user's `.ts` file, invoke its `default` export inside a
- * one-off Sandstone `MCFunction` callback, and run the default visitor
- * pipeline. The visitor output is a single compiled mcfunction string;
- * any user-created child resource (a nested `MCFunction`, an
- * `Advancement`, …) is rejected — `sand run` only supports inline
- * commands, not files-on-disk generation.
- */
 async function compileTypescriptFile(filePath: string): Promise<string[]> {
   const abs = resolve(filePath)
   const fileUrl = pathToFileURL(abs).href
 
-  // Mirror `sand build`: resolve `sandstone` from the user's file's
-  // directory so the user's `import 'sandstone'` and our
-  // `createSandstonePack` hit the SAME module instance. Otherwise two
-  // module copies coexist (CLI's bundled + the user's resolved path)
-  // and the user's `say` commands try to write into a different pack
-  // singleton — "outside an MCFunction".
   const userDirUrl = pathToFileURL(dirname(abs)).href
   let sandstonePath: string
   try {
@@ -556,13 +477,6 @@ async function compileTypescriptFile(filePath: string): Promise<string[]> {
   }
   const pack = sandstone.createSandstonePack(context)
 
-  // "What would the builder write?" — `pack.compile()` returns exactly
-  // that: every file path the normal `sand build` would emit, flattened
-  // to a `Map<relativePath, string>`. We snapshot the pre-compile set
-  // (bootstrap entries added by SandstonePack's constructor) and diff
-  // against the post-compile set. Anything left besides our root
-  // mcfunction is a user-created resource — the script tried to emit a
-  // file, which `sand run` can't honour.
   const bootstrapKeys = new Set<string>()
   for (const wrapper of pack.core.resourceNodes) {
     const r = wrapper.resource as {
@@ -617,8 +531,7 @@ async function compileTypescriptFile(filePath: string): Promise<string[]> {
  * connection for the whole batch. Mirrors the daemon/direct-mode branch
  * structure of {@link runCommand} but loops over the command list.
  *
- * `--expect` is applied to the LAST emitted command only — it doesn't
- * meaningfully compose with multi-command scripts.
+ * `--expect` is applied to the LAST emitted command only.
  */
 async function runCommands(
   opts: RunCommandOptions,
@@ -735,9 +648,7 @@ async function runCommands(
     if (weStarted && host.stopServer && host.capabilities.has('stopServer')) {
       try {
         await host.stopServer()
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
     await safeDisconnect(host)
   }

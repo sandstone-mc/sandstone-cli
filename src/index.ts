@@ -3,7 +3,7 @@ import { Argument, Command } from 'commander'
 import chalk from 'chalk-template'
 
 import { CLI_VERSION } from './version.js'
-import { buildCommand, createCommand, watchCommand, installNativeCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand, mcpCommand } from './commands/index.js'
+import { buildCommand, createCommand, watchCommand, installNativeCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand, testCommand, mcpCommand } from './commands/index.js'
 import { BuildOptions } from './utils/commander.js'
 
 if (Bun.which('bun') === null) {
@@ -27,6 +27,7 @@ CLI
   .addOption(BuildOptions.get('strictErrors'))
   .addOption(BuildOptions.get('production'))
   .addOption(BuildOptions.get('debug'))
+  .addOption(BuildOptions.get('test'))
   .addOption(BuildOptions.get('path'))
   .addOption(BuildOptions.get('name'))
   .addOption(BuildOptions.get('namespace'))
@@ -140,6 +141,23 @@ are supported. Use \`sand build\` to write resources to disk.`)
   .addOption(BuildOptions.get('timeout'))
   .action((commandAndArgs: string[], opts: { path: string; hostType?: string; hostConfig?: string; hostConfigFile?: string; expect?: string; timeout?: string }) => runCommand(opts, commandAndArgs))
   .addArgument(new Argument('<command...>', 'A console command (e.g. "op MulverineX", "say Hello"), or a path to a .mcfunction / .ts file.'))
+
+CLI
+  .command('test')
+  .description('Run GameTests on the configured server via `test run *:*`. Attaches to the server log before running and parses every failure report emitted between `Running test environment` and `Game Test complete!`. Uses the same connection machinery as `sand run`. Exits 0 when no required failures occurred, 1 when at least one required test failed (or the closing marker was never seen). Optional failures (level WARN, marked `(optional)`) do not trigger a non-zero exit. ⛏')
+  .addHelpText('after', `
+Examples:
+  $ sand test
+
+Requires the datapack to define GameTests (each test class registered via
+\`SandstoneTest\`; use \`sand build --test\` to opt them into the build).
+The CLI exits non-zero when any required test fails so it can be wired
+into CI as a drop-in check.`)
+  .addOption(BuildOptions.get('path'))
+  .addOption(BuildOptions.get('hostType'))
+  .addOption(BuildOptions.get('hostConfig'))
+  .addOption(BuildOptions.get('hostConfigFile'))
+  .action(testCommand)
 
 CLI
   .command('mcp')

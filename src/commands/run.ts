@@ -146,10 +146,6 @@ export async function runCommand(
           ? await attachAwaitClient(client, expectRegex, timeoutMs)
           : null
 
-      if (client.welcome.capabilities.startServer) {
-        await client.startServer().catch(() => {})
-      }
-
       const result = await client.executeRawCommand({ command })
       if (result.output) console.log(result.output)
 
@@ -592,9 +588,6 @@ async function runCommands(
       process.exit(1)
     }
     const hasResponse = client.welcome.capabilities.executeRawCommandHasResponse
-    if (client.welcome.capabilities.startServer) {
-      await client.startServer().catch(() => {})
-    }
     try {
       for (let i = 0; i < commands.length; i++) {
         const cmd = commands[i]!

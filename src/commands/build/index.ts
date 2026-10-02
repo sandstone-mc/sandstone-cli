@@ -53,6 +53,7 @@ export type BuildOptions = {
   strictErrors?: boolean
   production?: boolean
   debug?: boolean
+  test?: boolean
 
   // Values
   path: string
@@ -222,6 +223,7 @@ export async function loadBuildContext(
     packOptions: sandstoneConfig.packs,
     conflictStrategies,
     loadVersion: (sandstoneConfig as { loadVersion?: number }).loadVersion,
+    enableTests: cliOptions.test,
   }
 
   const sandstonePack = createSandstonePack(context)
@@ -486,6 +488,27 @@ async function _buildProject(
 
   // Process and export packs
   const packTypesArray = [...packTypes]
+
+  if (cliOptions.test) {
+    const testEntries: Array<{ name: string; description?: string; optional?: boolean; sourceFile?: string }> = []
+    const throwables: Record<string, unknown> = {}
+    const tests = local.sandstonePack.Test.tests
+    tests.forEach((node) => {
+      const resource = node.resource
+      testEntries.push({
+        name: resource.name,
+        description: resource.description,
+        optional: resource.directives?.optional,
+        sourceFile: resource.sourceFile,
+      })
+      for (const [key, entry] of node.throwableStack) {
+        throwables[key] = entry
+      }
+    })
+    const testsJsonPath = path.join(local.outputFolder, '..', 'tests.json')
+    await local.fs.ensureDir(path.dirname(testsJsonPath))
+    await local.fs.writeJSON(testsJsonPath, { tests: testEntries, throwables }, { pretty: true })
+  }
 
   if (!cliOptions.production) {
     // Auto-detect client path if needed for client-side packs

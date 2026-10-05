@@ -10,6 +10,7 @@ import * as readClientLog from './resources/readClientLog.js'
 import * as readServerLog from './resources/readServerLog.js'
 import * as readTestLog from './resources/readTestLog.js'
 import * as rebuildState from './resources/rebuildState.js'
+import * as testState from './resources/testState.js'
 import * as watcherStatus from './resources/watcherStatus.js'
 
 import * as runWorkspaceBuild from './tools/runWorkspaceBuild.js'
@@ -117,6 +118,15 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
     { title: rebuildState.NAME, description: rebuildState.DESCRIPTION },
     async (_uri) => {
       const r = await rebuildState.read(bridge)
+      return { contents: [r] }
+    },
+  )
+  server.registerResource(
+    testState.NAME,
+    testState.URI,
+    { title: testState.NAME, description: testState.DESCRIPTION },
+    async (_uri) => {
+      const r = await testState.read(bridge)
       return { contents: [r] }
     },
   )

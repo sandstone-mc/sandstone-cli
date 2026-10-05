@@ -55,14 +55,19 @@ self.onerror = (event: { message: string, filename: string, lineno: number, coln
   return false
 }
 
-/* @ts-ignore */ // TODO: Broken Bun Types, ignore this for now
-self.addEventListener(
-  /* @ts-ignore */
+// `self` in a Bun worker is typed as `Worker` (not
+// `DedicatedWorkerGlobalScope`), so it doesn't expose
+// `addEventListener('unhandledrejection', ...)`. The event fires here
+// only for promises the worker rejected without a catch, and we want
+// to surface those over the postMessage log pipe rather than crashing.
+const selfWithUnhandledRejection = self as unknown as {
+  addEventListener(type: 'unhandledrejection', listener: (event: { reason: unknown }) => void): void,
+}
+selfWithUnhandledRejection.addEventListener(
   'unhandledrejection',
-  /* @ts-ignore */
-  (event: { reason: unknown }) => {
+  (event) => {
     try { postMessage({ __log: { level: 'error', line: 'unhandledrejection: ' + String(event.reason) } }) } catch (_e) {}
-  }
+  },
 )
 
 let storedBuildContext: unknown = undefined

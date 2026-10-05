@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { WsData } from './server.js'
+import type { WsData } from './daemon.js'
 
 export interface SubscriptionRecord {
   subscriptionId: string
@@ -19,8 +19,7 @@ export interface SubscriptionRecord {
 
 export class SubscriptionRegistry {
   private readonly byId = new Map<string, SubscriptionRecord>()
-  /** Reverse lookup for cascade cleanup. */
-  private readonly byWs = new WeakMap<object, Set<string>>()
+  private readonly byWs = new Map<string, Set<string>>()
 
   register(ws: Bun.ServerWebSocket<WsData>): string {
     return this.registerWithId(randomUUID(), ws)
@@ -37,32 +36,19 @@ export class SubscriptionRegistry {
       cancelled: false,
     }
     this.byId.set(subscriptionId, record)
-    const key = ws as object
-    let set = this.byWs.get(key)
+    let set = this.byWs.get(ws.data.secret)
     if (!set) {
       set = new Set()
-      this.byWs.set(key, set)
+      this.byWs.set(ws.data.secret, set)
     }
     set.add(subscriptionId)
     return subscriptionId
   }
 
-  /** Look up a subscription by id. Returns null when unknown. */
   get(subscriptionId: string): SubscriptionRecord | null {
     return this.byId.get(subscriptionId) ?? null
   }
 
-  /**
-   * Swap the unattach thunk for a registered subscription. Used by
-   * `attachLog` / `attachLogs` which register a placeholder before
-   * calling the host (so the handler closure can reference the id) and
-   * then replace it with the real provider unattach once it resolves.
-   *
-   * If cascade-cleanup arrived during the placeholder window (the
-   * record was marked `cancelled`), the new unattach is fired
-   * immediately and the record dropped — the host's log handler isn't
-   * orphaned. No-op if the id isn't registered.
-   */
   setUnattach(subscriptionId: string, unattach: () => Promise<void>): void {
     const record = this.byId.get(subscriptionId)
     if (!record) return
@@ -73,16 +59,6 @@ export class SubscriptionRegistry {
     }
   }
 
-  /**
-   * Unattach + drop a single subscription. Safe to call for unknown ids
-   * (returns false rather than throwing). The provider's `unattach` is
-   * awaited; errors are swallowed to keep the cleanup path robust.
-   *
-   * If the subscription is still `pending` (placeholder not yet
-   * replaced), marks it `cancelled` instead of calling the placeholder
-   * and deleting — `setUnattach` will clean up when the host
-   * resolves.
-   */
   async unattach(subscriptionId: string): Promise<boolean> {
     const record = this.byId.get(subscriptionId)
     if (!record) return false
@@ -91,9 +67,7 @@ export class SubscriptionRegistry {
       return true
     }
     if (!record.unattach) {
-      // Non-pending but no unattach installed — should never happen
-      // because `setUnattach` is the only path that clears
-      // `pending`. Drop the record defensively.
+      // TODO: Add a log here that warns when this happens, we shouldn't reach this
       this.dropAndUnattach(record, async () => {})
       return true
     }
@@ -101,20 +75,11 @@ export class SubscriptionRegistry {
     return true
   }
 
-  /**
-   * Cascade-unattach every subscription owned by `ws`. Called from the
-   * server's ws.close hook so a dropped client can't leak log handlers.
-   *
-   * Pending subscriptions are marked `cancelled` rather than dropped —
-   * `setUnattach` will fire the real unattach when the host
-   * finally resolves, so the host's log handler isn't orphaned.
-   */
   async dropAllForWs(ws: Bun.ServerWebSocket<WsData>): Promise<void> {
-    const key = ws as object
-    const set = this.byWs.get(key)
+    const set = this.byWs.get(ws.data.secret)
     if (!set) return
     const ids = Array.from(set)
-    this.byWs.delete(key)
+    this.byWs.delete(ws.data.secret)
     for (const id of ids) {
       const record = this.byId.get(id)
       if (!record) continue
@@ -126,35 +91,26 @@ export class SubscriptionRegistry {
       if (!record.unattach) continue
       try {
         await record.unattach()
-      } catch {
-        // provider is already gone; nothing to do
-      }
+      } catch {}
     }
   }
 
   private dropAndUnattach(record: SubscriptionRecord, unattach: () => Promise<void>): void {
     this.byId.delete(record.subscriptionId)
-    const set = this.byWs.get(record.ws as object)
+    const set = this.byWs.get(record.ws.data.secret)
     set?.delete(record.subscriptionId)
     unattach().catch(() => {})
   }
 
-  /** Test helper: how many live subscriptions? */
   size(): number {
     return this.byId.size
   }
 }
 
-/**
- * Tracks active `waitForLog` subscriptions per WS so the daemon can
- * cascade-cleanup on WS close (and the RPC handler can cancel by id).
- * Distinct from `SubscriptionRegistry` — that one mirrors host log
- * subscriptions, this one tracks the higher-level waitForLog handles.
- */
 export class WaitLogSubscriptionRegistry {
   private nextId = 1
-  private readonly byId = new Map<string, { ws: Bun.ServerWebSocket<WsData>; handle: { interrupt(): Promise<void> } }>()
-  private readonly byWs = new WeakMap<object, Set<string>>()
+  private readonly byId = new Map<string, { socketKey: string, handle: { interrupt(): Promise<void> } }>()
+  private readonly byWs = new Map<string, Set<string>>()
 
   generateId(): string {
     let id: string
@@ -164,46 +120,39 @@ export class WaitLogSubscriptionRegistry {
     return id
   }
 
-  register(subscriptionId: string, ws: Bun.ServerWebSocket<WsData>, handle: { interrupt(): Promise<void> }): void {
-    this.byId.set(subscriptionId, { ws, handle })
-    const key = ws as object
-    let set = this.byWs.get(key)
+  register(subscriptionId: string, socketKey: string, handle: { interrupt(): Promise<void> }): void {
+    this.byId.set(subscriptionId, { socketKey, handle })
+    let set = this.byWs.get(socketKey)
     if (!set) {
       set = new Set()
-      this.byWs.set(key, set)
+      this.byWs.set(socketKey, set)
     }
     set.add(subscriptionId)
   }
 
-  /** Drop without interrupting. Returns the handle (if any) for the caller to interrupt. */
   drop(subscriptionId: string): { interrupt(): Promise<void> } | null {
     const entry = this.byId.get(subscriptionId)
     if (!entry) return null
     this.byId.delete(subscriptionId)
-    this.byWs.get(entry.ws as object)?.delete(subscriptionId)
+    this.byWs.get(entry.socketKey)?.delete(subscriptionId)
     return entry.handle
   }
 
-  /** Cascade-unattach every waitForLog subscription owned by `ws`. */
-  async dropAllForWs(ws: Bun.ServerWebSocket<WsData>): Promise<void> {
-    const key = ws as object
-    const set = this.byWs.get(key)
+  async dropAllForWs(socketKey: string): Promise<void> {
+    const set = this.byWs.get(socketKey)
     if (!set) return
     const ids = Array.from(set)
-    this.byWs.delete(key)
+    this.byWs.delete(socketKey)
     for (const id of ids) {
       const entry = this.byId.get(id)
       if (!entry) continue
       this.byId.delete(id)
       try {
         await entry.handle.interrupt()
-      } catch {
-        // already detached
-      }
+      } catch {}
     }
   }
 
-  /** Test helper. */
   size(): number {
     return this.byId.size
   }

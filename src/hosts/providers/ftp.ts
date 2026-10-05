@@ -4,10 +4,11 @@ import { Readable, Writable, PassThrough } from 'stream'
 import { HostAuthError, NotConnectedError } from '../errors.js'
 import { RconClient } from '../rcon-client.js'
 import { attachRconIfConfigured } from '../_shared/attach-rcon.js'
-import type { FtpHostConfig, HostCapabilities, HostProvider, HostLogLine, HostLogHandler, LogSubscription } from '../types.js'
-import { Capability } from '../types.js'
+import { HostProvider, Capability } from '../types.js'
 
-export class FtpHost implements HostProvider {
+import type { DaemonLogger, FtpHostConfig, HostCapabilities, HostLogLine, HostLogHandler, LogSubscription } from '../types.js'
+
+export class FtpHost extends HostProvider {
   readonly type = 'ftp' as const
   readonly displayName = 'FTP'
   readonly capabilities: HostCapabilities = (() => {
@@ -25,6 +26,7 @@ export class FtpHost implements HostProvider {
   private connected = false
   private rcon: RconClient | null = null
   private ftpQueue: Promise<unknown> = Promise.resolve()
+  private pollerState: PollerState | null = null
 
   private ftpSerialize<T>(op: () => Promise<T>): Promise<T> {
     const next = this.ftpQueue.then(op, op)
@@ -32,7 +34,8 @@ export class FtpHost implements HostProvider {
     return next
   }
 
-  constructor(config: FtpHostConfig) {
+  constructor(config: FtpHostConfig, logger: DaemonLogger) {
+    super(logger)
     this.config = config
   }
 
@@ -136,76 +139,103 @@ export class FtpHost implements HostProvider {
     this.requireConnected('ftp')
     const intervalMs = this.config.pollIntervalMs ?? 500
     const logPath = this.resolvePath(this.config.logPath ?? 'logs/latest.log')
-    let lastSize = 0
-    let lastMtime = 0
-    let buffer = ''
-    let stopped = false
-    let timer: NodeJS.Timeout | null = null
 
-    const flushLines = () => {
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      if (lines.length > 0) {
-        const ts = Date.now()
-        const chunks: HostLogLine[] = lines.map((line) => ({ line, ts, stream: 'stdout' }))
-        onChunk(chunks)
+    // One polling loop shared across every attacher of this host.
+    // Reference-counted: when the last handler unsubscribes the
+    // timer is cleared and state reset; the next attacher starts a
+    // fresh poll (seeded from the file's current size).
+    let state = this.pollerState
+    if (state === null) {
+      state = {
+        lastSize: 0,
+        lastMtime: 0,
+        buffer: '',
+        timer: null,
+        handlers: new Set<HostLogHandler>(),
       }
-    }
+      this.pollerState = state
 
-    const tick = async () => {
-      if (stopped) return
+      const flushLines = () => {
+        if (state === null) return
+        const lines = state.buffer.split('\n')
+        state.buffer = lines.pop() ?? ''
+        if (lines.length > 0) {
+          const ts = Date.now()
+          const payload: HostLogLine[] = lines.map((line) => ({ line, ts, stream: 'stdout' }))
+          for (const h of state.handlers) h(payload)
+        }
+      }
+
+      const tick = async () => {
+        if (state === null || state.timer === null) return
+        state.timer = null
+        try {
+          await this.ftpSerialize(async () => {
+            if (state === null) return
+            const size = await this.client.size(logPath)
+            const mtime = (await this.client.lastMod(logPath)).getTime()
+
+            if (size < state.lastSize || mtime + 1000 < state.lastMtime) {
+              state.lastSize = 0
+              state.buffer = ''
+            }
+
+            if (size > state.lastSize) {
+              let chunkBuffer = ''
+              const sink = new Writable({
+                write(chunk: Buffer, _enc, cb) {
+                  chunkBuffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+                  cb()
+                },
+              })
+              await this.client.downloadTo(sink, logPath, state.lastSize)
+              state.buffer += chunkBuffer
+              flushLines()
+              state.lastSize = size
+              state.lastMtime = mtime
+            }
+          })
+        } catch {} finally {
+          // Reset state on persistent failure so a future attach
+          // retries from scratch. (One transient tick error doesn't
+          // tear down the whole loop — we just reschedule.)
+          if (state !== null && state.handlers.size > 0) {
+            state.timer = setTimeout(tick, intervalMs)
+          }
+        }
+      }
+
+      // Seed initial size; on failure, leave at 0 so the first tick
+      // catches up from the start of the file.
       try {
         await this.ftpSerialize(async () => {
-          const size = await this.client.size(logPath)
-          const mtime = (await this.client.lastMod(logPath)).getTime()
-
-          if (size < lastSize || mtime + 1000 < lastMtime) {
-            lastSize = 0
-            buffer = ''
-          }
-
-          if (size > lastSize) {
-            let chunkBuffer = ''
-            const sink = new Writable({
-              write(chunk: Buffer, _enc, cb) {
-                chunkBuffer += typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-                cb()
-              },
-            })
-            await this.client.downloadTo(sink, logPath, lastSize)
-            buffer += chunkBuffer
-            flushLines()
-            lastSize = size
-            lastMtime = mtime
-          }
+          if (state === null) return
+          state.lastSize = await this.client.size(logPath)
+          state.lastMtime = (await this.client.lastMod(logPath)).getTime()
         })
-      } catch {} finally {
-        if (!stopped) timer = setTimeout(tick, intervalMs)
-      }
-    }
-
-    try {
-      await this.ftpSerialize(async () => {
-        lastSize = await this.client.size(logPath)
-        lastMtime = (await this.client.lastMod(logPath)).getTime()
-      })
-    } catch {
-      lastSize = 0
-      lastMtime = 0
-    }
-    timer = setTimeout(tick, intervalMs)
-
-    return {
-      async unattach() {
-        if (stopped) return
-        stopped = true
-        if (timer) {
-          clearTimeout(timer)
-          timer = null
+      } catch {
+        if (state !== null) {
+          state.lastSize = 0
+          state.lastMtime = 0
         }
-        if (buffer.length > 0) {
-          onChunk([{ line: buffer, ts: Date.now(), stream: 'stdout' }])
-          buffer = ''
+      }
+      state.timer = setTimeout(tick, intervalMs)
+    }
+
+    state.handlers.add(onChunk)
+    return {
+      unattach: async () => {
+        if (state === null) return
+        state.handlers.delete(onChunk)
+        if (state.handlers.size === 0) {
+          if (state.timer !== null) {
+            clearTimeout(state.timer)
+            state.timer = null
+          }
+          if (this.pollerState === state) {
+            this.pollerState = null
+          }
+          state = null
         }
       },
     }
@@ -222,6 +252,14 @@ export class FtpHost implements HostProvider {
   }
 }
 
-export function createFtpHost(config: FtpHostConfig): HostProvider {
-  return new FtpHost(config)
+export function createFtpHost(config: FtpHostConfig, logger: DaemonLogger): HostProvider {
+  return new FtpHost(config, logger)
+}
+
+interface PollerState {
+  lastSize: number
+  lastMtime: number
+  buffer: string
+  timer: NodeJS.Timeout | null
+  handlers: Set<HostLogHandler>
 }

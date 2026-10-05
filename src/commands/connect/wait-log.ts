@@ -1,4 +1,5 @@
 import type { HostLogHandler, HostLogLine, LogSubscription } from '../../hosts/types.js'
+import picomatch from 'picomatch'
 
 export type LogPattern = {
   kind: 'endsWith' | 'includes' | 'glob' | 'regex',
@@ -52,19 +53,18 @@ export type WaitForLogEntry = WaitForLogSettlement | {
 type CompiledMatcher = (
   | { kind: 'endsWith', value: string }
   | { kind: 'includes', value: string }
-  | { kind: 'glob', glob: Bun.Glob }
+  | { kind: 'glob', isMatch: (line: string) => boolean }
   | { kind: 'regex', regex: RegExp }
 )
 
 type MatcherState = {
+  uuid: string,
   index: number,
   opening: LogPattern,
-  uuid: string,
   group: string,
   promise: Promise<string[]>,
   resolveLines: (lines: string[]) => void,
   rejectPending: (err: Error) => void,
-  settled: boolean,
   listeners: Set<(entry: WaitForLogEntry) => void>,
   buffer: string[],
   openingTimer: ReturnType<typeof setTimeout> | null,
@@ -75,6 +75,7 @@ type MatcherState = {
 
 export class LogMatcher {
   private readonly matchers = new Map<string, MatcherState>()
+  private readonly groupSizes = new Map<string, number>()
   private subscription: LogSubscription | null = null
   private subscriptionPromise: Promise<void> | null = null
 
@@ -83,6 +84,7 @@ export class LogMatcher {
   async waitForLog(patterns: LogPattern[]) {
     const group = crypto.randomUUID()
     const states = patterns.map((opening, index) => this.createMatcher(opening, group, index))
+    this.groupSizes.set(group, states.length)
     await this.ensureSubscribed()
 
     const matcher = this
@@ -93,7 +95,7 @@ export class LogMatcher {
         for (const state of states) state.listeners.add(fn)
       },
       async interrupt() {
-        await matcher.removeByGroup(group)
+        matcher.removeByGroup(group)
       },
     }
   }
@@ -103,21 +105,19 @@ export class LogMatcher {
   }
 
   private createMatcher(opening: LogPattern, group: string, index: number) {
-    const id = crypto.randomUUID()
-    if (this.matchers.has(id)) {
-      throw new Error(`LogMatcher: matcher id collision: ${id}`)
-    }
     const uuid = crypto.randomUUID()
+    if (this.matchers.has(uuid)) {
+      throw new Error(`LogMatcher: matcher id collision: ${uuid}`)
+    }
 
     const state: MatcherState = {
+      uuid,
       index,
       opening,
-      uuid,
       group,
       promise: undefined!,
       resolveLines: () => {},
       rejectPending: () => {},
-      settled: false,
       listeners: new Set(),
       buffer: [],
       openingTimer: null,
@@ -130,54 +130,61 @@ export class LogMatcher {
       state.rejectPending = rej
     })
 
-    // Start the opening timer (if any) immediately — it bounds how
-    // long we wait for the opening line.
     state.openingTimer = this.startOpeningTimer(state, opening)
 
-    this.matchers.set(id, state)
+    this.matchers.set(uuid, state)
     return state
   }
 
   private removeByGroup(group: string) {
-    for (const [id, state] of [...this.matchers]) {
+    for (const [, state] of [...this.matchers]) {
       if (state.group !== group) continue
-      this.matchers.delete(id)
-      this.interruptState(state)
-      break
+      if (this.interruptState(state)) return
     }
-    return this.maybeCloseSubscription()
   }
 
   private fire(state: MatcherState, entry: WaitForLogEntry) {
     for (const fn of state.listeners) fn(entry)
   }
 
-  private interruptState(state: MatcherState) {
-    if (state.settled) return
-    state.settled = true
+  private reap(state: MatcherState): boolean {
+    this.matchers.delete(state.uuid)
+    const remaining = this.groupSizes.get(state.group)! - 1
+    if (remaining === 0) {
+      this.groupSizes.delete(state.group)
+      return true
+    }
+    this.groupSizes.set(state.group, remaining)
+    return false
+  }
+
+  private interruptState(state: MatcherState): boolean {
+    if (!this.matchers.has(state.uuid)) return false
     if (state.openingTimer) clearTimeout(state.openingTimer)
     if (state.closingTimer) clearTimeout(state.closingTimer)
     this.fire(state, { patternUUID: state.uuid, patternIndex: state.index, status: 'interrupted' })
     state.rejectPending(new InterruptedError())
+    const groupEmpty = this.reap(state)
+    if (groupEmpty) this.maybeCloseSubscription()
+    return groupEmpty
   }
 
   private settleMatched(state: MatcherState, lines: string[]) {
-    if (state.settled) return
-    state.settled = true
+    if (!this.matchers.has(state.uuid)) return
     if (state.openingTimer) clearTimeout(state.openingTimer)
     if (state.closingTimer) clearTimeout(state.closingTimer)
     this.fire(state, { patternUUID: state.uuid, patternIndex: state.index, status: 'matched', lines })
     state.resolveLines(lines)
+    if (this.reap(state)) this.maybeCloseSubscription()
   }
 
   private settleTimedOut(state: MatcherState, pattern: LogPattern, timeoutMs: number) {
-    if (state.settled) return
-    state.settled = true
+    if (!this.matchers.has(state.uuid)) return
     if (state.openingTimer) clearTimeout(state.openingTimer)
     if (state.closingTimer) clearTimeout(state.closingTimer)
     this.fire(state, { patternUUID: state.uuid, patternIndex: state.index, status: 'timed_out', timeoutMs })
-    state.rejectPending(new TimeoutError(-1, pattern, timeoutMs))
-    void this.maybeCloseSubscription()
+    state.rejectPending(new TimeoutError(state.index, pattern, timeoutMs))
+    if (this.reap(state)) this.maybeCloseSubscription()
   }
 
   private async ensureSubscribed() {
@@ -210,10 +217,6 @@ export class LogMatcher {
     for (const chunk of chunks) {
       const line = chunk.line
       for (const state of this.matchers.values()) {
-        if (state.settled) {
-          console.error('[LogMatcher#handleLines] This should never happen!')
-          continue
-        }
         const compiledClosing = state.compiledClosing
 
         if (state.buffer.length > 0) {
@@ -245,7 +248,7 @@ export class LogMatcher {
   private startOpeningTimer(state: MatcherState, opening: LogPattern): ReturnType<typeof setTimeout> | null {
     if (opening.timeoutMs === undefined) return null
     return setTimeout(() => {
-      if (state.settled) return
+      if (!this.matchers.has(state.uuid)) return
       this.settleTimedOut(state, opening, opening.timeoutMs!)
     }, opening.timeoutMs)
   }
@@ -253,7 +256,7 @@ export class LogMatcher {
   private startClosingTimer(state: MatcherState, closing: LogPattern): ReturnType<typeof setTimeout> | null {
     if (closing.timeoutMs === undefined) return null
     return setTimeout(() => {
-      if (state.settled) return
+      if (!this.matchers.has(state.uuid)) return
       this.settleTimedOut(state, closing, closing.timeoutMs!)
     }, closing.timeoutMs)
   }
@@ -262,7 +265,7 @@ export class LogMatcher {
     switch (pattern.kind) {
       case 'endsWith': return { kind: 'endsWith', value: pattern.value }
       case 'includes': return { kind: 'includes', value: pattern.value }
-      case 'glob':     return { kind: 'glob', glob: new Bun.Glob(pattern.value) } // TODO: Don't we have a better globbing library than this?
+      case 'glob':     return { kind: 'glob', isMatch: picomatch(pattern.value) }
       case 'regex':    return { kind: 'regex', regex: new RegExp(pattern.value) }
     }
   }
@@ -271,7 +274,7 @@ export class LogMatcher {
     switch (c.kind) {
       case 'endsWith': return line.endsWith(c.value)
       case 'includes': return line.includes(c.value)
-      case 'glob':     return c.glob.match(line)
+      case 'glob':     return c.isMatch(line)
       case 'regex':    return c.regex.test(line)
     }
   }

@@ -17,12 +17,17 @@ import * as fs from '../utils/fs.js'
 import { run, spawn } from '../utils/shell.js'
 import { connect as openDaemonClient, type Client as DaemonClient } from './connect/client.js'
 import { endpointStatus, readEndpoint } from './connect/endpoint-file.js'
+import { BootstrapError, bootstrapHost } from './connect/bootstrap.js'
+import { Daemon, type DaemonHandle } from './connect/daemon.js'
 import { deployDatapack, checkDeployState } from './deploy.js'
 import { stripCliFrames } from '../utils/strip-cli-frames.js'
+import { stripVTControlCharacters } from 'node:util'
 import chalk from 'chalk-template'
 import { runTests, renderTestEvent, type TestEvent, type TestEventSink } from './test.js'
 import type { WorkerResponse, WorkerRequest } from './build/worker-types.js'
 import type { SandstoneConfig } from 'sandstone'
+import { Capability, HostProvider, type HostConfigInput, type HostType } from '../hosts/types.js'
+import { IntegratedHost } from 'src/hosts/providers/integrated.js';
 
 const MinecraftTimestampRegex = /^\[\d{2}:\d{2}:\d{2}\] /
 
@@ -30,7 +35,11 @@ export interface WatchOptions extends BuildOptions {
   manual?: boolean
   library?: boolean
   ignore?: string[]
+  daemon?: boolean
+  hostType?: HostType
 }
+
+type DaemonSurface = DaemonClient | Daemon
 
 export async function watchCommand(opts: WatchOptions) {
   let alreadyBuilding = false
@@ -44,6 +53,10 @@ export async function watchCommand(opts: WatchOptions) {
   const folder = opts.library ? join(opts.path, 'test') : opts.path
 
   let daemonClient: DaemonClient | undefined
+  let daemonHandle: DaemonHandle | undefined = undefined
+  let bootstrapInFlight: Promise<DaemonHandle> | undefined = undefined
+  let skipNextReload = false
+  let surface: DaemonSurface | undefined
   let daemonPoll: ReturnType<typeof setInterval> | undefined
   let linkVersionWatchers: { file: string }[] = []
   let sigintHandler: (() => Promise<void>) | undefined
@@ -142,12 +155,12 @@ export async function watchCommand(opts: WatchOptions) {
   }
 
   const handleDeploy = async () => {
-    if (!daemonClient) {
+    if (!surface) {
       daemonLog(chalk`{blue [watch]} no sand connect daemon running — start one with \`sand connect\` to enable deploy`)
       return
     }
     try {
-      const result = await deployDatapack({ daemon: daemonClient, projectRoot: opts.path })
+      const result = await deployDatapack({ daemon: surface, projectRoot: opts.path })
       daemonLog(chalk`{blue [watch]} deployed ${result.archiveName} -> ${result.remotePath} (${result.bytesWritten} bytes)`)
       for (const dep of result.dependencies) {
         daemonLog(chalk`{blue [watch]}   dep ${dep.name} -> ${result.remotePath} (${dep.bytesWritten} bytes)`)
@@ -202,8 +215,8 @@ export async function watchCommand(opts: WatchOptions) {
     needRebuild = false
     pendingChanges = []
     getWatchUIAPI()?.setStatus('watching')
-    if (daemonClient) {
-      void daemonClient.publishRebuild({
+    if (surface) {
+      void surface.publishRebuild({
         state: 'failed',
         fileCount: 0,
         errorCount: 1,
@@ -220,6 +233,8 @@ export async function watchCommand(opts: WatchOptions) {
   let testAbortController: AbortController | null = null
   let suppressHostLog = false
   const testEvents: TestEvent[] = []
+  let testPassCount = 0
+  let testFailCount = 0
 
   const syncTestsBindings = () => {
     const api = getWatchUIAPI()
@@ -239,17 +254,43 @@ export async function watchCommand(opts: WatchOptions) {
   const runTestSession = async () => {
     if (alreadyTesting) return
     if (!daemonClient) return
+    const dc = daemonClient
     alreadyTesting = true
     suppressHostLog = true
     testEvents.length = 0
+    testPassCount = 0
+    testFailCount = 0
     testAbortController = new AbortController()
     syncTestsBindings()
     getWatchUIAPI()?.setStatus('building')
+
+    const sessionStartedAt = Date.now()
+    dc.publishTestComplete({
+      state: 'started',
+      pass: 0,
+      fail: 0,
+      durationSec: 0,
+      at: new Date(sessionStartedAt).toISOString(),
+    }).catch(() => {})
 
     testCancelTimer = setTimeout(() => {
       testCancelTimer = null
       if (alreadyTesting) getWatchUIAPI()?.setCanCancelTest(true)
     }, 10_000)
+
+    // Mirror `sand test`'s `.sandstone/test.log` from the watcher, and
+    // feed the daemon's test log buffer so `sandstone://test-log`
+    // reflects this run. FileSink buffers internally and auto-flushes
+    // at the high-water mark, so per-line cost is just a buffer append.
+    const testLogPath = join(opts.path, '.sandstone', 'test.log')
+    let testLogWriter: Bun.FileSink | null = null
+    try {
+      await fs.ensureDir(join(opts.path, '.sandstone'))
+      await Bun.write(testLogPath, `=== Watch test session started at ${new Date(sessionStartedAt).toISOString()} ===\n`)
+      testLogWriter = Bun.file(testLogPath).writer({ highWaterMark: 16 * 1024 })
+    } catch (err) {
+      logWarn(`[watch] could not open test log: ${err instanceof Error ? err.message : String(err)}`)
+    }
 
     try {
       const exitCode = await runTests(
@@ -257,26 +298,58 @@ export async function watchCommand(opts: WatchOptions) {
         testAbortController.signal,
         ((e: TestEvent) => {
           testEvents.push(e)
-          for (const line of renderTestEvent(e)) log(line)
+          if (e.event === 'test_result') {
+            if (e.passed) testPassCount++
+            else testFailCount++
+          } else if (e.event === 'summary') {
+            // Authoritative — overwrites per-test tallies (handles
+            // both successful builds that emit summary and edge cases
+            // where a per-test event fires before its complement).
+            testPassCount = e.pass
+            testFailCount = e.fail
+          }
+          const lines = renderTestEvent(e)
+          for (const line of lines) log(line)
+          // Mirror to .sandstone/test.log (sans ANSI) and daemon test buffer.
+          if (lines.length > 0) {
+            if (testLogWriter) {
+              try {
+                const stripped = lines
+                  .map((l) => stripVTControlCharacters(l).replace(/\n+$/, ''))
+                  .join('\n') + '\n'
+                testLogWriter.write(stripped)
+              } catch (err) {
+                logWarn(`[watch] test log write failed: ${err instanceof Error ? err.message : String(err)}`)
+              }
+            }
+            void dc.publishLog({
+              target: 'test',
+              entries: lines.map((line) => ({ line, ts: Date.now(), stream: 'stdout' })),
+            }).catch(() => {})
+          }
         }) satisfies TestEventSink,
-        daemonClient,
+        dc,
       )
+      const durationSec = Math.max(0, Math.round((Date.now() - sessionStartedAt) / 1000))
       daemonLog(exitCode === 0 ? chalk`{green Tests finished (exit ${exitCode})}` : chalk`{red Tests finished (exit ${exitCode})}`)
-      if (daemonClient) {
-        daemonClient.publishRebuild({
-          state: exitCode === 0 ? 'complete' : 'failed',
-          fileCount: 0,
-          errorCount: exitCode === 0 ? 0 : 1,
-          warningCount: 0,
-          at: new Date().toISOString(),
-          ...(exitCode !== 0 ? { message: `Tests exited with code ${exitCode}` } : {}),
-        }).catch(() => {})
-      }
+      const state = exitCode === 0 ? 'complete' : exitCode === 130 ? 'cancelled' : 'failed'
+      dc.publishTestComplete({
+        state,
+        pass: testPassCount,
+        fail: testFailCount,
+        durationSec,
+        at: new Date().toISOString(),
+        ...(exitCode !== 0 ? { message: `Tests exited with code ${exitCode}` } : {}),
+      }).catch(() => {})
     } finally {
       clearTestCancelTimer()
       testAbortController = null
       alreadyTesting = false
       suppressHostLog = false
+      if (testLogWriter) {
+        try { await testLogWriter.end() } catch {}
+        testLogWriter = null
+      }
       getWatchUIAPI()?.setStatus('watching')
       syncTestsBindings()
       if (needRebuild) {
@@ -304,17 +377,20 @@ export async function watchCommand(opts: WatchOptions) {
     if (!alreadyTesting) return
     daemonLog('Test cancelled via TUI')
     testAbortController?.abort()
-    if (daemonClient) {
-      void daemonClient.publishRebuild({
-        state: 'failed',
-        fileCount: 0,
-        errorCount: 1,
-        warningCount: 0,
+    if (surface) {
+      void surface.publishTestComplete({
+        state: 'cancelled',
+        pass: testPassCount,
+        fail: testFailCount,
+        durationSec: 0,
         at: new Date().toISOString(),
         message: 'Cancelled by client',
       }).catch(() => {})
     }
   }
+
+  let shuttingDown = { flag: false }
+  let weSpawnedIntegrated = false
 
   const { unmount } = render(
     React.createElement(WatchUI, {
@@ -325,9 +401,9 @@ export async function watchCommand(opts: WatchOptions) {
       onToggleTests: handleToggleTests,
       onCancelTest: handleCancelTest,
       cwd: opts.path,
-      exit: () => exit(subscription, currentBuildWorker, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient),
+      exit: () => exit(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient, daemonHandle),
       onRunUpdates: async (commands) => {
-        await cleanup(subscription, currentBuildWorker, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
+        await cleanup(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient, daemonHandle)
         for (const cmd of commands) {
           try {
             console.log(`$ ${cmd}`)
@@ -431,14 +507,15 @@ export async function watchCommand(opts: WatchOptions) {
 
       api?.setBuildResult(displayResult)
 
-      if (daemonClient) {
+      if (surface) {
         const state = result.success ? 'complete' : 'failed'
-        void daemonClient.publishRebuild({
+        void surface.publishRebuild({
           state,
           fileCount: result.resourceCounts.functions + result.resourceCounts.other,
           errorCount: result.success ? 0 : 1,
           warningCount: 0,
           at: new Date().toISOString(),
+          testingMode,
           ...(result.success ? {} : result.error ? { message: result.error.slice(0, 500) } : {}),
         }).catch(() => {})
       }
@@ -448,15 +525,20 @@ export async function watchCommand(opts: WatchOptions) {
         lastBuildFailed = false
         currentHasTests = result.hasTests === true
         syncTestsBindings()
-        if (daemonClient) {
-          daemonLog('Sent /reload to host daemon')
-          daemonClient.reloadResources()
-            .then(() => {
-              if (testingMode) void runTestSession()
-            })
-            .catch((err) => {
-              logWarn(`[watch] daemon reload failed: ${err instanceof Error ? err.message : String(err)}`)
-            })
+        if (surface) {
+          if (skipNextReload) {
+            skipNextReload = false
+            if (testingMode) void runTestSession()
+          } else {
+            daemonLog('Sent /reload to host daemon')
+            surface.reloadResources()
+              .then(() => {
+                if (testingMode) void runTestSession()
+              })
+              .catch((err) => {
+                logWarn(`[watch] daemon reload failed: ${err instanceof Error ? err.message : String(err)}`)
+              })
+          }
         }
       } else {
         logError(displayResult.error || '')
@@ -579,8 +661,8 @@ export async function watchCommand(opts: WatchOptions) {
 
   const daemonLog = (msg: string): void => {
     log(msg)
-    if (daemonClient) {
-      daemonClient.publishLog({ entries: [{ line: msg, ts: Date.now(), stream: 'stdout' }] }).catch(() => {})
+    if (surface) {
+      surface.publishLog({ entries: [{ line: msg, ts: Date.now(), stream: 'stdout' }] }).catch(() => {})
     }
   }
 
@@ -588,7 +670,7 @@ export async function watchCommand(opts: WatchOptions) {
   let lastBuildConfigPath: string | undefined
 
   const publishActiveConfig = async (
-    client: DaemonClient,
+    daemon: DaemonSurface,
     o: WatchOptions,
   ): Promise<void> => {
     if (!lastBuildSaveConfig || !lastBuildConfigPath) return
@@ -596,7 +678,7 @@ export async function watchCommand(opts: WatchOptions) {
     const outputDir = mode === 'pack'
       ? resolve(o.path, '.sandstone', 'output')
       : resolve(o.path, 'test', '.sandstone', 'output')
-    await client.publishConfig({
+    await daemon.publishConfig({
       mode,
       configPath: lastBuildConfigPath,
       saveConfig: lastBuildSaveConfig,
@@ -610,119 +692,216 @@ export async function watchCommand(opts: WatchOptions) {
   let activeLogSub: { unattach(): Promise<void> } | undefined
   let offTriggerBuild: (() => void) | undefined
   daemonLog('Watch started')
+
+  const surfaceInfo = (s: DaemonSurface) => {
+    if (s instanceof Daemon) {
+      return {
+        hostType: s.host.type as HostType,
+        hasCap: (name: string) => s.host.capabilities.has(name as Capability),
+      }
+    }
+    return {
+      hostType: s.welcome.hostType as HostType,
+      hasCap: (name: string) => s.welcome.capabilities[name] === true,
+    }
+  }
+  const disconnectSurface = () => {
+    void activeLogSub?.unattach().catch(() => {})
+    offTriggerBuild?.()
+    offTriggerBuild = undefined
+    activeLogSub = undefined
+    daemonClient?.close()
+    daemonClient = undefined
+    surface = undefined
+    daemonConnected = false
+    deployAvailable = false
+    getWatchUIAPI()?.setDeployAvailable(false)
+    getWatchUIAPI()?.setDeployHasChanges(false)
+  }
+
+  const wireSurface = async (s: DaemonSurface): Promise<void> => {
+    surface = s
+    daemonConnected = true
+    const info = surfaceInfo(s)
+    const canStream = info.hasCap('writeFileStream') && info.hostType !== 'integrated'
+    deployAvailable = canStream
+    getWatchUIAPI()?.setDeployAvailable(canStream)
+    void refreshDeployHasChanges()
+    try {
+      await publishActiveConfig(s, opts)
+    } catch (err) {
+      logWarn(`[watch] publishConfig failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    try {
+      await s.publishWatcherStatus({
+        connected: true,
+        mode: (opts.library ? 'library' : 'pack') as 'pack' | 'library',
+        manual: opts.manual ?? false,
+        path: opts.path,
+        pid: process.pid,
+        at: new Date().toISOString(),
+        testingMode,
+      })
+    } catch (err) {
+      logWarn(`[watch] publishWatcherStatus failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    if (s.onTriggerBuild) {
+      offTriggerBuild = s.onTriggerBuild(() => {
+        if (!opts.manual) {
+          logWarn('Erroneous manual build trigger received from daemon (probably an Agent via MCP). Not in manual mode, skipped.')
+          return
+        }
+        if (pendingChanges.length === 0) {
+          logWarn('Erroneous manual build trigger received from daemon (probably an Agent via MCP). No pending changes, skipped.')
+          return
+        }
+        const toBuild = [...pendingChanges]
+        pendingChanges = []
+        onFilesChange(toBuild)
+      })
+    }
+    const captured = s
+    captured.setFallbackNotificationHandler(async (notif) => {
+      if (notif.method === 'cancelTriggerBuild') {
+        daemonLog('Build cancelled via daemon')
+        if (currentBuildWorker) {
+          void currentBuildWorker.terminate()
+        }
+        try {
+          await captured.publishRebuild({
+            state: 'failed',
+            fileCount: 0,
+            errorCount: 1,
+            warningCount: 0,
+            at: new Date().toISOString(),
+            message: 'Cancelled by client',
+          })
+        } catch (err) {
+          logWarn(`[watch] publishRebuild (cancelled) failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+        return
+      }
+      if (notif.method === 'setBuildMode') {
+        const params = notif.params as { mode?: 'normal' | 'test' } | undefined
+        if (params?.mode === 'test' || params?.mode === 'normal') {
+          daemonLog(`Build mode set to ${params.mode} via daemon`)
+          setTestingMode(params.mode === 'test')
+        }
+      }
+    })
+    try {
+      // TODO: onLines never fires when the daemon surface is a DaemonClient, please investigate, if you can't figure it out add debug logging. I want you to run `bun ../sandstone-cli/lib/index.js connect` inside of the sandstone-template directory with a Bash tool set to background mode so you can view the daemon logs
+      const sub = await s.attachLog()
+      activeLogSub = sub
+      sub.onLines((lines) => {
+        if (suppressHostLog) return
+        for (const entry of lines) {
+          const body = entry.line.replace(MinecraftTimestampRegex, '')
+          if (entry.stream === 'stdout' && !(weSpawnedIntegrated && shuttingDown.flag)) {
+            log(chalk`{cyan [connect]} ${body}`)
+          }
+          if (entry.stream === 'stderr') {
+            log(chalk`{cyan [connect]} {red ${body}}`)
+          }
+        }
+      })
+    } catch (err) {
+      logWarn(`[watch] attachLog failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  /** Empty default host config — `watch --daemon` currently doesn't
+   *  expose `--host-config`/`--host-config-file`; bootstrapHost picks
+   *  defaults from the chosen host type. */
+  const loadHostConfig = async (): Promise<HostConfigInput> => {
+    return { projectRoot: opts.path }
+  }
+
+  const ensureOwnDaemon = (): Promise<DaemonHandle> => {
+    if (daemonHandle) return Promise.resolve(daemonHandle)
+    if (!bootstrapInFlight) {
+      bootstrapInFlight = (async () => {
+        daemonLog('Starting in-process connect daemon')
+        const hostConfig = await loadHostConfig()
+        if (hostConfig.projectRoot === undefined) hostConfig.projectRoot = opts.path
+        let host: HostProvider
+        weSpawnedIntegrated = false
+        const hostType: HostType = opts.hostType ?? 'integrated'
+        try {
+          if (hostType === 'integrated') {
+            daemonLog('Integrated connect host starting up...')
+          }
+          const result = await bootstrapHost({
+            hostType,
+            config: hostConfig,
+            silent: true,
+            userProvidedHostSettings: !!opts.hostType,
+          })
+          if (result.host.type === 'integrated') {
+            const integrated = result.host as IntegratedHost
+            setTimeout(() => daemonLog(chalk`Integrated connect host online! Join in-game at {yellow localhost${integrated.serverPort === 25565 ? '' : `:${integrated.serverPort}`}}`), 100)
+          }
+          host = result.host
+          weSpawnedIntegrated = result.spawnedByUs
+        } catch (err) {
+          const msg = err instanceof BootstrapError
+            ? `${err.message} (${err.code})`
+            : err instanceof Error ? err.message : String(err)
+          throw new Error(`Failed to bootstrap host for in-process daemon: ${msg}`)
+        }
+        skipNextReload = weSpawnedIntegrated && host.type === 'integrated'
+
+        daemonHandle = await Daemon.connect({ host, projectRoot: opts.path, port: 0 })
+        return daemonHandle
+      })()
+    }
+    return bootstrapInFlight
+  }
+
   const tryConnectDaemon = async () => {
     if (daemonConnected) return
     try {
-      if (await endpointStatus(opts.path) !== 'live') return
-      const endpoint = await readEndpoint(opts.path)
-      if (!endpoint) return
-      try {
-        daemonClient = await openDaemonClient({ endpoint })
-        daemonConnected = true
-        daemonLog('Connected to host daemon')
-        const welcome = daemonClient.welcome
-        const canStream = welcome.capabilities['writeFileStream'] === true && welcome.hostType !== 'integrated'
-        deployAvailable = canStream
-        getWatchUIAPI()?.setDeployAvailable(canStream)
-        void refreshDeployHasChanges()
-        try {
-          await publishActiveConfig(daemonClient, opts)
-        } catch (err) {
-          logWarn(`[watch] publishConfig failed: ${err instanceof Error ? err.message : String(err)}`)
-        }
-        try {
-          await daemonClient.publishWatcherStatus({
-            connected: true,
-            mode: (opts.library ? 'library' : 'pack') as 'pack' | 'library',
-            manual: opts.manual ?? false,
-            path: opts.path,
-            pid: process.pid,
-            at: new Date().toISOString(),
-            testingMode,
-          })
-        } catch (err) {
-          logWarn(`[watch] publishWatcherStatus failed: ${err instanceof Error ? err.message : String(err)}`)
-        }
-        if (daemonClient.onTriggerBuild) {
-          offTriggerBuild = daemonClient.onTriggerBuild(() => {
-            if (!opts.manual) {
-              logWarn('Erroneous manual build trigger received from daemon (probably an Agent via MCP). Not in manual mode, skipped.')
-              return
-            }
-            if (pendingChanges.length === 0) {
-              logWarn('Erroneous manual build trigger received from daemon (probably an Agent via MCP). No pending changes, skipped.')
-              return
-            }
-            const toBuild = [...pendingChanges]
-            pendingChanges = []
-            onFilesChange(toBuild)
-          })
-        }
-        const client = daemonClient
-        client.setFallbackNotificationHandler(async (notif) => {
-          if (notif.method === 'cancelTriggerBuild') {
-            daemonLog('Build cancelled via daemon')
-            if (currentBuildWorker) {
-              void currentBuildWorker.terminate()
-            }
-            try {
-              await client.publishRebuild({
-                state: 'failed',
-                fileCount: 0,
-                errorCount: 1,
-                warningCount: 0,
-                at: new Date().toISOString(),
-                message: 'Cancelled by client',
-              })
-            } catch (err) {
-              logWarn(`[watch] publishRebuild (cancelled) failed: ${err instanceof Error ? err.message : String(err)}`)
-            }
+      if (await endpointStatus(opts.path) === 'live') {
+        const endpoint = await readEndpoint(opts.path)
+        if (endpoint) {
+          try {
+            daemonClient = await openDaemonClient({ endpoint })
+            daemonLog('Connected to host daemon')
+            await wireSurface(daemonClient)
+            clearInterval(daemonPoll)
+            daemonPoll = undefined
+            daemonClient.onShutdown((reason) => {
+              daemonLog(`Host daemon is shutting down (${reason}), will watch for a new daemon`)
+              disconnectSurface()
+              if (!daemonPoll) daemonPoll = setInterval(tryConnectDaemon, 5_000)
+            })
             return
+          } catch {
+            logWarn('Having issues connecting to the daemon, this should never happen')
           }
-          if (notif.method === 'setBuildMode') {
-            const params = notif.params as { mode?: 'normal' | 'test' } | undefined
-            if (params?.mode === 'test' || params?.mode === 'normal') {
-              daemonLog(`Build mode set to ${params.mode} via daemon`)
-              setTestingMode(params.mode === 'test')
-            }
-          }
-        })
-        try {
-          const sub = await daemonClient.attachLog()
-          activeLogSub = sub
-          sub.onLines((lines) => {
-            if (suppressHostLog) return
-            for (const entry of lines) {
-              const body = entry.line.replace(MinecraftTimestampRegex, '')
-              log(entry.stream === 'stderr' ? chalk`{cyan [connect]} {red ${body}}` : chalk`{cyan [connect]} ${body}`)
-            }
-          })
-        } catch (err) {
-          logWarn(`[watch] attachLog failed: ${err instanceof Error ? err.message : String(err)}`)
         }
-        daemonClient.onShutdown((reason) => {
-          daemonLog(`Host daemon is shutting down (${reason}), will watch for a new daemon`)
-          void activeLogSub?.unattach().catch(() => {})
-          offTriggerBuild?.()
-          offTriggerBuild = undefined
-          activeLogSub = undefined
-          daemonClient?.close()
-          daemonClient = undefined
-          daemonConnected = false
-          deployAvailable = false
-          getWatchUIAPI()?.setDeployAvailable(false)
-          getWatchUIAPI()?.setDeployHasChanges(false)
-          if (!daemonPoll) daemonPoll = setInterval(tryConnectDaemon, 5_000)
-        })
-        clearInterval(daemonPoll)
-        daemonPoll = undefined
-      } catch {
-        logWarn('Having issues connecting to the daemon, this should never happen')
       }
     } catch {}
+
+    if (opts.daemon && !daemonHandle) {
+      try {
+        const handle = await ensureOwnDaemon()
+        await wireSurface(handle.daemon)
+        clearInterval(daemonPoll)
+        daemonPoll = undefined
+        return
+      } catch (err) {
+        const hostType: HostType = opts.hostType ?? 'integrated'
+        const isIntegrated = hostType === 'integrated'
+        logWarn(`[watch] failed to start in-process daemon: ${err instanceof Error ? err.message : String(err)}`)
+        if (isIntegrated) {
+          clearInterval(daemonPoll)
+          daemonPoll = undefined
+        }
+      }
+    }
   }
-  tryConnectDaemon()
-  daemonPoll = setInterval(tryConnectDaemon, 5_000)
+  tryConnectDaemon().then(() => setInterval(tryConnectDaemon, 5_000))
 
   // Initial build
   await onFilesChange([])
@@ -758,21 +937,25 @@ export async function watchCommand(opts: WatchOptions) {
       ignore: ignorePatterns,
     }
   )
-  sigintHandler = async () => await exit(subscription, currentBuildWorker, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
+  sigintHandler = async () => await exit(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
   process.on('SIGINT', sigintHandler)
 }
 
 async function cleanup(
   subscription: ParcelWatcher.AsyncSubscription,
   buildWorker: Worker | null | undefined,
+  shuttingDown: { flag: boolean },
+  weStartedIntegrated: boolean,
   unmountInk?: () => void,
   closeLogger?: () => Promise<void>,
   sigintHandler?: () => Promise<void>,
   linkVersionWatchers?: { file: string }[],
   daemonPoll?: ReturnType<typeof setInterval>,
   daemonClient?: DaemonClient,
+  daemonHandle?: DaemonHandle,
 ) {
-  unmountInk?.()
+  if (sigintHandler) process.off('SIGINT', sigintHandler)
+  shuttingDown.flag = true
   await subscription.unsubscribe()
   if (linkVersionWatchers) {
     for (const w of linkVersionWatchers) unwatchFile(w.file)
@@ -781,23 +964,36 @@ async function cleanup(
     void buildWorker.terminate()
   }
   if (daemonPoll) clearInterval(daemonPoll)
+  if (daemonHandle) {
+    if (weStartedIntegrated) {
+      log('Integrated connect host shutting down...')
+    }
+    await daemonHandle.shutdown().catch(() => {})
+    log('Integrated shutdown.')
+  }
   daemonClient?.close()
-  if (sigintHandler) process.off('SIGINT', sigintHandler)
+  log('Watch stopped.')
   await closeLogger?.()
+  // Allow TUI to render last log entries
+  await new Promise<void>((res) => setTimeout(() => res(), 50))
+  unmountInk?.()
 }
 
 async function exit(
   subscription: ParcelWatcher.AsyncSubscription,
   buildWorker: Worker | null | undefined,
+  shuttingDown: { flag: boolean },
+  weSpawnedIntegrated: boolean,
   unmountInk?: () => void,
   closeLogger?: () => Promise<void>,
   sigintHandler?: () => Promise<void>,
   linkVersionWatchers?: { file: string }[],
   daemonPoll?: ReturnType<typeof setInterval>,
   daemonClient?: DaemonClient,
+  daemonHandle?: DaemonHandle,
 ) {
-  log('Watch stopped')
-  await cleanup(subscription, buildWorker, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
+  log('Watch stopping...')
+  await cleanup(subscription, buildWorker, shuttingDown, weSpawnedIntegrated, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient, daemonHandle)
   process.exit(0)
 }
 

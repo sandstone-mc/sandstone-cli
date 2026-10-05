@@ -3,7 +3,6 @@ import { HostAuthError, NotConnectedError, UnsupportedCapabilityError } from '..
 import type { HostLogLine } from '../../hosts/types.js'
 import { decodeRpc } from './codec.js'
 import type { WaitForLogSettlement, LogPattern } from './wait-log.js'
-import { add } from 'src/utils/index.js'
 
 // TODO: This whole file should get audited for useless types if the dispatch.ts is yeeted
 
@@ -11,11 +10,49 @@ export const PROTOCOL_VERSION = 1
 
 export const SUBPROTOCOL_PREFIX = 'sandstone-connect-v1.'
 
-// TODO: Make this fully typesafe
+/**
+ * Per-method RPC request payload. Methods that take no params use
+ * `void`; methods with a dedicated `*Params` interface use it
+ * directly. Used by `RpcRequest<M>['params']` so each request is
+ * fully typed against the method it carries.
+ */
+export interface RpcMethodParams {
+  ping: void
+  startServer: void
+  stopServer: void
+  readFile: ReadFileParams
+  writeFile: WriteFileParams
+  executeRawCommand: ExecuteRawCommandParams
+  reloadResources: void
+  waitForLog: WaitForLogParams
+  unwaitForLog: UnwaitForLogParams
+  publishTriggerBuild: void
+  cancelTriggerBuild: void
+  setBuildMode: SetBuildModeParams
+  publishTestComplete: TestState
+  getTestState: void
+  attachLog: AttachLogParams
+  unattach: UnattachParams
+  shutdown: void
+  getActiveConfig: void
+  getBuildOutputTree: GetBuildOutputTreeParams
+  readBuildLog: ReadBuildLogParams
+  readTestLog: ReadBuildLogParams
+  readServerLog: ReadServerLogParams
+  readClientLog: ReadClientLogParams
+  publishConfig: PublishConfigParams
+  publishLog: PublishLogParams
+  publishRebuild: PublishRebuildParams
+  getRebuildState: void
+  publishWatcherStatus: PublishWatcherStatusParams
+  getWatcherStatus: void
+  streamEnd: StreamEndParams
+}
+
 export interface RpcRequest<M extends RpcMethod = RpcMethod> {
   id: string | number
   method: M
-  params?: unknown
+  params?: RpcMethodParams[M]
 }
 
 /** Every RPC method the daemon understands. */
@@ -71,14 +108,19 @@ export type RpcResult =
   | GetRebuildStateResult
   | GetWatcherStatusResult
   | PublishTriggerBuildResult
+  | CancelTriggerBuildResult
+  | GetTestStateResult
+  | SetBuildModeResult
   | void
 
 /**
  * Server → client response. Exactly one of `result` / `error` is set.
+ * `result` may be `null` only as the response to the in-flight request
+ * when the daemon is shutting down (`ShutdownSignal`) — see server.ts.
  */
 export interface RpcResponse {
   id: string | number
-  result?: unknown
+  result?: RpcResult | null
   error?: RpcError
 }
 
@@ -167,6 +209,14 @@ export interface StreamEndEvent {
     streamId: string
     bytes: number
   }
+}
+
+/** Client → server `streamEnd` ack. Distinct from `StreamEndEvent`
+ *  (server → client) because the ack may omit `bytes` when the client
+ *  never wrote anything. */
+export interface StreamEndParams {
+  streamId: string
+  bytes?: number
 }
 
 export interface StreamErrorEvent {
@@ -348,6 +398,10 @@ export interface RebuildState {
   warningCount: number
   at: string
   message?: string
+  /** True when the watcher was in tests-mode for this build — a
+   *  `sand test` run will start after the daemon reload completes.
+   *  Subscribe to `sandstone://test-state` to receive the test summary. */
+  testingMode?: boolean
 }
 
 export interface PublishRebuildParams extends RebuildState {}
@@ -467,7 +521,7 @@ export function tryParseRequest(raw: string | ArrayBuffer | Uint8Array): RpcRequ
     return { code: RpcErrorCode.InvalidRequest, message: 'Missing method' }
   }
   if (!hasId) return null
-  return { id: obj.id as string | number, method: obj.method as RpcMethod, params: obj.params }
+  return { id: obj.id as string | number, method: obj.method as RpcMethod, params: obj.params as RpcMethodParams[RpcMethod] | undefined }
 }
 
 export function tryParseEvent(raw: string | ArrayBuffer | Uint8Array): RpcEvent | null {
@@ -500,7 +554,7 @@ export function tryParseMethodNotification(raw: string | ArrayBuffer | Uint8Arra
   return { method: obj.method, params: obj.params }
 }
 
-export function ok(id: string | number, result: unknown): RpcResponse {
+export function ok(id: string | number, result: RpcResult | null): RpcResponse {
   return { id, result }
 }
 
@@ -512,16 +566,54 @@ export function event<K extends RpcEventName>(name: K, data: RpcEventMap[K]): { 
   return { event: name, data }
 }
 
-// TODO: We should make notifications typed end-to-end
-export function notification(method: string, params?: unknown) {
-  return { jsonrpc: '2.0', method, ...add({ params }) }
+/**
+ * Names + payload shapes for fire-and-forget JSON-RPC notifications.
+ * Daemon emits `waitForLog` to clients; the `notifications/resources/updated`
+ * entry implements the MCP resource-updated protocol the daemon fans
+ * to its MCP subscribers. Add a key here when introducing a new
+ * notification — `notification<M>()` will then enforce the payload.
+ */
+export interface RpcNotificationMap {
+  waitForLog: WaitForLogEvent
+  'notifications/resources/updated': { uri: string }
 }
 
+export type RpcNotificationName = keyof RpcNotificationMap
+
+export function notification<M extends RpcNotificationName>(
+  method: M,
+  params: RpcNotificationMap[M],
+): { jsonrpc: '2.0', method: M, params: RpcNotificationMap[M] } {
+  return { jsonrpc: '2.0', method, params }
+}
+
+/**
+ * Wire envelope for a single JSON-RPC request, materialised as a
+ * discriminated union so the discriminator narrows the payload per
+ * variant. The generic `RpcRequest<M>` is still used at function call
+ * sites (where the `M` literal is in scope); this type exists so
+ * `WsMessage` consumers can switch on `kind` + `method`/`event` and
+ * get the typed payload without a manual cast.
+ */
+export type RpcRequestMessage = {
+  [M in RpcMethod]: { kind: 'request', id: string | number, method: M, params?: RpcMethodParams[M] }
+}[RpcMethod]
+
+/** See {@link RpcRequestMessage} — same rationale for events. */
+export type RpcEventMessage = {
+  [E in RpcEventName]: { kind: 'event', event: E, data: RpcEventMap[E] }
+}[RpcEventName]
+
+/** See {@link RpcRequestMessage} — same rationale for notifications. */
+export type RpcNotificationMessage = {
+  [N in RpcNotificationName]: { kind: 'notification', method: N, params: RpcNotificationMap[N] }
+}[RpcNotificationName]
+
 export type WsMessage =
-  | { kind: 'request'; id: string | number; method: string; params: unknown }
-  | { kind: 'response'; id: string | number; result?: unknown; error?: { code: number; message: string } }
-  | { kind: 'event'; event: string; data: unknown }
-  | { kind: 'notification'; method: string; params: unknown }
+  | RpcRequestMessage
+  | { kind: 'response', id: string | number, result?: RpcResult | null, error?: RpcError }
+  | RpcEventMessage
+  | RpcNotificationMessage
 
 export function classifyWsMessage(raw: string | Uint8Array): WsMessage | null {
   const buf = typeof raw === 'string' ? new TextEncoder().encode(raw) : raw
@@ -537,16 +629,19 @@ export function classifyWsMessage(raw: string | Uint8Array): WsMessage | null {
   if (!parsed || typeof parsed !== 'object') return null
   const obj = parsed as Record<string, unknown>
   if ('id' in obj && ('result' in obj || 'error' in obj)) {
-    return { kind: 'response', id: obj.id as string | number, result: obj.result, error: obj.error as { code: number; message: string } | undefined }
+    return { kind: 'response', id: obj.id as string | number, result: obj.result as RpcResult | undefined, error: obj.error as RpcError | undefined }
   }
   if (typeof obj.event === 'string') {
-    return { kind: 'event', event: obj.event, data: obj.data }
+    // Wire boundary: `obj.event` is a plain string from JSON; cast to
+    // the typed discriminated union at the only point we trust the
+    // wire shape. Consumers narrow via `msg.event` from here.
+    return { kind: 'event', event: obj.event as RpcEventMessage['event'], data: obj.data as RpcEventMessage['data'] } as WsMessage
   }
   if ('id' in obj && typeof obj.method === 'string') {
-    return { kind: 'request', id: obj.id as string | number, method: obj.method, params: obj.params }
+    return { kind: 'request', id: obj.id as string | number, method: obj.method as RpcRequestMessage['method'], params: obj.params as RpcRequestMessage['params'] } as WsMessage
   }
   if (typeof obj.method === 'string') {
-    return { kind: 'notification', method: obj.method, params: obj.params }
+    return { kind: 'notification', method: obj.method as RpcNotificationMessage['method'], params: obj.params as RpcNotificationMessage['params'] } as WsMessage
   }
   return null
 }

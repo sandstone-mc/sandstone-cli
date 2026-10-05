@@ -9,10 +9,10 @@ import { KNOWN_HOST_TYPES } from '../hosts/types.js'
 import type { HostProvider, HostType, HostLogHandler, LogSubscription } from '../hosts/types.js'
 import { DEFAULT_HOST_TYPE } from './connect/index.js'
 import { parseHostConfig } from './connect/host-config.js'
-import { parseFailureLog, type ParsedFailureLog, type LogExtra } from 'sandstone/test'
+import { formatSnbt, parseFailureLog, type ParsedFailureLog, type LogExtra } from 'sandstone/test'
 import { printSplash } from '../utils/index.js'
 import chalk from 'chalk-template'
-import { formatSnbt } from 'sandstone/test'
+import type { ExecuteRawCommandResult } from './connect/rpc.js'
 
 export type TestEvent = (
   {
@@ -32,7 +32,7 @@ export type TestEvent = (
     server_trace?: ErrorTrace,
     build_trace?: ErrorTrace,
     debug?: true,
-    debug_trace?: { values?: DebugTraceValue[] },
+    debug_trace?: DebugTraceContent,
   } | {
     event: 'test_result',
     name: string,
@@ -63,6 +63,18 @@ export type TestEvent = (
     file_count: number,
   }
 )
+
+/** Payload of a `TestEvent.test_log` variant, minus the discriminator
+ *  (which is set in `emitTestLog`). Used for `PendingLog.payload` and
+ *  for the parsed `%test-log%` JSON. */
+export type TestLogPayload = Omit<Extract<TestEvent, { event: 'test_log' }>, 'event'>
+
+/** Parsed JSON body of a `.sandstone/mc-server/debug/<trace>.txt` file.
+ *  Provides the `values` array paired with the in-flight `test_log`. */
+export interface DebugTraceContent {
+  trace: string,
+  values?: DebugTraceValue[],
+}
 
 export type TestEventSink = (event: TestEvent) => void
 
@@ -194,14 +206,14 @@ export function formatDebugTraceValues(
 }
 
 export function emitTestLog(
-  payload: Record<string, unknown>,
-  debug: Record<string, unknown> | undefined,
+  payload: TestLogPayload,
+  debug: DebugTraceContent | undefined,
   extras: LogExtra[] | undefined,
   onEvent: TestEventSink,
 ): void {
-  const merged: Record<string, unknown> = { ...payload, debug: true }
+  const merged: TestLogPayload = { ...payload, debug: true }
   if (debug !== undefined) merged.debug_trace = debug
-  onEvent({ event: 'test_log', ...merged } as TestEvent)
+  onEvent({ event: 'test_log', ...merged })
 }
 
 export function flushPendingLogs(state: CollectionState, onEvent: TestEventSink): void {
@@ -393,7 +405,7 @@ export async function testCommand(opts: TestCommandOptions): Promise<void> {
 
 interface TestSession {
   attachLog(handler: HostLogHandler): Promise<LogSubscription>
-  executeRawCommand(): Promise<unknown> // TODO: This is known, grab the type and put it here
+  executeRawCommand(): Promise<string | ExecuteRawCommandResult | undefined>
   cleanup(): Promise<void>
 }
 
@@ -589,7 +601,7 @@ export interface CollectionState {
 export interface PendingLog {
   /** The expanded payload object (server_trace / build_trace baked in,
    *  raw `trace` field removed). This is what gets emitted. */
-  payload: Record<string, unknown> // TODO: Tyyyypeeeesss
+  payload: TestLogPayload
 }
 
 export function pairDebugTrace(
@@ -613,7 +625,7 @@ export function pairDebugTrace(
 export function pairLogLine(
   state: CollectionState,
   traceKey: `${number}`,
-  payload: Record<string, unknown>,
+  payload: TestLogPayload,
   extras: LogExtra[] | undefined,
   onEvent: TestEventSink,
 ): boolean {
@@ -630,7 +642,7 @@ export function pairLogLine(
 
 export interface PendingDebug {
   /** Parsed JSON body of the trace file. */
-  content: Record<string, unknown> // TODO: Typeessssss
+  content: DebugTraceContent
   filePath: string
 }
 
@@ -705,8 +717,8 @@ function processLine(
   const logMatch = content.match(TEST_LOG_RE)
   if (logMatch) {
     try {
-      const rawPayload = JSON.parse(logMatch[1]) as Record<string, unknown> // TODO: Typessss
-      const payload: Record<string, unknown> = { ...rawPayload }
+      const rawPayload = JSON.parse(logMatch[1]) as TestLogPayload
+      const payload: TestLogPayload = { ...rawPayload }
       const traceId = payload.trace as `${number}` | undefined
       if (traceId !== undefined) {
         const entry = manifest.log_traces[traceId]

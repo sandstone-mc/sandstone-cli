@@ -6,7 +6,7 @@ export const URI = 'sandstone://rebuild-state'
 export const FIXED_URI = URI
 export const MIME = 'application/toml'
 export const NAME = 'rebuild-state'
-export const DESCRIPTION = 'Current build state pushed by the watcher via `publishRebuild`. Subscribe to receive live start/finish events.'
+export const DESCRIPTION = 'Current build state pushed by the watcher via `publishRebuild`. Subscribe to receive live start/finish events. The `testingMode` field on a build means that build was performed with the watcher in tests-mode — a `sand test` run will start after the daemon reload completes. Subscribe to `sandstone://test-state` to receive the pass/fail summary.'
 
 export async function read(bridge: McpBridge): Promise<{ uri: string; mimeType: string; text: string }> {
   const daemon = await bridge.requireDaemon()
@@ -15,10 +15,12 @@ export async function read(bridge: McpBridge): Promise<{ uri: string; mimeType: 
     daemon.getWatcherStatus(),
   ])
   const state: RebuildState | null = stateResult.state
-  const testingMode = statusResult.status?.testingMode === true
+  const watcherTestingMode = statusResult.status?.testingMode === true
   const body = sentinelizeNullish({
     ...(state ?? { state: 'none', note: 'no watcher has pushed a build state yet' as const }),
-    ...(testingMode ? { testingMode: true, note: 'watcher is in tests-mode — every build runs `sand test` after the daemon reloads' as const } : {}),
+    ...(state === null && watcherTestingMode
+      ? { testingMode: true, note: 'watcher is in tests-mode — every build runs `sand test` after the daemon reloads' as const }
+      : {}),
   })
   return {
     uri: FIXED_URI,

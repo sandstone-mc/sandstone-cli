@@ -1,11 +1,3 @@
-/**
- * Shared host-bootstrap path used by both `sand connect` (long-lived
- * daemon) and `sand run` (one-shot direct invocation).
- *
- * Returns the connected host + the (possibly mutated) config
- * so callers can re-emit it for display.
- */
-
 import { randomBytes } from 'node:crypto'
 import path from 'path'
 import chalk from 'chalk-template'
@@ -14,6 +6,7 @@ import { getAvailableSandstoneVersions } from '../versionDiscovery.js'
 import { getProvider } from '../../hosts/registry.js'
 import * as fs from '../../utils/fs.js'
 import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
+import { CONSOLE_LOGGER, type DaemonLogger } from './logger.js'
 import type { HostConfigInput, HostProvider, HostType } from '../../hosts/types.js'
 
 import '../../hosts/index.js'
@@ -26,6 +19,7 @@ export interface BootstrapOptions {
    *  flags. Suppresses the bootstrap auto-config lookup. */
   userProvidedHostSettings?: boolean
   silent?: boolean
+  logger?: DaemonLogger
 }
 
 export interface BootstrapResult {
@@ -42,13 +36,12 @@ export class BootstrapError extends Error {
 }
 
 /**
- * Resolve default config + instantiate + connect + start + wrap. Used
- * by both `sand connect` (which then runs the WS server) and `sand run`
- * (which then issues the command).
+ * Resolve default config + instantiate + connect + start + wrap.
  */
 export async function bootstrapHost(opts: BootstrapOptions): Promise<BootstrapResult> {
   const hostType = opts.hostType
-  let config = await resolveDefaults(hostType, opts.config, opts.silent ?? false)
+  const logger = opts.logger ?? CONSOLE_LOGGER
+  let config = await resolveDefaults(hostType, opts.config, opts.silent ?? false, logger)
 
   const autocfg = await loadSandstoneConfig(process.cwd())
   const activeSaveConfig = await loadActiveConfigFromDisk(process.cwd())
@@ -68,7 +61,7 @@ export async function bootstrapHost(opts: BootstrapOptions): Promise<BootstrapRe
   }
   let host: HostProvider
   try {
-    host = factory.create(config)
+    host = factory.create(config, logger)
   } catch (e) {
     throw new BootstrapError(
       `Failed to construct host '${hostType}': ${e instanceof Error ? e.message : String(e)}`,
@@ -112,9 +105,10 @@ async function resolveDefaults(
   hostType: HostType,
   input: Partial<HostConfigInput>,
   silent: boolean,
+  logger: DaemonLogger,
 ): Promise<Partial<HostConfigInput>> {
   let out: Partial<HostConfigInput> = JSON.parse(JSON.stringify(input))
-  const log = silent ? () => {} : console.log
+  const log = silent ? () => {} : logger.info.bind(logger)
 
   if (hostType === 'integrated') {
     const integratedCfg = { ...(out as Record<string, unknown>) }
@@ -137,7 +131,7 @@ async function resolveDefaults(
             log(chalk`{cyan [bootstrap]} using mc version for sandstone version ${tag}`)
           }
         } catch (err) {
-          console.error(
+          logger.error(
             `[bootstrap] could not fetch latest sandstone version: ${err instanceof Error ? err.message : String(err)}`,
           )
         }

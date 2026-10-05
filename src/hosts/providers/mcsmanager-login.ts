@@ -1,8 +1,10 @@
-import { io as ioClient, type Socket } from 'socket.io-client'
+import { io as ioClient } from 'socket.io-client'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
-import type { McsManagerHostConfig, HostCapabilities, HostProvider, HostLogLine, HostLogHandler, LogSubscription } from '../types.js'
-import { Capability } from '../types.js'
+import { HostProvider, Capability } from '../types.js'
+
+import type { Socket } from 'socket.io-client'
+import type { DaemonLogger, McsManagerHostConfig, HostCapabilities, HostLogLine, HostLogHandler, LogSubscription } from '../types.js'
 
 interface FileUploadResponse {
   status: number
@@ -23,7 +25,7 @@ interface StreamChannelResponse {
   time: number
 }
 
-export class McsManagerLoginHost implements HostProvider {
+export class McsManagerLoginHost extends HostProvider {
   readonly type = 'mcsmanager-login' as const
   readonly displayName = 'MCSManager (Login)'
   readonly capabilities: HostCapabilities = new Set([
@@ -32,7 +34,6 @@ export class McsManagerLoginHost implements HostProvider {
     Capability.WriteFileStream,
     Capability.AttachLog,
     Capability.ExecuteRawCommand,
-    Capability.ExecuteRawCommandHasResponse,
   ])
 
   private readonly config: McsManagerHostConfig
@@ -40,15 +41,16 @@ export class McsManagerLoginHost implements HostProvider {
   private token = ''
   private socket: Socket | null = null
   private connected = false
-
-  private stdoutSubscriptions: Array<{
-    handler: (packet: { data?: { text?: string } }) => void
-    socket: Socket
-  }> = []
+  private stdoutState: StdoutState | null = null
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private disconnectGraceTimer: ReturnType<typeof setTimeout> | null = null
+  private static readonly RECONNECT_INTERVAL_MS = 15_000
+  private static readonly DISCONNECT_GRACE_MS = 30 * 60 * 1000
 
   disconnectHandlers: Set<(reason: string) => void> = new Set<(reason: string) => void>()
 
-  constructor(config: McsManagerHostConfig) {
+  constructor(config: McsManagerHostConfig, logger: DaemonLogger) {
+    super(logger)
     this.config = config
   }
 
@@ -57,16 +59,28 @@ export class McsManagerLoginHost implements HostProvider {
     this.cookie = process.env.MCS_MANAGER_COOKIE ?? ''
     this.token = process.env.MCS_MANAGER_TOKEN ?? ''
     await this.login()
+    try {
+      await this.openDaemonSocket()
+    } catch (err) {
+      this.socket?.disconnect()
+      this.socket = null
+      this.connected = false
+      throw new HostAuthError(
+        err instanceof Error ? `MCSManager daemon socket unavailable: ${err.message}` : 'MCSManager daemon socket unavailable',
+      )
+    }
     this.connected = true
   }
 
   async disconnect(): Promise<void> {
     if (!this.connected) return
     this.disconnectHandlers.clear()
-    for (const sub of this.stdoutSubscriptions) {
-      sub.socket.off('instance/stdout', sub.handler)
+    this.clearReconnect()
+    this.clearDisconnectGrace()
+    if (this.stdoutState !== null) {
+      this.stdoutState.socket.off('instance/stdout', this.stdoutState.listener)
+      this.stdoutState = null
     }
-    this.stdoutSubscriptions = []
     if (this.socket) {
       this.socket.disconnect()
       this.socket = null
@@ -241,60 +255,56 @@ export class McsManagerLoginHost implements HostProvider {
 
   async attachLog(onChunk: HostLogHandler): Promise<LogSubscription> {
     this.requireConnected('mcsmanager-login')
-    const sock = await this.openDaemonSocket()
-    let buffer = ''
-    let stopped = false
-
-    const handler = (packet: { data?: { text?: string } }) => {
-      if (stopped) return
-      const text = packet?.data?.text ?? ''
-      if (!text) return
-      buffer += text
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      if (lines.length > 0) {
-        const chunks: HostLogLine[] = lines.map((line) => ({ line, ts: Date.now(), stream: 'stdout' }))
-        onChunk(chunks)
-      }
+    if (this.socket?.connected !== true) {
+      throw new Error('MCSManager daemon socket is currently down — wait at least 15 seconds before retrying (auto-reconnecting in the background)')
     }
 
-    sock.on('instance/stdout', handler)
-    this.stdoutSubscriptions.push({ handler, socket: sock })
+    let state = this.stdoutState
+    if (state === null) {
+      const listener = (packet: { data?: { text?: string } }) => {
+        if (state === null) return
+        const text = packet?.data?.text ?? ''
+        if (!text) return
+        state.buffer += text
+        const lines = state.buffer.split('\n')
+        state.buffer = lines.pop() ?? ''
+        if (lines.length > 0) {
+          const ts = Date.now()
+          const payload: HostLogLine[] = lines.map((line) => ({ line, ts, stream: 'stdout' }))
+          for (const h of state.handlers) h(payload)
+        }
+      }
+      state = { socket: this.socket, listener, buffer: '', handlers: new Set<HostLogHandler>() }
+      this.stdoutState = state
+      this.socket.on('instance/stdout', listener)
+    }
 
-    const self = this
+    state.handlers.add(onChunk)
     return {
-      async unattach() {
-        if (stopped) return
-        stopped = true
-        sock.off('instance/stdout', handler)
-        self.stdoutSubscriptions = self.stdoutSubscriptions.filter(
-          (s) => s.handler !== handler,
-        )
-        if (buffer.length > 0) {
-          onChunk([{ line: buffer, ts: Date.now(), stream: 'stdout' }])
-          buffer = ''
+      unattach: async () => {
+        if (state === null) return
+        state.handlers.delete(onChunk)
+        if (state.handlers.size === 0) {
+          state.socket.off('instance/stdout', state.listener)
+          if (this.stdoutState === state) {
+            this.stdoutState = null
+          }
+          state = null
         }
       },
     }
   }
 
-  // TODO: :concern:, investigate actual McsManager API again at some point
-  async executeRawCommand(command: string): Promise<string> {
+  async executeRawCommand(command: string): Promise<undefined> {
     this.requireConnected('mcsmanager-login')
-    const sock = await this.openDaemonSocket()
-    let captured = ''
-    const handler = (packet: { data?: { text?: string } }) => {
-      const text = packet?.data?.text ?? ''
-      if (text) captured += text
+    if (this.socket?.connected !== true) {
+      throw new Error('MCSManager daemon socket is currently down — wait at least 15 seconds before retrying (auto-reconnecting in the background)')
     }
-    sock.on('instance/stdout', handler)
-    sock.emit('stream/input', { data: { command } })
-    await new Promise((r) => setTimeout(r, 1500))
-    sock.off('instance/stdout', handler)
-    return captured.trim()
+    this.socket.emit('stream/input', { data: { command } })
+    return undefined
   }
 
-  private requireConnected(label: string): void {
+  private requireConnected(label: string) {
     if (!this.connected) throw new NotConnectedError(label)
   }
 
@@ -404,7 +414,7 @@ export class McsManagerLoginHost implements HostProvider {
     }
   }
 
-  private syncSessionFromResponse(response: Response): void {
+  private syncSessionFromResponse(response: Response) {
     const setCookies =
       (response.headers as Headers & { getSetCookie?: () => string[] }).getSetCookie?.() ?? []
     if (setCookies.length < 2) return
@@ -480,10 +490,18 @@ export class McsManagerLoginHost implements HostProvider {
       path: (channel.data.prefix ? channel.data.prefix.replace(/\/$/, '') : '') + '/socket.io',
     })
     sock.on('disconnect', (reason: string) => {
-      for (const h of this.disconnectHandlers) h(`MCSManager daemon disconnected: ${reason}`)
+      if (this.socket === sock) this.socket = null
+      if (this.stdoutState !== null && this.stdoutState.socket === sock) {
+        this.stdoutState = null
+      }
+      console.error(`[mcsmanager] daemon disconnected: ${reason}`)
+      this.armDisconnectGrace()
+      this.scheduleReconnect()
     })
     sock.on('connect_error', (err: Error) => {
-      for (const h of this.disconnectHandlers) h(`MCSManager daemon connect_error: ${err.message}`)
+      console.error(`[mcsmanager] daemon connect_error: ${err.message}`)
+      this.armDisconnectGrace()
+      this.scheduleReconnect()
     })
 
     await new Promise<void>((resolve, reject) => {
@@ -505,8 +523,54 @@ export class McsManagerLoginHost implements HostProvider {
     this.socket = sock
     return sock
   }
+
+  private scheduleReconnect() {
+    if (this.reconnectTimer !== null) return
+    if (!this.connected) return
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null
+      if (!this.connected) return
+      this.openDaemonSocket().then(() => this.clearDisconnectGrace()).catch((err: unknown) => {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`[mcsmanager] daemon reconnect failed: ${msg}`)
+        this.scheduleReconnect()
+      })
+    }, McsManagerLoginHost.RECONNECT_INTERVAL_MS)
+  }
+
+  private clearReconnect() {
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+  }
+
+  private armDisconnectGrace() {
+    if (this.disconnectGraceTimer !== null) return
+    if (!this.connected) return
+    this.disconnectGraceTimer = setTimeout(() => {
+      this.disconnectGraceTimer = null
+      // Grace expired — give up and let `sand connect` shut down.
+      console.error(`[mcsmanager] daemon unreachable for ${McsManagerLoginHost.DISCONNECT_GRACE_MS / 1000}s, reporting host lost`)
+      for (const h of this.disconnectHandlers) h('MCSManager daemon unreachable')
+    }, McsManagerLoginHost.DISCONNECT_GRACE_MS)
+  }
+
+  private clearDisconnectGrace() {
+    if (this.disconnectGraceTimer !== null) {
+      clearTimeout(this.disconnectGraceTimer)
+      this.disconnectGraceTimer = null
+    }
+  }
 }
 
-export function createMcsManagerHost(config: McsManagerHostConfig): HostProvider {
-  return new McsManagerLoginHost(config)
+export function createMcsManagerHost(config: McsManagerHostConfig, logger: DaemonLogger): HostProvider {
+  return new McsManagerLoginHost(config, logger)
+}
+
+interface StdoutState {
+  socket: Socket
+  listener: (packet: { data?: { text?: string } }) => void
+  buffer: string
+  handlers: Set<HostLogHandler>
 }

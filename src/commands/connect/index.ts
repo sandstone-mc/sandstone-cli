@@ -1,6 +1,8 @@
 import { resolve } from 'node:path'
 import { connect as openClient } from './client.js'
-import { startDaemon } from './daemon.js'
+import { bootstrapHost, BootstrapError } from './bootstrap.js'
+import { Daemon, type DaemonHandle } from './daemon.js'
+import { CONSOLE_LOGGER } from './logger.js'
 import { readEndpoint, pidAlive } from './endpoint-file.js'
 import { isObject } from '../../utils/guards.js'
 import { HostConfigCliError, parseHostConfig } from './host-config.js'
@@ -80,7 +82,7 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     process.exit(2)
   }
 
-  const handle = await startDaemon({
+  const handle = await bootstrapAndConnect({
     hostType,
     config,
     projectRoot,
@@ -90,10 +92,10 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
   })
 
   if (opts.deploy) {
-    if (!handle.host.capabilities.has(Capability.WriteFileStream) || !handle.host.writeFileStream) {
+    if (!handle.daemon.host.capabilities.has(Capability.WriteFileStream) || !handle.daemon.host.writeFileStream) {
       await handle.shutdown()
       console.error(
-        chalk`{red Error:} --deploy needs a host that supports writeFileStream. '${hostType}' does not (capabilities: ${JSON.stringify([...handle.host.capabilities])}).`,
+        chalk`{red Error:} --deploy needs a host that supports writeFileStream. '${hostType}' does not (capabilities: ${JSON.stringify([...handle.daemon.host.capabilities])}).`,
       )
       process.exit(2)
     }
@@ -160,8 +162,8 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
 
   if (opts.restartServer) {
     const capabilityError = checkRestartCapabilities({
-      hostType: handle.host.type,
-      capabilities: capabilitiesToRecord(handle.host.capabilities),
+      hostType: handle.daemon.host.type,
+      capabilities: capabilitiesToRecord(handle.daemon.host.capabilities),
     })
     if (capabilityError) {
       await handle.shutdown()
@@ -192,9 +194,6 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
       process.exit(1)
     }
   }
-
-  // Print a single line with the URL + pid so the user knows where to
-  // connect. Don't print the secret — it lives in the endpoint file.
   console.log(
     chalk`{cyan [connect]} listening on {bold ${handle.url}} (pid ${handle.endpoint.pid})`,
   )
@@ -210,20 +209,45 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
   process.exit(0)
 }
 
-/** Default host type for a local-dev daemon: integrated. */
+async function bootstrapAndConnect(opts: {
+  hostType: HostType
+  config: HostConfigInput
+  projectRoot: string
+  bind?: string
+  port: number
+  userProvidedHostSettings: boolean
+}): Promise<DaemonHandle> {
+  let bootstrapResult: Awaited<ReturnType<typeof bootstrapHost>>
+  try {
+    bootstrapResult = await bootstrapHost({
+      hostType: opts.hostType,
+      config: opts.config,
+      silent: true,
+      userProvidedHostSettings: opts.userProvidedHostSettings,
+    })
+  } catch (err) {
+    if (err instanceof BootstrapError) {
+      console.error(chalk`{red Error:} ${err.message} (${err.code})`)
+    } else {
+      console.error(chalk`{red Error:} ${err instanceof Error ? err.message : String(err)}`)
+    }
+    process.exit(1)
+  }
+  const handle = await Daemon.connect({
+    host: bootstrapResult.host,
+    projectRoot: opts.projectRoot,
+    bind: opts.bind,
+    port: opts.port,
+    logger: CONSOLE_LOGGER,
+  })
+  return handle
+}
+
 export const DEFAULT_HOST_TYPE: HostType = 'integrated'
 
 function parseHostType(raw: string | undefined): HostType {
   // No flag → default to the local-dev daemon.
   if (!raw) return DEFAULT_HOST_TYPE
-  // Multi-host-type values were a `hostType1,hostType2` string before.
-  // Reject explicitly so callers don't silently get an arbitrary pick.
-  if (raw.includes(',')) {
-    console.error(
-      chalk`{red Error:} Only one --host-type is supported, got '${raw}'. Composite daemons were removed.`,
-    )
-    process.exit(2)
-  }
   return raw as HostType
 }
 

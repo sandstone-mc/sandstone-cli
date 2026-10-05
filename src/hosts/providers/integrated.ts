@@ -12,15 +12,16 @@ import {
   findLatestVersionsForHashes,
   findModVersion,
   primaryFile,
-  type ModrinthVersion,
 } from '../modrinth.js'
 import { sandstoneToMcVersion } from '../sandstone-version.js'
 import * as fs from '../../utils/fs.js'
 import { ghFetchText } from '../../utils/github.js'
 import { spawn as shellSpawn } from '../../utils/shell.js'
-import type { HostCapabilities, HostProvider, HostLogLine, HostLogHandler, LogSubscription, IntegratedHostConfig, IntegratedHostModsConfig } from '../types.js'
-import { Capability } from '../types.js'
+import { Capability, HostProvider } from '../types.js'
 import { MINECRAFT_LOG_PREFIX } from '../../commands/run.js'
+
+import type { ModrinthVersion } from '../modrinth.js'
+import type { DaemonLogger, HostCapabilities, HostLogLine, HostLogHandler, LogSubscription, IntegratedHostConfig, IntegratedHostModsConfig } from '../types.js'
 
 type ModSource = 'modrinth' | 'url'
 
@@ -44,7 +45,7 @@ interface SandstoneManifest {
 
 const UnwhitelistedAttempt = new RegExp(`${MINECRAFT_LOG_PREFIX}${String.raw`(\w+) \(/([\w\.]+):`}`)
 
-export class IntegratedHost implements HostProvider {
+export class IntegratedHost extends HostProvider {
   readonly type = 'integrated' as const
   readonly displayName = 'Integrated Fabric Server'
   readonly capabilities: HostCapabilities = new Set([
@@ -80,19 +81,12 @@ export class IntegratedHost implements HostProvider {
   private doneDetected = false
   private rconReadyDetected = false
   private weStarted = false
-  private resolveReady: Array<() => void> = []
+  public resolveReady: Array<() => void> = []
   private pendingLineMatcher: { pattern: RegExp; resolve: (line: string) => void } | null = null
-  /**
-   * True if the server's world dir had no `level.dat` at connect time,
-   * meaning Minecraft will generate a fresh world on first start. We
-   * automatically run a small setup script after "Done (" to lay down
-   * the stone spawn platform + central cobblestone block so the player
-   * doesn't fall through to the void. Set to false once we've run the
-   * setup so subsequent starts don't re-place blocks in a saved world.
-   */
   private needsInitialWorldSetup = false
 
-  constructor(config: IntegratedHostConfig) {
+  constructor(config: IntegratedHostConfig, logger: DaemonLogger) {
+    super(logger)
     this.config = { ...config, world: config.world ?? 'void' }
     this.serverDir =
       config.serverDir ?? pathJoin(config.projectRoot, '.sandstone', 'mc-server')
@@ -100,7 +94,7 @@ export class IntegratedHost implements HostProvider {
   }
 
   private logVerbose(...args: unknown[]): void {
-    if (this.config.verbose) console.log(...args)
+    if (this.config.verbose) this.logger.info(args.map(String).join(' '))
   }
 
   async connect(): Promise<void> {
@@ -131,9 +125,6 @@ export class IntegratedHost implements HostProvider {
       installedLoader = manifest.installedFabricLoader ?? null
       manifestMcVersion = manifest.minecraftVersion ?? null
     } catch {}
-    // Treat the install as stale if EITHER the loader is outdated OR the
-    // recorded MC version doesn't match what the current sandstone version
-    // maps to.
     const mcChanged = manifestMcVersion !== null && manifestMcVersion !== mcVersion
     const loaderStale = installedLoader !== null && compareSemver(installedLoader, latestLoader) < 0
     const noManifest = installedLoader === null
@@ -147,8 +138,6 @@ export class IntegratedHost implements HostProvider {
       }
       await this.installFabricServer(latestLoader)
 
-      // Only wipe + re-install mods when the MC version changes. A
-      // Fabric loader upgrade doesn't require touching mods.
       if (mcChanged || noManifest) {
         this.logVerbose(
           `[integrated] MC version changed (${manifestMcVersion ?? 'none'} → ${mcVersion}) — re-resolving mods`,
@@ -160,8 +149,10 @@ export class IntegratedHost implements HostProvider {
     await this.ensureModsTracked(mcVersion)
     await this.checkModUpdates(mcVersion)
 
-    // TODO: Only toggle this on when in void mode
-    this.needsInitialWorldSetup = !(await fs.fileExists(pathJoin(this.serverDir, 'world', 'level.dat')))
+    this.needsInitialWorldSetup = (
+      (this.config.world ?? 'void') === 'void'
+      && !(await fs.fileExists(pathJoin(this.serverDir, 'world', 'level.dat')))
+    )
     this.connected = true
   }
 
@@ -180,9 +171,7 @@ export class IntegratedHost implements HostProvider {
     for (let port = 25565; port < 65535; port++) {
       try {
         return await tryBind(port)
-      } catch {
-        // in use, try next
-      }
+      } catch {}
     }
     throw new Error('No available port found in 25565-65534')
   }
@@ -277,14 +266,11 @@ export class IntegratedHost implements HostProvider {
     this.partialLine = ''
     this.doneDetected = false
     this.rconReadyDetected = false
-    this.resolveReady = []
     this.stderrTail = []
     if (this.rcon) {
       try {
         this.rcon.destroy()
-      } catch {
-        // ignore
-      }
+      } catch {}
       this.rcon = null
     }
     const { spawn: nodeSpawn } = await import('node:child_process')
@@ -338,7 +324,7 @@ export class IntegratedHost implements HostProvider {
         if (line.endsWith('lost connection: You are not white-listed on this server!')) {
           const [_, localPlayer, clientAddress] = UnwhitelistedAttempt.exec(line)!
           if (clientAddress === '127.0.0.1') {
-            console.log(`[integrated] local connection attempt with account "${localPlayer}" detected, whitelisting & opping, please rejoin`)
+            this.logger.info(`[integrated] local connection attempt with account "${localPlayer}" detected, whitelisting & opping, please rejoin`)
             this.executeRawCommand(`whitelist add ${localPlayer}`).catch(() => {})
             this.executeRawCommand(`op ${localPlayer}`).catch(() => {})
           }
@@ -353,8 +339,7 @@ export class IntegratedHost implements HostProvider {
         try {
           handler(lines)
         } catch (err) {
-          // eslint-disable-next-line no-console
-          console.error('integrated logHandler threw:', err)
+          this.logger.error(`integrated logHandler threw: ${err instanceof Error ? err.message : String(err)}`)
         }
       }
       if (!this.doneDetected) {
@@ -364,18 +349,13 @@ export class IntegratedHost implements HostProvider {
             this.logVerbose(
               `[integrated#startServer] detected "Done (" — server is ready`,
             )
-            const resolvers = this.resolveReady
+            for (const r of this.resolveReady) r()
             this.resolveReady = []
-            for (const r of resolvers) r()
             break
           }
         }
       }
       if (!this.rconReadyDetected && this.config.rcon) {
-        // The JVM prints `RCON running on 0.0.0.0:<port>` once the rcon
-        // listener thread binds its socket. Match via the existing
-        // pendingLineMatcher so the same detectLogLine path that
-        // confirms `fill`/`setblock` responses also resolves this.
         const expectedPort = this.config.rcon.port
         for (const { line } of lines) {
           if (
@@ -401,18 +381,14 @@ export class IntegratedHost implements HostProvider {
         for await (const chunk of this.child!.stdout) {
           processChunk(chunk, 'stdout')
         }
-      } catch {
-        // ignore
-      }
+      } catch {}
     })();
     (async () => {
       try {
         for await (const chunk of this.child!.stderr) {
           processChunk(chunk, 'stderr')
         }
-      } catch {
-        // ignore
-      }
+      } catch {}
     })()
 
     const child = this.child
@@ -443,9 +419,7 @@ export class IntegratedHost implements HostProvider {
 
     if (this.needsInitialWorldSetup) {
       this.needsInitialWorldSetup = false
-      console.log(
-        `[integrated#startServer] running initial world setup (fill + setblock)`,
-      )
+      this.logger.info(`[integrated#startServer] running initial world setup (fill + setblock)`)
       const fillSucceeded = this.detectLogLine(/Successfully filled 1089 block\(s\)/)
       await this.executeRawCommand('fill 24 -61 24 -8 -61 -8 stone')
       await fillSucceeded
@@ -535,9 +509,7 @@ export class IntegratedHost implements HostProvider {
     this.logVerbose(`[integrated] detectLogLine registered: ${pattern}`)
     for (const line of this.logBuffer) {
       if (pattern.test(line)) {
-        console.log(
-          `[integrated] detectLogLine matched in buffer: ${JSON.stringify(line)}`,
-        )
+        this.logger.info(`[integrated] detectLogLine matched in buffer: ${JSON.stringify(line)}`)
         return Promise.resolve(line)
       }
     }
@@ -595,7 +567,7 @@ export class IntegratedHost implements HostProvider {
       })
     } catch (err) {
       this.rcon = null
-      console.error(
+      this.logger.error(
         `[integrated] RCON authenticate failed (${err instanceof Error ? err.message : String(err)}) — executeRawCommand disabled`,
       )
     }
@@ -760,7 +732,7 @@ export class IntegratedHost implements HostProvider {
     }
   }
 
-  private serverPort: number | null = null
+  public serverPort: number | null = null
 
   private generatorSettings(): string {
     const w = this.config.world ?? 'void'
@@ -1085,8 +1057,8 @@ export class IntegratedHost implements HostProvider {
   }
 }
 
-export function createIntegratedHost(config: IntegratedHostConfig): HostProvider {
-  return new IntegratedHost(config)
+export function createIntegratedHost(config: IntegratedHostConfig, logger: DaemonLogger): HostProvider {
+  return new IntegratedHost(config, logger)
 }
 
 async function fetchLatestFabricLoader(): Promise<string> {

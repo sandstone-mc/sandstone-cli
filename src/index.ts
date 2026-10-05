@@ -53,6 +53,7 @@ CLI
   .addOption(BuildOptions.get('library'))
   .addOption(BuildOptions.get('manual'))
   .addOption(BuildOptions.get('ignore'))
+  .addOption(BuildOptions.get('daemon'))
   .action(watchCommand)
 
 CLI

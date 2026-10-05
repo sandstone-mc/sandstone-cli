@@ -3,7 +3,8 @@ import { pathToFileURL } from 'node:url'
 import { connect as openClient, type Client } from './connect/client.js'
 import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
 import { BootstrapError, bootstrapHost } from './connect/bootstrap.js'
-import type { HostConfigInput, HostProvider, HostType, HostLogHandler, HostLogLine } from '../hosts/types.js'
+import { Daemon } from './connect/daemon.js'
+import type { HostConfigInput, HostProvider, HostType } from '../hosts/types.js'
 import { DEFAULT_HOST_TYPE } from './connect/index.js'
 import type { SandstoneContext } from 'sandstone'
 import { randomUUID as nodeRandomUUID } from 'node:crypto'
@@ -171,40 +172,13 @@ export async function runCommand(
     process.exit(1)
   }
 
-  const hasResponse = host.capabilities.has('executeRawCommandHasResponse')
-  const watcher = expectRegex && !hasResponse ? await attachAwaitHost(host, expectRegex, timeoutMs) : null
-
-  let output: string | undefined
+  const daemon = Daemon.forDirect(host)
   try {
-    output = await host.executeRawCommand!(command)
+    await runOneDirect(daemon, command, expectRegex, timeoutMs)
   } catch (err) {
-    if (watcher) await watcher.cleanup().catch(() => {})
-    console.error(chalk`{red Error:} Command failed: ${err instanceof Error ? err.message : String(err)}`)
+    console.error(chalk`{red Error:} ${err instanceof Error ? err.message : String(err)}`)
     await safeDisconnect(host)
     process.exit(1)
-  }
-  if (output) console.log(output)
-
-  if (expectRegex) {
-    if (hasResponse) {
-      if (!expectRegex.test(output!)) {
-        console.error(chalk`{red [run]} --expect did not match command response`)
-        await safeDisconnect(host)
-        process.exit(1)
-      }
-      await safeDisconnect(host)
-      return
-    }
-    try {
-      const line = await watcher!.promise
-      console.log(stripMinecraftPrefix(line))
-      await watcher!.cleanup()
-    } catch (err) {
-      await watcher!.cleanup().catch(() => {})
-      console.error(chalk`{red Error:} ${err instanceof Error ? err.message : String(err)}`)
-      await safeDisconnect(host)
-      process.exit(1)
-    }
   }
 
   if (weStarted && host.stopServer && host.capabilities.has('stopServer')) {
@@ -280,56 +254,6 @@ async function attachAwaitClient(
     if (timer) clearTimeout(timer)
   })
   return { promise, subscription: subscriptionPromise }
-}
-
-interface HostLogWatcher {
-  promise: Promise<string>
-  cleanup(): Promise<void>
-}
-
-async function attachAwaitHost(
-  host: HostProvider,
-  regex: RegExp,
-  timeoutMs: number,
-): Promise<HostLogWatcher> {
-  if (!host.attachLog) {
-    throw new Error('Host does not support attachLog; cannot use --expect')
-  }
-  let matched = false
-  let subscription: { unattach: () => Promise<void> } | null = null
-  let timer: ReturnType<typeof setTimeout> | null = null
-  const promise = new Promise<string>((resolve, reject) => {
-    const handler: HostLogHandler = (lines) => {
-      if (matched) return
-      for (const entry of lines) {
-        if (regex.test(entry.line)) {
-          matched = true
-          resolve(entry.line)
-          return
-        }
-      }
-    }
-    host
-      .attachLog!(handler)
-      .then((sub) => {
-        subscription = sub
-        if (matched) sub.unattach().catch(() => {})
-      })
-      .catch((err) => reject(err instanceof Error ? err : new Error(String(err))))
-    timer = setTimeout(() => {
-      if (!matched) reject(new Error(`--expect timed out after ${timeoutMs}ms`))
-    }, timeoutMs)
-    timer.unref?.()
-  })
-  promise.finally(() => {
-    if (timer) clearTimeout(timer)
-  })
-  return {
-    promise,
-    async cleanup() {
-      if (subscription) await subscription.unattach().catch(() => {})
-    },
-  }
 }
 
 async function loadHostConfig(opts: RunCommandOptions): Promise<HostConfigInput> {
@@ -581,12 +505,12 @@ async function runCommands(
     process.exit(1)
   }
 
+  const daemon = Daemon.forDirect(host)
   try {
-    const hasResponse = host.capabilities.has('executeRawCommandHasResponse')
     for (let i = 0; i < commands.length; i++) {
       const cmd = commands[i]!
       const isLast = i === expectIdx
-      await runOneDirect(host, cmd, isLast ? expectRegex : null, timeoutMs, hasResponse)
+      await runOneDirect(daemon, cmd, isLast ? expectRegex : null, timeoutMs)
     }
   } finally {
     if (weStarted && host.stopServer && host.capabilities.has('stopServer')) {
@@ -635,41 +559,51 @@ async function runOneDaemon(
 }
 
 async function runOneDirect(
-  host: HostProvider,
+  daemon: Daemon,
   command: string,
   expectRegex: RegExp | null,
   timeoutMs: number,
-  hasResponse: boolean,
 ): Promise<void> {
-  const watcher =
-    expectRegex && !hasResponse ? await attachAwaitHost(host, expectRegex, timeoutMs) : null
-  let output: string | undefined
+  const hasResponse = daemon.host.capabilities.has('executeRawCommandHasResponse')
+  const waitFor = expectRegex && !hasResponse
+    ? { kind: 'regex' as const, value: expectRegex.source, timeoutMs }
+    : undefined
+
+  let result
   try {
-    output = await host.executeRawCommand!(command)
+    result = await daemon.executeRawCommand({ command, waitFor })
   } catch (err) {
-    if (watcher) await watcher.cleanup().catch(() => {})
     console.error(chalk`{red Error:} Command failed: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
-  if (output) console.log(output)
-  if (!expectRegex) {
-    if (watcher) await watcher.cleanup().catch(() => {})
-    return
-  }
+
+  if (result.output) console.log(result.output)
+
+  if (!expectRegex) return
+
   if (hasResponse) {
-    if (watcher) await watcher.cleanup().catch(() => {})
-    if (!expectRegex.test(output!)) {
+    if (!expectRegex.test(result.output)) {
       console.error(chalk`{red [run]} --expect did not match command response`)
       process.exit(1)
     }
     return
   }
+
+  // No-response host: the matcher fires once and resolves with the
+  // captured lines (typically `[matching_line]`).
+  if (!result.logResult) {
+    console.error(chalk`{red Error:} --expect requires waitFor but no matcher was created`)
+    process.exit(1)
+  }
   try {
-    const line = await watcher!.promise
-    console.log(stripMinecraftPrefix(line))
-    await watcher!.cleanup()
+    const lines = await result.logResult
+    const matched = lines[lines.length - 1]
+    if (matched === undefined) {
+      console.error(chalk`{red Error:} --expect timed out`)
+      process.exit(1)
+    }
+    console.log(stripMinecraftPrefix(matched))
   } catch (err) {
-    await watcher!.cleanup().catch(() => {})
     console.error(chalk`{red Error:} ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }

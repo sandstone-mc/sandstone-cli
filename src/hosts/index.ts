@@ -15,7 +15,7 @@ export type {
 export { HOST_TYPES, KNOWN_HOST_TYPES } from './types.js'
 export { ALL_CAPABILITIES, capabilitiesToRecord } from './types.js'
 
-export { registerProvider, getProvider, getProviders, createHost } from './registry.js'
+export { registerProvider, getProvider, getProviders } from './registry.js'
 export { UnsupportedCapabilityError, NotConnectedError, HostAuthError } from './errors.js'
 
 import { registerProvider } from './registry.js'

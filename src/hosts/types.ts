@@ -1,4 +1,6 @@
 import type { SandstoneConfig } from 'sandstone'
+import type { DaemonLogger } from '../commands/connect/logger.js'
+export type { DaemonLogger } from '../commands/connect/logger.js'
 
 export type HostType = (
   | 'ssh'
@@ -6,6 +8,33 @@ export type HostType = (
   | 'integrated'
   | 'mcsmanager-login'
 )
+
+export abstract class HostProvider {
+  abstract readonly type: HostType
+  abstract readonly displayName: string
+  abstract readonly capabilities: HostCapabilities
+  protected readonly logger: DaemonLogger
+
+  constructor(logger: DaemonLogger) {
+    this.logger = logger
+  }
+
+  abstract connect(): Promise<void>
+  abstract disconnect(): Promise<void>
+  abstract isConnected(): boolean
+  isRunning?(): boolean { return false }
+
+  startServer?(): Promise<void>
+  stopServer?(): Promise<void>
+  readFile?(path: string): Promise<Buffer>
+  readFileStream?(path: string): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }>
+  writeFile?(path: string, data: Buffer | string): Promise<void>
+  writeFileStream?(path: string, opts?: { size?: number }): Promise<WritableStream<Uint8Array>>
+  attachLog?(onChunk: HostLogHandler): Promise<LogSubscription>
+  /** Minecraft console command */
+  executeRawCommand?(command: string): Promise<string | undefined>
+  onDisconnected?(handler: (reason: string) => void): () => void
+}
 
 export const Capability = {
   StartServer: 'startServer',
@@ -42,28 +71,6 @@ export interface HostLogLine {
 }
 
 export type HostLogHandler = (lines: HostLogLine[]) => void
-
-export interface HostProvider {
-  readonly type: HostType
-  readonly displayName: string
-  readonly capabilities: HostCapabilities
-
-  connect(): Promise<void>
-  disconnect(): Promise<void>
-  isConnected(): boolean
-  isRunning?(): boolean
-
-  startServer?(): Promise<void>
-  stopServer?(): Promise<void>
-  readFile?(path: string): Promise<Buffer>
-  readFileStream?(path: string): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }>
-  writeFile?(path: string, data: Buffer | string): Promise<void>
-  writeFileStream?(path: string, opts?: { size?: number }): Promise<WritableStream<Uint8Array>>
-  attachLog?(onChunk: HostLogHandler): Promise<LogSubscription>
-  /** Minecraft console command */
-  executeRawCommand?(command: string): Promise<string | undefined>
-  onDisconnected?(handler: (reason: string) => void): () => void
-}
 
 export interface BaseHostConfig {
   projectRoot?: string

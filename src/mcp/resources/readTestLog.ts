@@ -4,10 +4,7 @@
  *
  * Reads through the daemon's `readTestLog` RPC, which reads an
  * in-memory buffer populated via `publishLog({target: 'test'})`. The
- * test runner backend isn't wired yet, so the buffer is always empty
- * today — but the resource advertises the same filtering shape as
- * `build-log` so MCP clients get identical semantics once data starts
- * flowing.
+ * watcher feeds this buffer for every `sand test` session it runs.
  *
  * All six query params required; `-1` skips the corresponding filter.
  *
@@ -35,7 +32,7 @@ export async function read(
       mimeType: MIME,
       text: `${formatLogHeader('Test runner log', result, [
         result.totalLines === 0
-          ? '(no test runner has pushed lines yet — the buffer is reserved for a future backend)'
+          ? '(no test run has pushed lines yet)'
           : null,
       ])}\n\n${result.lines.join('\n')}`,
     }

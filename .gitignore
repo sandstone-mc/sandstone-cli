@@ -133,4 +133,4 @@ dist
 .sandstone/
 
 # Agent scratch dir
-.temp/
+.temp/.temp/

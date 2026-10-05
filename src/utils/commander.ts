@@ -67,6 +67,7 @@ const options = {
   manual: opt('-m, --manual', 'Manual reload mode - press r or Enter to rebuild after changes.', { env: 'WATCH_MANUAL' }),
   library: opt('-l, --library', 'Library mode - watches a library workspace based on the library project template.', { env: 'WATCH_LIBRARY' }),
   ignore: opt('-i, --ignore <globs...>', 'Additional glob patterns to ignore when watching for changes.', { env: 'WATCH_IGNORE_PATTERNS' }),
+  daemon: opt('--daemon', 'If no `sand connect` daemon is running, spin one up in-process so this `sand watch` works standalone. The in-process daemon is torn down when watch exits.', { env: 'WATCH_DAEMON' }),
 } satisfies Record<string, OptionDef>
 
 export type OptionName = keyof typeof options

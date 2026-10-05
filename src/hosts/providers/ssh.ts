@@ -1,13 +1,15 @@
-import { NodeSSH, type Config as NodeSshConfig } from 'node-ssh'
+import { NodeSSH } from 'node-ssh'
 import { Readable, Writable } from 'node:stream'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
 import { RconClient } from '../rcon-client.js'
 import { attachRconIfConfigured } from '../_shared/attach-rcon.js'
-import type { SshHostConfig, HostCapabilities, HostProvider, HostLogLine, HostLogHandler, LogSubscription } from '../types.js'
-import { Capability } from '../types.js'
+import { HostProvider, Capability } from '../types.js'
 
-export class SshHost implements HostProvider {
+import type { Config as NodeSshConfig } from 'node-ssh'
+import type { DaemonLogger, SshHostConfig, HostCapabilities, HostLogHandler } from '../types.js'
+
+export class SshHost extends HostProvider {
   readonly type = 'ssh' as const
   readonly displayName = 'SSH'
   readonly capabilities: HostCapabilities = new Set([
@@ -23,8 +25,10 @@ export class SshHost implements HostProvider {
   private readonly config: SshHostConfig
   private connected = false
   private rcon: RconClient | null = null
+  private tailState: TailState | null = null
 
-  constructor(config: SshHostConfig) {
+  constructor(config: SshHostConfig, logger: DaemonLogger) {
+    super(logger)
     this.config = config
     if (config.consoleSession) {
       this.capabilities.add(Capability.ExecuteRawCommand)
@@ -187,9 +191,48 @@ export class SshHost implements HostProvider {
   async attachLog(onChunk: HostLogHandler) {
     this.requireConnected('ssh')
     const logPath = this.config.logPath ?? `${this.config.serverDir}/logs/latest.log`
+    let state = this.tailState
+    if (state === null) {
+      state = { channel: null, buffer: '', handlers: new Set<HostLogHandler>() }
+      this.tailState = state
 
-    // TODO: Only actually do one of these at once, it should be shared between all of the attachers
-    return await this.attachLogViaTail(logPath, onChunk)
+      this.ssh.execCommand(`tail -F -n 0 ${JSON.stringify(logPath)}`, {
+        cwd: this.config.serverDir,
+        onChannel: (channel) => {
+          if (state !== null) state.channel = channel
+        },
+        onStdout: (chunk: Buffer) => {
+          if (state === null) return
+          state.buffer += chunk.toString('utf8')
+          const lines = state.buffer.split('\n')
+          state.buffer = lines.pop() ?? ''
+          if (lines.length > 0) {
+            const payload = lines.map((line: string) => ({ line, ts: Date.now(), stream: 'stdout' as const }))
+            for (const h of state.handlers) h(payload)
+          }
+        },
+      }).catch(() => {
+        if (state !== null && this.tailState === state) {
+          this.tailState = null
+          state = null
+        }
+      })
+    }
+
+    state.handlers.add(onChunk)
+    return {
+      unattach: async () => {
+        if (state === null) return
+        state.handlers.delete(onChunk)
+        if (state.handlers.size === 0) {
+          try { state.channel?.close() } catch {}
+          if (this.tailState === state) {
+            this.tailState = null
+          }
+          state = null
+        }
+      },
+    }
   }
 
   private resolvePath(path: string): string {
@@ -234,43 +277,18 @@ export class SshHost implements HostProvider {
     }
     return false
   }
-
-  private async attachLogViaTail(
-    logPath: string,
-    onChunk: HostLogHandler,
-  ): Promise<LogSubscription> {
-    let stopped = false
-    let buffer = ''
-    const flushLines = () => {
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      if (lines.length > 0) {
-        onChunk(lines.map((line) => ({ line, ts: Date.now(), stream: 'stdout' })))
-      }
-    }
-
-    this.ssh.execCommand(`tail -F -n 0 ${JSON.stringify(logPath)}`, {
-        cwd: this.config.serverDir,
-        onStdout: (chunk: Buffer) => {
-          if (stopped) return
-          buffer += chunk.toString('utf8')
-          flushLines()
-        },
-      })
-      .catch(() => {})
-
-    return {
-      async unattach() {
-        stopped = true
-        if (buffer.length > 0) {
-          onChunk([{ line: buffer, ts: Date.now(), stream: 'stdout' }])
-          buffer = ''
-        }
-      },
-    }
-  }
 }
 
-export function createSshHost(config: SshHostConfig): HostProvider {
-  return new SshHost(config)
+export function createSshHost(config: SshHostConfig, logger: DaemonLogger): HostProvider {
+  return new SshHost(config, logger)
+}
+
+interface SshChannelLike {
+  close(): void
+}
+
+interface TailState {
+  channel: SshChannelLike | null
+  buffer: string
+  handlers: Set<HostLogHandler>
 }

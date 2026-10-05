@@ -144,3 +144,67 @@ export class SubscriptionRegistry {
     return this.byId.size
   }
 }
+
+/**
+ * Tracks active `waitForLog` subscriptions per WS so the daemon can
+ * cascade-cleanup on WS close (and the RPC handler can cancel by id).
+ * Distinct from `SubscriptionRegistry` — that one mirrors host log
+ * subscriptions, this one tracks the higher-level waitForLog handles.
+ */
+export class WaitLogSubscriptionRegistry {
+  private nextId = 1
+  private readonly byId = new Map<string, { ws: Bun.ServerWebSocket<WsData>; handle: { interrupt(): Promise<void> } }>()
+  private readonly byWs = new WeakMap<object, Set<string>>()
+
+  generateId(): string {
+    let id: string
+    do {
+      id = `waitlog-${this.nextId++}`
+    } while (this.byId.has(id))
+    return id
+  }
+
+  register(subscriptionId: string, ws: Bun.ServerWebSocket<WsData>, handle: { interrupt(): Promise<void> }): void {
+    this.byId.set(subscriptionId, { ws, handle })
+    const key = ws as object
+    let set = this.byWs.get(key)
+    if (!set) {
+      set = new Set()
+      this.byWs.set(key, set)
+    }
+    set.add(subscriptionId)
+  }
+
+  /** Drop without interrupting. Returns the handle (if any) for the caller to interrupt. */
+  drop(subscriptionId: string): { interrupt(): Promise<void> } | null {
+    const entry = this.byId.get(subscriptionId)
+    if (!entry) return null
+    this.byId.delete(subscriptionId)
+    this.byWs.get(entry.ws as object)?.delete(subscriptionId)
+    return entry.handle
+  }
+
+  /** Cascade-unattach every waitForLog subscription owned by `ws`. */
+  async dropAllForWs(ws: Bun.ServerWebSocket<WsData>): Promise<void> {
+    const key = ws as object
+    const set = this.byWs.get(key)
+    if (!set) return
+    const ids = Array.from(set)
+    this.byWs.delete(key)
+    for (const id of ids) {
+      const entry = this.byId.get(id)
+      if (!entry) continue
+      this.byId.delete(id)
+      try {
+        await entry.handle.interrupt()
+      } catch {
+        // already detached
+      }
+    }
+  }
+
+  /** Test helper. */
+  size(): number {
+    return this.byId.size
+  }
+}

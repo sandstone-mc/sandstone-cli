@@ -1,6 +1,7 @@
 import { DaemonUnavailableError } from '../daemon-client.js'
 import { type McpBridge } from '../bridge.js'
 import { deployDatapack, type DeployResult } from '../../commands/deploy.js'
+import { raceAbort } from './_raceAbort.js'
 
 export const NAME = 'deployToServer'
 
@@ -53,6 +54,7 @@ function summarize(result: DeployResult): string {
 export async function call(
   bridge: McpBridge,
   _args: Record<string, never>,
+  _signal?: AbortSignal,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   let daemonClient
   try {
@@ -91,7 +93,7 @@ export async function call(
   }
 
   try {
-    const result = await deployDatapack({ daemon: daemonClient, projectRoot: bridge.ctx.projectRoot })
+    const result = await raceAbort(deployDatapack({ daemon: daemonClient, projectRoot: bridge.ctx.projectRoot }), _signal)
     return {
       content: [{
         type: 'text',

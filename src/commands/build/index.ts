@@ -5,9 +5,8 @@ import { split } from 'obliterator'
 
 import type { BuildResult, ResourceCounts } from '../../ui/types.js'
 import { log, logDebug, logError, logInfo, logWarn, initLoggerNoFile, initBuildLogger, setSilent } from '../../ui/logger.js'
-import { hash } from '../../utils/index.js'
+import { add, hash } from '../../utils/index.js'
 import * as fs from '../../utils/fs.js'
-import type { ActiveSaveConfig } from '../../utils/activeSaveConfig.js'
 import { resolveStackTrace } from '../../utils/source-map.js'
 import { syncLinkedLibraries } from '../link.js'
 import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../../utils/updateCheck.js'
@@ -34,7 +33,7 @@ import {
 } from './externalResources.js'
 
 import type * as sandstone from 'sandstone'
-import type { handlerReadFile, PackType } from 'sandstone/pack'
+import type { PackType } from 'sandstone/pack'
 import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
 
 type SandstoneContext = ReturnType<typeof sandstone['getSandstoneContext']>
@@ -71,35 +70,25 @@ export type BuildOptions = {
 export interface BuildContext {
   sandstoneConfig: sandstone.SandstoneConfig
   sandstonePack: sandstone.SandstonePack
-  resetSandstonePack: () => void
+  resetSandstonePack: (ctx?: sandstone.SandstoneContext) => void
+  context: sandstone.SandstoneContext
 }
 
-/**
- * Resolve the deployment targets the build pipeline will write to.
- * Combines `saveOptions` from `sandstone.config.ts` with the CLI/env
- * overrides the user passed for this invocation (CLI flags take
- * precedence; `production` mode drops client/server paths).
- *
- * Extracted from `_buildProject` so other consumers (notably the
- * watcher's daemon-publishing path) can compute the exact same
- * resolution without re-reading the inline merge. Keep both sites in
- * sync if the rules ever change.
- */
 export function resolveActiveSaveConfig(
   cliOptions: BuildOptions,
   configSaveOptions: sandstone.SandstoneConfig['saveOptions'],
-): ActiveSaveConfig {
+): sandstone.SandstoneConfig['saveOptions'] {
   const saveOptions = configSaveOptions ?? {}
   return {
     world: cliOptions.world || saveOptions.world,
-    root: cliOptions.root !== undefined ? cliOptions.root : saveOptions.root,
+    ...add({ root: cliOptions.root ?? saveOptions.root }),
     clientPath: !cliOptions.production
       ? (cliOptions.clientPath || saveOptions.clientPath)
       : undefined,
     serverPath: !cliOptions.production
       ? (cliOptions.serverPath || saveOptions.serverPath)
       : undefined,
-  }
+  } as never
 }
 
 // Cache management
@@ -192,6 +181,28 @@ async function processPackTypeOutput(
   }
 }
 
+function assembleSandstoneContext(
+  cliOptions: BuildOptions,
+  folder: string,
+  sandstoneConfig: sandstone.SandstoneConfig,
+): SandstoneContext {
+  const conflictStrategies: NonNullable<SandstoneContext['conflictStrategies']> = {}
+  if (sandstoneConfig.onConflict) {
+    for (const [resource, strategy] of Object.entries(sandstoneConfig.onConflict)) {
+      conflictStrategies[resource] = strategy as NonNullable<SandstoneContext['conflictStrategies']>[string]
+    }
+  }
+  return {
+    workingDir: folder,
+    namespace: cliOptions.namespace || sandstoneConfig.namespace,
+    packUid: sandstoneConfig.packUid,
+    packOptions: sandstoneConfig.packs,
+    conflictStrategies,
+    loadVersion: (sandstoneConfig as { loadVersion?: number }).loadVersion,
+    enableTests: cliOptions.test,
+  }
+}
+
 export async function loadBuildContext(
   cliOptions: BuildOptions,
   _folder: string,
@@ -203,32 +214,14 @@ export async function loadBuildContext(
     throw new Error(`Could not load "${path.join(folder, 'sandstone.config.ts')}"`)
   }
 
-  const namespace = cliOptions.namespace || sandstoneConfig.namespace
-  const conflictStrategies: NonNullable<SandstoneContext['conflictStrategies']> = {}
-
-  if (sandstoneConfig.onConflict) {
-    for (const [resource, strategy] of Object.entries(sandstoneConfig.onConflict)) {
-      conflictStrategies[resource] = strategy as NonNullable<SandstoneContext['conflictStrategies']>[string]
-    }
-  }
-
   const sandstoneUrl = pathToFileURL(path.join(folder, 'node_modules', 'sandstone', 'dist', 'exports', 'index.js'))
   /* @ts-ignore */
   const { createSandstonePack, resetSandstonePack } = (await import(sandstoneUrl)) as typeof sandstone
 
-  const context: SandstoneContext = {
-    workingDir: folder,
-    namespace,
-    packUid: sandstoneConfig.packUid,
-    packOptions: sandstoneConfig.packs,
-    conflictStrategies,
-    loadVersion: (sandstoneConfig as { loadVersion?: number }).loadVersion,
-    enableTests: cliOptions.test,
-  }
-
+  const context = assembleSandstoneContext(cliOptions, folder, sandstoneConfig)
   const sandstonePack = createSandstonePack(context)
 
-  return { sandstoneConfig, sandstonePack, resetSandstonePack }
+  return { sandstoneConfig, sandstonePack, resetSandstonePack, context }
 }
 
 interface BuildProjectResult {
@@ -236,12 +229,7 @@ interface BuildProjectResult {
   sandstoneConfig: sandstone.SandstoneConfig
   sandstonePack: sandstone.SandstonePack
   resetSandstonePack: () => void
-  /**
-   * The live deploy targets the build ended up using (post-script
-   * mutations). See `BuildResult.activeSaveConfig` for the rationale
-   * — the watcher reads this to republish to the daemon.
-   */
-  activeSaveConfig: ActiveSaveConfig
+  activeSaveConfig: sandstone.SandstoneConfig['saveOptions']
 }
 
 async function _buildProject(
@@ -251,13 +239,8 @@ async function _buildProject(
   existingContext?: BuildContext,
   watching = false
 ): Promise<BuildProjectResult | undefined> {
-  // Sync any linked libraries before the build. `_buildCommand` runs
-  // this on every watch tick (including the ones triggered by a linked
-  // library's `link_version` mtime change), so doing it once here keeps
-  // both `sand build` and `sand watch` consistent.
   await syncLinkedLibraries(folder)
 
-  // Read project package.json to get entrypoint
   const packageJsonPath = path.join(folder, 'package.json')
   const packageJson = JSON.parse(await fs.readText(packageJsonPath))
 
@@ -270,40 +253,25 @@ async function _buildProject(
     return path.join(folder, packageJson.module)
   })()
 
-  // Load or use existing context
-  const { sandstoneConfig, sandstonePack, resetSandstonePack } = existingContext ??
-    await loadBuildContext(cliOptions, folder)
+  const ctx: BuildContext = existingContext ?? await loadBuildContext(cliOptions, folder)
 
-  resetSandstonePack()
+  ctx.resetSandstonePack(assembleSandstoneContext(cliOptions, folder, ctx.sandstoneConfig))
+
+  const { sandstoneConfig, sandstonePack } = ctx
 
   const { scripts, resources } = sandstoneConfig
   let saveOptions = sandstoneConfig.saveOptions || {}
-  // Auto-detect an integrated-style `serverPath` when `.sandstone/mc-server/`
-  // exists. Created by `sand connect --host-type integrated`, so its
-  // presence signals "user wants this pack symlinked into the integrated
-  // server's world/datapacks/". User-defined `serverPath` (in
-  // sandstone.config.ts or via CLI) wins.
+
   if (!saveOptions.serverPath && !cliOptions.serverPath) {
     const mcServerPath = path.join(folder, '.sandstone', 'mc-server')
     if (await fs.pathExists(mcServerPath)) {
       saveOptions = { ...saveOptions, serverPath: mcServerPath }
     }
   }
-  // Resolve the deployment targets once. Same helper the watcher uses
-  // when publishing to the `sand connect` daemon — keeps both sites in
-  // lockstep if the merge rules change.
   const activeSaveConfig = resolveActiveSaveConfig(cliOptions, saveOptions)
 
   const outputFolder = path.join(folder, '.sandstone', 'output')
 
-  // The `local` object is the single source of truth for the build state.
-  // Scripts receive it (per-phase narrowing) and can mutate destination
-  // fields; the build reads from `local.X` after each script so reassignments
-  // take effect. Functions exposed for the script's use are attached here too.
-  // Typed as `AfterAllLocal` (the widest shape). Data fields (cache, post-save
-  // state) are initialized with empty real values; later-phase data is
-  // overwritten as the build progresses. At each script call site we narrow
-  // to the per-phase type so scripts only see the fields available at that point.
   const local: sandstone.AfterAllLocal = {
     // Paths
     folder,
@@ -323,7 +291,7 @@ async function _buildProject(
     packageJson,
     entrypoint,
 
-    // Resolved destinations (mutable — scripts can reroute)
+    // Resolved destinations
     worldName: activeSaveConfig.world,
     root: activeSaveConfig.root,
     clientPath: activeSaveConfig.clientPath,
@@ -339,8 +307,7 @@ async function _buildProject(
     fs,
 
     // Function fields populated with their real imports. Their signatures
-    // match `AfterAllLocal`/`BeforeSaveLocal` — they take `local` as the
-    // first argument and read state from it.
+    // match `AfterAllLocal`/`BeforeSaveLocal`.
     autoRegisterPackTypes,
     processExternalResources,
     processPackTypeOutput,
@@ -418,10 +385,6 @@ async function _buildProject(
   local.processExternalResources = processExternalResources
   }
 
-  // Run beforeSave script. Pass `local` directly (same mutability story
-  // as beforeAll); the per-phase type narrows what TypeScript exposes.
-  // A `false` return skips the builder code that follows until the next
-  // entrypoint — `afterAll`.
   const beforeSaveResult = await local.scripts?.beforeSave?.(local as sandstone.BeforeSaveLocal)
 
   if (beforeSaveResult !== false) {
@@ -490,7 +453,16 @@ async function _buildProject(
   const packTypesArray = [...packTypes]
 
   if (cliOptions.test) {
-    const testEntries: Array<{ name: string; description?: string; optional?: boolean; sourceFile?: string }> = []
+    const testEntries: Array<{
+      name: string
+      description?: string
+      optional?: boolean
+      sourceFile?: string
+      /** Line + column of `Test.create(...)` for fallback `build_trace`
+       *  when a runtime failure can't be tied to a specific line. */
+      sourceLine?: number
+      sourceColumn?: number
+    }> = []
     const throwables: Record<string, unknown> = {}
     const tests = local.sandstonePack.Test.tests
     tests.forEach((node) => {
@@ -500,6 +472,8 @@ async function _buildProject(
         description: resource.description,
         optional: resource.directives?.optional,
         sourceFile: resource.sourceFile,
+        sourceLine: resource.sourceLine,
+        sourceColumn: resource.sourceColumn,
       })
       for (const [key, entry] of node.throwableStack) {
         throwables[key] = entry
@@ -507,7 +481,8 @@ async function _buildProject(
     })
     const testsJsonPath = path.join(local.outputFolder, '..', 'tests.json')
     await local.fs.ensureDir(path.dirname(testsJsonPath))
-    await local.fs.writeJSON(testsJsonPath, { tests: testEntries, throwables }, { pretty: true })
+    const logTraces = Object.fromEntries(local.sandstonePack.Test.logTraces)
+    await local.fs.writeJSON(testsJsonPath, { tests: testEntries, throwables, log_traces: logTraces }, { pretty: true })
   }
 
   if (!cliOptions.production) {
@@ -537,12 +512,6 @@ async function _buildProject(
         ? local.getExportPath(local, packType, 'server')
         : undefined
 
-      // For per-child symlinking (Vanilla dep zips placed individually into
-      // an existing destination directory), record the active child names
-      // per destination path so `preserveSymlink` and `createSymlink` can
-      // look them up directly. Only populated when the destination is itself
-      // an existing directory — otherwise this packType uses folder symlinking
-      // and the per-child list would just be noise.
       const isDir = async (dest: string | undefined): Promise<boolean> => {
         if (!dest) return false
         if (!(await local.fs.pathExists(dest))) return false
@@ -667,8 +636,6 @@ async function _buildProject(
 
   }  // end if (!skipUntilAfterAll)
 
-  // Run afterAll script. `local` is the full AfterAllLocal shape; no
-  // narrowing needed. A `false` return skips the final log message.
   const afterAllResult = await local.scripts?.afterAll?.(local as sandstone.AfterAllLocal)
 
   if (afterAllResult !== false && !silent) {
@@ -680,17 +647,13 @@ async function _buildProject(
     resourceCounts: local.resourceCounts,
     sandstoneConfig,
     sandstonePack,
-    resetSandstonePack,
-    // Snapshot the live values the build ended up using (post-script
-    // mutations). The watcher captures this on every successful build
-    // and re-publishes to the daemon so MCP sees the latest state,
-    // not just the static CLI-merge from `resolveActiveSaveConfig`.
+    resetSandstonePack: ctx.resetSandstonePack,
     activeSaveConfig: {
       world: local.worldName,
-      root: local.root,
+      ...add({ root: local.root }),
       clientPath: local.clientPath,
       serverPath: local.serverPath,
-    },
+    } as never,
   }
 }
 
@@ -720,7 +683,6 @@ export async function _buildCommand(
       .replace(/\?hot-hook=\d+/g, '')
       .replace(/file:\/\/\//g, '')
       .replace(/file:\/\//g, '')
-    // Stack includes message at top - extract only the trace lines to avoid duplication
     const stackLines = cleanedStack.split('\n')
     const traceStart = stackLines.findIndex(line => line.trimStart().startsWith('at '))
     const stackTrace = traceStart >= 0 ? stackLines.slice(traceStart).join('\n') : ''
@@ -745,10 +707,6 @@ export async function buildCommand(opts: BuildOptions, _folder?: string, silent 
   initLoggerNoFile()
   setSilent(silent)
 
-  // `--debug`: mirror console output (everything logged via console.log /
-  // console.info / console.warn / console.error / console.debug) to
-  // `.sandstone/build-debug.log` IN ADDITION to stdout — same shape as
-  // the watcher's `.sandstone/watch.log`. Restored in `finally`.
   let closeDebugLog: (() => Promise<void>) | undefined
   let restoreConsole: (() => void) | undefined
   if (opts.debug) {
@@ -756,9 +714,6 @@ export async function buildCommand(opts: BuildOptions, _folder?: string, silent 
     restoreConsole = captureConsoleToFile()
   }
 
-  // MC header + update checks run in parallel — neither blocks the build.
-  // MC header is short (single readFile) — await it up front so the line
-  // prints at the START of build output rather than after.
   const headerPromise = getMCHeaderAsync(folder)
   const checkPromise = runAllUpdateChecks(folder)
   const mcHeader = await headerPromise
@@ -819,17 +774,6 @@ export async function buildCommand(opts: BuildOptions, _folder?: string, silent 
   }
 }
 
-/**
- * Override console.log/info/warn/error/debug to route through the CLI's
- * logger (which mirrors output to `.sandstone/build-debug.log` when
- * `--debug` is active). Mirrors the watcher's `enableConsoleCapture`
- * pattern in `commands/watch.ts` — no attempts to also touch
- * `process.stdout.write` / `process.stderr.write` (Bun has separate
- * native code paths for those that JS can't intercept, so it's not worth
- * the maintenance burden trying).
- *
- * Returns a restore function that puts the originals back.
- */
 function captureConsoleToFile(): () => void {
   const originalLog = console.log.bind(console)
   const originalInfo = console.info.bind(console)

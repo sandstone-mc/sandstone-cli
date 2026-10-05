@@ -27,19 +27,23 @@ import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
 import type { McpBridge } from '../bridge.js'
 import type { HostProvider, HostType, HostConfigInput } from '../../hosts/types.js'
 import { DEFAULT_HOST_TYPE } from '../../commands/connect/index.js'
+import type { LogPattern } from '../../commands/connect/wait-log.js'
 
 export const NAME = 'runServerCommand'
 export const DESCRIPTION =
-  'Send a Minecraft console command via the host daemon. Bootstrap behaviour: connects to `sand connect` if alive, otherwise spawns a direct host connection (matches `sand run` semantics).'
+  'Send a Minecraft console command via the host daemon. Bootstrap behaviour: connects to `sand connect` if alive, otherwise spawns a direct host connection (matches `sand run` semantics). ' +
+  'Pass `waitFor` to register a log pattern that fires before the command runs; the result (lines or timeout error) is sent as an MCP notification once it settles.'
 
 export async function call(
   bridge: McpBridge,
   args: {
-    command: string
-    hostType?: string
-    hostConfig?: HostConfigInput
-    expect?: string
+    command: string,
+    hostType?: string,
+    hostConfig?: HostConfigInput,
+    expect?: string,
+    waitFor?: LogPattern,
   },
+  signal?: AbortSignal,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   if (!args.command || !args.command.trim()) {
     return {
@@ -82,11 +86,48 @@ export async function call(
           if (client.welcome.capabilities.startServer) {
             await client.startServer().catch(() => {})
           }
-          const result = await client.executeRawCommand({ command: args.command })
+          const result = await client.executeRawCommand({
+            command: args.command,
+            ...(args.waitFor ? { waitFor: args.waitFor } : {}),
+          }, signal)
+
+          // waitFor: fire a follow-up notification once the log
+          // pattern settles. Tool resolves immediately — the agent
+          // receives the notification out-of-band.
+          if (result.logResult) {
+            const patternUUID = result.patternUUID?.slice(0, 8)
+            const logResult = result.logResult
+            const cancel = result.cancel
+            // If the agent cancels the tool call before the matcher
+            // settles, cancel the underlying daemon matcher so we don't
+            // keep watching the log stream for a result nobody will read.
+            if (signal) {
+              const onAbort = () => { void cancel?.() }
+              signal.addEventListener('abort', onAbort, { once: true })
+              logResult.finally(() => signal.removeEventListener('abort', onAbort))
+            }
+            void logResult
+              .then((lines) => bridge.sendNotification('runServerCommand/waitFor', {
+                command: args.command,
+                patternUUID,
+                status: 'matched',
+                lines,
+              }))
+              .catch((err: Error) => bridge.sendNotification('runServerCommand/waitFor', {
+                command: args.command,
+                patternUUID,
+                status: 'errored',
+                error: err.message,
+              }))
+          }
+
           return {
             content: [{
               type: 'text',
-              text: result.output || '(no output)',
+              text: (result.output || '(no output)') +
+                (result.patternUUID
+                  ? `\n\n(waitFor registered: patternUUID=${result.patternUUID.slice(0, 8)})`
+                  : ''),
             }],
           }
         } catch (err) {
@@ -108,6 +149,16 @@ export async function call(
   // 2. Direct path — bootstrap a host from --host-config. The direct
   // path runs when no daemon is available; it's the only remaining
   // host selection mechanism since composite daemons were removed.
+  if (args.waitFor) {
+    return {
+      isError: true,
+      content: [{
+        type: 'text',
+        text: '`waitFor` requires the `sand connect` daemon (LogMatcher is daemon-side). Re-run without `waitFor` to fall through to direct mode, or start the daemon.',
+      }],
+    }
+  }
+
   const hostType: HostType = args.hostType
     ? (args.hostType as HostType)
     : DEFAULT_HOST_TYPE

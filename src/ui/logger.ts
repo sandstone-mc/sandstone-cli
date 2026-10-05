@@ -23,6 +23,17 @@ export function initLogger(rootFolder: string): () => Promise<void> {
   return () => logWorkerFinish()
 }
 
+export function initTestLogger(rootFolder: string): () => Promise<void> {
+  logPath = path.join(rootFolder, '.sandstone', 'test.log')
+  initPromise = logWorkerInit()
+  liveLogReady = true
+  liveLogCallback = (_level, args) => {
+    const text = args.map((a) => (typeof a === 'string' ? a : format(a))).join(' ')
+    process.stdout.write(text + '\n')
+  }
+  return () => logWorkerFinish()
+}
+
 /**
  * Initialize the logger without file writing.
  * Use this for `sand build` where we want logging but no persistent log file.

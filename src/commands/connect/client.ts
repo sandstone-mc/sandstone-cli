@@ -1,15 +1,8 @@
-/**
- * Minimal WebSocket client for the `sand connect` daemon.
- *
- * Wire protocol is msgpack-encoded JSON-RPC envelopes + binary
- * stream-chunk frames (16-byte streamId + payload). Every RPC and
- * event rides on the same single WS; only the chunk frames use a
- * separate encoding.
- */
 import type * as rpc from './rpc.js'
 import { classifyWsMessage } from './rpc.js'
+import type { HostLogLine } from '../../hosts/types.js'
+import { TimeoutError, InterruptedError } from './wait-log.js'
 import { SUBPROTOCOL_PREFIX } from './rpc.js'
-import type { ActiveSaveConfig } from '../../utils/activeSaveConfig.js'
 import type { EndpointFile } from './endpoint-file.js'
 import {
   decodeRpc,
@@ -20,11 +13,19 @@ import {
   hexToBytes,
   STREAM_MAGIC,
 } from './codec.js'
+import type { SandstoneConfig } from 'sandstone'
 
 export interface AttachLogSubscription {
   readonly subscriptionId: string
-  onLines(fn: (lines: string[]) => void): void
-  unattach(): Promise<void>
+  onLines(fn: (lines: HostLogLine[]) => void): void,
+  unattach(): Promise<void>,
+}
+
+export interface WaitForLogSubscription {
+  readonly subscriptionId: string,
+  readonly patternUUIDs: string[],
+  promises: Promise<string[]>[],
+  cancel(): Promise<void>,
 }
 
 export interface ClientOptions {
@@ -33,28 +34,28 @@ export interface ClientOptions {
   requestTimeoutMs?: number
 }
 export interface ReadFileStreamResult {
-  streamId: string
-  stream: ReadableStream<Uint8Array>
-  totalSize?: number
-  done: Promise<{ bytesRead: number }>
+  streamId: string,
+  stream: ReadableStream<Uint8Array>,
+  totalSize?: number,
+  done: Promise<{ bytesRead: number }>,
 }
 export interface WriteFileStreamResult {
-  streamId: string
-  done: Promise<{ bytesWritten: number }>
+  streamId: string,
+  done: Promise<{ bytesWritten: number }>,
 }
 
-type InternalListener = (lines: string[]) => void
+type InternalListener = (lines: HostLogLine[]) => void
 type StreamRecord = {
-  streamId: string
+  streamId: string,
   /** Inbound only; undefined for outbound (writeFile) streams. */
-  controller?: ReadableStreamDefaultController<Uint8Array>
-  resolve: (bytes: number) => void
-  reject: (err: Error) => void
+  controller?: ReadableStreamDefaultController<Uint8Array>,
+  resolve: (bytes: number) => void,
+  reject: (err: Error) => void,
 }
 type PendingEntry = { resolve: (r: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout> }
 
 type ConfigChangedEvent = {
-  saveConfig: ActiveSaveConfig | undefined
+  saveConfig: SandstoneConfig['saveOptions'] | undefined
   mode: 'pack' | 'library'
   configPath: string
   detectedAt: string
@@ -68,6 +69,10 @@ export class Client {
   private readonly timeoutMs: number
   private readonly pending = new Map<string | number, PendingEntry>()
   private readonly listenersBySub = new Map<string, Set<InternalListener>>()
+  private readonly waitForLogBySub = new Map<string, Map<string, {
+    resolve: (lines: string[]) => void
+    reject: (err: Error) => void
+  }>>()
   private readonly streamsById = new Map<string, StreamRecord>()
   private readonly shutdownHandlers = new Set<(reason: string) => void>()
   private readonly configChangedHandlers = new Set<(event: ConfigChangedEvent) => void>()
@@ -116,12 +121,6 @@ export class Client {
       const id = hexFromBytes(streamId)
       const record = this.streamsById.get(id)
       if (!record?.controller) {
-        // Orphan chunk — either the stream was already closed via
-        // `streamEnd`/`streamError`, the caller cancelled, or the
-        // server is sending chunks for a stream we never opened
-        // (cross-tenant, stale conn). Log and drop rather than
-        // throw; the RPC layer surfaces the real failure via
-        // `streamEnd`/`streamError`.
         console.error(
           `[ws] orphan stream chunk for id=${id} (known streams: ${this.streamsById.size}) — dropping ${chunk.byteLength} bytes`,
         )
@@ -146,9 +145,25 @@ export class Client {
       case 'event': {
         switch (msg.event) {
           case 'log': {
-            const logData = msg.data as { subscriptionId: string; lines: string[] }
+            const logData = msg.data as { subscriptionId: string; lines: HostLogLine[] }
             const subs = this.listenersBySub.get(logData.subscriptionId)
             if (subs) for (const fn of subs) fn(logData.lines)
+            return
+          }
+          case 'waitForLog': {
+            const data = msg.data as rpc.WaitForLogEvent
+            const entry = this.waitForLogBySub.get(data.subscriptionId)
+            const slot = entry?.get(data.patternUUID)
+            if (!slot) {
+              console.warn(`[ws] unexpected waitForLog event for unknown pattern (subscriptionId=${data.subscriptionId}, patternUUID=${data.patternUUID}, status=${data.status}) — dropping`)
+              return
+            }
+            if (data.status === 'matched') {
+              slot.resolve(data.lines)
+            } else if (data.status === 'timed_out') {
+              slot.reject(new TimeoutError(data.patternIndex, undefined, data.timeoutMs))
+            }
+            entry!.delete(data.patternUUID)
             return
           }
           case 'daemonShutdown': {
@@ -246,16 +261,28 @@ export class Client {
     }
   }
 
-  private call<T>(method: string, params?: unknown): Promise<T> {
+  private call<T>(method: string, params?: unknown, signal?: AbortSignal): Promise<T> {
     if (this.closed) return Promise.reject(new Error('connection closed'))
+    if (signal?.aborted) return Promise.reject(new Error(`rpc '${method}' aborted`))
     const id = this.nextId++
     const req: rpc.RpcRequest = { id, method: method as rpc.RpcMethod, params }
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
+        signal?.removeEventListener('abort', onAbort)
         reject(new Error(`rpc '${method}' timed out`))
       }, this.timeoutMs)
-      this.pending.set(id, { resolve: resolve as (r: unknown) => void, reject, timer })
+      const onAbort = () => {
+        clearTimeout(timer)
+        this.pending.delete(id)
+        reject(new Error(`rpc '${method}' aborted`))
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      this.pending.set(id, {
+        resolve: (v) => { signal?.removeEventListener('abort', onAbort); resolve(v as T) },
+        reject: (e) => { signal?.removeEventListener('abort', onAbort); reject(e) },
+        timer,
+      })
       this.ws.send(encodeRpc(req))
     })
   }
@@ -267,8 +294,8 @@ export class Client {
     const self = this
     return {
       subscriptionId,
-      onLines(fn: (lines: string[]) => void) {
-        set.add((lines) => fn(lines))
+      onLines(fn: (lines: HostLogLine[]) => void) {
+        set.add(fn)
       },
       async unattach() {
         if (detached) return
@@ -489,7 +516,33 @@ export class Client {
   readFileStream(params: { path: string }): Promise<ReadFileStreamResult> { return this.readFileStreamImpl(params) }
   writeFileStream(params: { path: string; stream: ReadableStream<Uint8Array>; size?: number }): Promise<WriteFileStreamResult> { return this.writeFileStreamImpl(params) }
 
-  executeRawCommand(params: { command: string }): Promise<rpc.ExecuteRawCommandResult> { return this.call<rpc.ExecuteRawCommandResult>('executeRawCommand', params) }
+  executeRawCommand(params: rpc.ExecuteRawCommandParams, signal?: AbortSignal): Promise<rpc.ExecuteRawCommandResult> { return this.call<rpc.ExecuteRawCommandResult>('executeRawCommand', params, signal) }
+  reloadResources(signal?: AbortSignal): Promise<void> { return this.call<void>('reloadResources', undefined, signal) }
+  waitForLog(params: rpc.WaitForLogParams, signal?: AbortSignal): Promise<WaitForLogSubscription> {
+    const client = this
+    return this.call<rpc.WaitForLogResult>('waitForLog', params, signal).then((res) => {
+      const perUuid = new Map<string, { resolve: (lines: string[]) => void; reject: (err: Error) => void }>()
+      client.waitForLogBySub.set(res.subscriptionId, perUuid)
+      const promises = res.patternUUIDs.map((uuid) => new Promise<string[]>((resolve, reject) => {
+        perUuid.set(uuid, { resolve, reject })
+      }))
+      const sub: WaitForLogSubscription = {
+        subscriptionId: res.subscriptionId,
+        patternUUIDs: res.patternUUIDs,
+        promises,
+        async cancel() {
+          // Reject every still-pending promise so callers awaiting see interrupt.
+          for (const [uuid, slot] of perUuid) {
+            slot.reject(new InterruptedError())
+            perUuid.delete(uuid)
+          }
+          await client.call<void>('unwaitForLog', { subscriptionId: res.subscriptionId })
+          client.waitForLogBySub.delete(res.subscriptionId)
+        },
+      }
+      return sub
+    })
+  }
 
   async attachLog(params?: { regex?: string }): Promise<AttachLogSubscription> {
     const res = await this.call<{ subscriptionId: string }>('attachLog', params)
@@ -499,8 +552,8 @@ export class Client {
   getActiveConfig() { return this.call<rpc.GetActiveConfigResult>('getActiveConfig') }
   getBuildOutputTree(params?: { path?: string; limit?: number }) { return this.call<rpc.GetBuildOutputTreeResult>('getBuildOutputTree', params) }
   readBuildLog(params?: rpc.ReadBuildLogParams) { return this.call<rpc.ReadBuildLogResult>('readBuildLog', params) }
-  readTestLog(params?: rpc.ReadBuildLogParams) { return this.call<rpc.ReadTestLogResult>('readTestLog', params) }
-  readServerLog(params?: rpc.ReadServerLogParams) { return this.call<rpc.ReadServerLogResult>('readServerLog', params) }
+  readTestLog(params?: rpc.ReadBuildLogParams) { return this.call<rpc.ReadBuildLogResult>('readTestLog', params) }
+  readServerLog(params?: rpc.ReadServerLogParams) { return this.call<rpc.ReadBuildLogResult>('readServerLog', params) }
   readClientLog(params?: rpc.ReadClientLogParams) { return this.call<rpc.ReadClientLogResult>('readClientLog', params) }
   getRebuildState() { return this.call<rpc.GetRebuildStateResult>('getRebuildState') }
   getWatcherStatus() { return this.call<rpc.GetWatcherStatusResult>('getWatcherStatus') }
@@ -508,7 +561,21 @@ export class Client {
   publishLog(params: rpc.PublishLogParams) { return this.call<void>('publishLog', params) }
   publishRebuild(params: rpc.PublishRebuildParams) { return this.call<void>('publishRebuild', params) }
   publishWatcherStatus(params: rpc.PublishWatcherStatusParams) { return this.call<void>('publishWatcherStatus', params) }
-  publishTriggerBuild() { return this.call<rpc.PublishTriggerBuildResult>('publishTriggerBuild') }
+  publishTriggerBuild(signal?: AbortSignal) {
+    if (!signal) {
+      return this.call<rpc.PublishTriggerBuildResult>('publishTriggerBuild', undefined)
+    }
+    // When the caller aborts, fire-and-forget a cancel so the watcher
+    // can SIGINT the build child the trigger started.
+    signal.addEventListener('abort', () => {
+      void this.call('cancelTriggerBuild', undefined).catch(() => {})
+    }, { once: true })
+    return this.call<rpc.PublishTriggerBuildResult>('publishTriggerBuild', undefined, signal)
+  }
+  cancelTriggerBuild() { return this.call('cancelTriggerBuild', undefined) }
+  setBuildMode(params: rpc.SetBuildModeParams) { return this.call<rpc.SetBuildModeResult>('setBuildMode', params) }
+  publishTestComplete(params: rpc.TestState) { return this.call<void>('publishTestComplete', params) }
+  getTestState() { return this.call<rpc.GetTestStateResult>('getTestState') }
   shutdown() { return this.call<void>('shutdown') }
 
   onShutdown(handler: (reason: string) => void): () => void {

@@ -21,6 +21,7 @@ export interface ConnectCommandOptions {
   shutdown?: boolean
   deploy?: boolean
   restartServer?: boolean
+  reload?: boolean
   /** Project root */
   path: string
 }
@@ -30,6 +31,11 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
 
   if (opts.shutdown) {
     await runShutdown(projectRoot)
+    return
+  }
+
+  if (opts.reload) {
+    await runReloadResources(projectRoot)
     return
   }
 
@@ -256,6 +262,34 @@ async function runShutdown(projectRoot: string): Promise<void> {
     await client.shutdown()
     client.close()
     console.log(chalk`{cyan [connect]} shutdown sent to daemon (pid ${endpoint.pid})`)
+  } catch (err) {
+    console.error(chalk`{red Error:} Failed to reach daemon: ${err instanceof Error ? err.message : String(err)}`)
+    process.exit(1)
+  }
+}
+
+async function runReloadResources(projectRoot: string): Promise<void> {
+  const endpoint = await readEndpoint(projectRoot)
+  if (!endpoint) {
+    console.error(chalk`{red Error:} No endpoint file at ${projectRoot}/.sandstone/connect.url — no daemon to shut down`)
+    process.exit(1)
+  }
+  if (!(await pidAlive(endpoint.pid))) {
+    console.error(chalk`{red Error:} Endpoint file references pid ${endpoint.pid} which is not alive`)
+    process.exit(1)
+  }
+  try {
+    console.log(chalk`{cyan [connect]} Connecting to daemon...`)
+    const client = await openClient({ endpoint })
+    console.log(chalk`{cyan [connect]} Connected! Reloading resources...`)
+    try {
+      await client.reloadResources()
+      client.close()
+      console.log(chalk`{cyan [connect]} Reloaded resources on the host!`)
+    } catch (err) {
+      console.error(chalk`{red Error:} Failed to reload resources: ${err instanceof Error ? err.message : String(err)}`)
+      process.exit(1)
+    }
   } catch (err) {
     console.error(chalk`{red Error:} Failed to reach daemon: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)

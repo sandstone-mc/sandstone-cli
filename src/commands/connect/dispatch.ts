@@ -1,22 +1,26 @@
-import { resolve as resolvePath } from 'node:path'
+// TODO: this entire file is sus, we probably shouldn't have ever had it. Consider refactoring to get rid of it 
+import { resolve as resolvePath } from 'path'
 
 import * as fs from '../../utils/fs.js'
 
 import type * as rpc from './rpc.js'
 import { PROTOCOL_VERSION, RpcErrorCode, errorToRpc } from './rpc.js'
-import type { SubscriptionRegistry } from './subscriptions.js'
+import type { SubscriptionRegistry, WaitLogSubscriptionRegistry } from './subscriptions.js'
 import { type StreamRegistry, type OpenStream, makeStreamEndBridge } from './streams.js'
-import { encodeStreamChunk, hexToBytes, newStreamId, streamIdHex } from './codec.js'
+import { encodeStreamChunk, encodeRpc, hexToBytes, newStreamId, streamIdHex } from './codec.js'
+import { event as buildEvent, notification, type RpcEventName, type RpcEventMap } from './rpc.js'
 import { Capability, capabilitiesToRecord } from '../../hosts/types.js'
-import type { HostProvider, LogChunkHandler, ServerPath } from '../../hosts/types.js'
+import type { HostLogHandler, HostLogLine, HostProvider } from '../../hosts/types.js'
 import type { ActiveConfig } from './active-config.js'
 import { setExpectedShutdown } from './daemon.js'
 import { UnsupportedCapabilityRpc, rpcError } from './host-capability.js'
 import { WsData } from './server.js'
+import { type LogMatcher, type LogPattern } from './wait-log.js'
+import type { SandstoneConfig } from 'sandstone'
+import { add } from 'src/utils/index.js'
 
 /**
- * Thrown by `dispatch` when the caller asked for shutdown. The server
- * catches this and runs the teardown sequence.
+ * Thrown by `dispatch` when the caller asked for shutdown.
  */
 export class ShutdownSignal extends Error {
   constructor() {
@@ -25,13 +29,6 @@ export class ShutdownSignal extends Error {
   }
 }
 
-/**
- * Wraps a typed RpcError that should be forwarded verbatim to the
- * client. `dispatch` throws this for handler errors so the server can
- * distinguish "bad request" from "internal bug" — the former surfaces
- * with the handler's original code (e.g. -32602 InvalidParams), the
- * latter as -32603.
- */
 export class RpcHandlerError extends Error {
   constructor(public readonly rpc: rpc.RpcError) {
     super(rpc.message)
@@ -45,26 +42,26 @@ export class DispatcherContext {
   constructor(
     public readonly host: HostProvider,
     public readonly subscriptions: SubscriptionRegistry,
+    public readonly waitLogSubscriptions: WaitLogSubscriptionRegistry,
+    public readonly logMatcher: LogMatcher,
     public readonly ws: Bun.ServerWebSocket<WsData>,
-    public readonly pushLog: (lines: string[], subscriptionId: string) => void,
+    public readonly pushLog: (lines: HostLogLine[], subscriptionId: string) => void,
     public readonly startedAt: number,
-    /**
-     * Live snapshot getter — callers pass `() => opts.getActiveConfig?.()`
-     * so handlers always see the latest value (the watcher may hot-reload
-     * via `publishConfig` mid-session).
-     */
     public readonly getActiveConfig: () => ActiveConfig | undefined,
     public readonly streams: StreamRegistry,
-    public readonly broadcast?: (eventName: string, data: unknown) => void,
+    public readonly broadcast?: <K extends RpcEventName>(eventName: K, data: RpcEventMap[K]) => void,
     public readonly notifyResourceUpdated?: (uri: string) => void,
     public readonly setActiveConfig?: (cfg: ActiveConfig) => void,
     public readonly getRebuildState?: () => rpc.RebuildState | undefined,
     public readonly setRebuildState?: (state: rpc.RebuildState) => void,
+    public readonly setTestState?: (state: rpc.TestState) => void,
+    public readonly getTestState?: () => rpc.TestState | undefined,
     public readonly getWatcherStatus?: () => rpc.WatcherStatus | null,
     public readonly setWatcherStatus?: (status: rpc.WatcherStatus, ws: Bun.ServerWebSocket<WsData> | undefined) => void,
     public readonly getExpectedShutdown?: () => boolean,
-    public readonly appendLogLines?: (entries: rpc.LogLineEntry[], target: rpc.LogStreamTarget) => void,
-    public readonly readLogBuffer?: (target: rpc.LogStreamTarget, opts?: {
+    public readonly getFullConfig?: () => SandstoneConfig | undefined,
+    public readonly appendLogLines?: (entries: rpc.LogLineEntry[], target: 'build' | 'test' | 'server') => void,
+    public readonly readLogBuffer?: (target: 'build' | 'test' | 'server', opts?: {
       tail?: number | null
       maxLines?: number | null
       range?: { from: number; to: number } | null
@@ -100,9 +97,14 @@ export class DispatcherInternals {
   get setActiveConfig() { return this.context.setActiveConfig }
   get getRebuildState() { return this.context.getRebuildState }
   get setRebuildState() { return this.context.setRebuildState }
+  get setTestState() { return this.context.setTestState }
+  get getTestState() { return this.context.getTestState }
   get getWatcherStatus() { return this.context.getWatcherStatus }
   get setWatcherStatus() { return this.context.setWatcherStatus }
   get getExpectedShutdown() { return this.context.getExpectedShutdown }
+  get fullConfig() { return this.context.getFullConfig?.() }
+  get waitLogSubscriptions() { return this.context.waitLogSubscriptions }
+  get logMatcher() { return this.context.logMatcher }
   get appendLogLines() { return this.context.appendLogLines }
   get readLogBuffer() { return this.context.readLogBuffer }
   get streams() { return this.context.streams }
@@ -130,7 +132,7 @@ export class DispatcherInternals {
   async readBufferLog(
     params: rpc.ReadBuildLogParams | undefined,
     target: 'build' | 'test' | 'server',
-  ): Promise<rpc.ReadBuildLogResult | rpc.ReadTestLogResult | rpc.ReadServerLogResult> {
+  ): Promise<rpc.ReadBuildLogResult | rpc.ReadBuildLogResult | rpc.ReadBuildLogResult> {
     const { tail, maxLines, range, since, until } = this.parseParams<rpc.ReadBuildLogParams>(
       params,
       ['tail', 'maxLines', 'range', 'since', 'until'],
@@ -230,6 +232,8 @@ export class Dispatcher {
     const context = new DispatcherContext(
       ctx.host,
       ctx.subscriptions,
+      ctx.waitLogSubscriptions,
+      ctx.logMatcher,
       ctx.ws,
       ctx.pushLog,
       ctx.startedAt,
@@ -240,9 +244,12 @@ export class Dispatcher {
       ctx.setActiveConfig,
       ctx.getRebuildState,
       ctx.setRebuildState,
+      ctx.setTestState,
+      ctx.getTestState,
       ctx.getWatcherStatus,
       ctx.setWatcherStatus,
       ctx.getExpectedShutdown,
+      ctx.getFullConfig,
       ctx.appendLogLines,
       ctx.readLogBuffer,
     )
@@ -281,7 +288,7 @@ export class Dispatcher {
     const ctx = this.internals
     const host = this.internals.host
     if (!host.readFileStream) throw new UnsupportedCapabilityRpc('readFileStream')
-    const streamInfo: { stream: ReadableStream<Uint8Array>; size?: number } = await host.readFileStream(params.path as ServerPath)
+    const streamInfo = await host.readFileStream(params.path)
     const streamId = streamIdHex(newStreamId())
     const record = ctx.streams.open({
       streamId,
@@ -299,7 +306,7 @@ export class Dispatcher {
     const ctx = this.internals
     const host = this.internals.host
     if (!host.writeFileStream) throw new UnsupportedCapabilityRpc('writeFileStream')
-    const sink: WritableStream<Uint8Array> = await host.writeFileStream(params.path as ServerPath, params.size !== undefined ? { size: params.size } : undefined)
+    const sink: WritableStream<Uint8Array> = await host.writeFileStream(params.path, params.size !== undefined ? { size: params.size } : undefined)
     const streamId = streamIdHex(newStreamId())
     const ws = ctx.ws as { send(data: Uint8Array): void } | undefined
     ctx.streams.open({
@@ -330,8 +337,46 @@ export class Dispatcher {
     }
     const host = this.internals.host
     if (!host.executeRawCommand) throw new UnsupportedCapabilityRpc(Capability.ExecuteRawCommand)
+
+    // Register the matcher BEFORE the command so a line the command
+    // emits is captured (and so we don't race the command's dispatch).
+    // Promise + cancel ride along on the result so the caller can await
+    // the line or abandon the wait.
+    let matcherHandle: { promises: Promise<string[]>[], patternUUIDs: string[], interrupt(): Promise<void> } | null = null
+    if (params.waitFor) {
+      matcherHandle = await this.internals.logMatcher.waitForLog([params.waitFor])
+    }
+
     const output = (await host.executeRawCommand(params.command)) ?? ''
-    return { output }
+
+    const result: rpc.ExecuteRawCommandResult = { output }
+    if (matcherHandle) {
+      result.logResult = matcherHandle.promises[0]
+      result.cancel = () => matcherHandle!.interrupt()
+      result.patternUUID = matcherHandle.patternUUIDs[0]
+    }
+    return result
+  }
+
+  async reloadResources(_params: undefined): Promise<void> {
+    const packName = this.internals.fullConfig?.name
+    const prefix = packName ? `[Sandstone @ ${packName}]` : '[Sandstone]'
+    const startingLine = `${prefix} Reload Starting...`
+    const finishedLine = `${prefix} Reload Finished!`
+
+    const { logResult: started } = await this.executeRawCommand({
+      command: `say ${startingLine}`,
+      waitFor: { kind: 'endsWith', value: startingLine, timeoutMs: 10000 }
+    })
+    await started
+
+    await this.executeRawCommand({ command: 'reload' })
+
+    const { logResult: finished } = await this.executeRawCommand({
+      command: `say ${finishedLine}`,
+      waitFor: { kind: 'endsWith', value: finishedLine, timeoutMs: 1000 * 60 * 8 }
+    })
+    await finished
   }
 
   async attachLog(params: rpc.AttachLogParams | undefined): Promise<rpc.AttachLogResult> {
@@ -340,9 +385,9 @@ export class Dispatcher {
 
     const subscriptionId = ctx.subscriptions.registerWithId(crypto.randomUUID(), ctx.ws)
 
-    const handler: LogChunkHandler = (lines) => {
+    const handler: HostLogHandler = (lines) => {
       if (filter) {
-        const matched = lines.filter((l) => filter.test(l))
+        const matched = lines.filter((l) => filter.test(l.line))
         if (matched.length > 0) ctx.pushLog(matched, subscriptionId)
       } else {
         ctx.pushLog(lines, subscriptionId)
@@ -353,6 +398,37 @@ export class Dispatcher {
     const subscription = await host.attachLog(handler)
     ctx.subscriptions.setUnattach(subscriptionId, () => subscription.unattach())
     return { subscriptionId }
+  }
+
+  async waitForLog(params: rpc.WaitForLogParams): Promise<rpc.WaitForLogResult> {
+    const host = this.internals.host
+    if (!host.attachLog) throw new UnsupportedCapabilityRpc('attachLog')
+
+    const subscriptionId = this.internals.waitLogSubscriptions.generateId()
+    const ws = this.internals.ws
+
+    const handle = await this.internals.logMatcher.waitForLog(params.patterns as LogPattern[])
+
+    handle.subscribe((entry) => {
+      if (entry.status === 'interrupted') return
+      const at = new Date().toISOString()
+      const base = { subscriptionId, patternUUID: entry.patternUUID, patternIndex: entry.patternIndex, at }
+      const event: rpc.WaitForLogEvent = entry.status === 'matched'
+        ? { ...base, status: 'matched', lines: entry.lines }
+        : { ...base, status: 'timed_out', timeoutMs: entry.timeoutMs! }
+      try {
+        ws.send(encodeRpc(notification('waitForLog', event)))
+      } catch {}
+    })
+
+    this.internals.waitLogSubscriptions.register(subscriptionId, ws, handle)
+    return { subscriptionId, patternUUIDs: handle.patternUUIDs }
+  }
+
+  async unwaitForLog(params: rpc.UnwaitForLogParams): Promise<void> {
+    const handle = this.internals.waitLogSubscriptions.drop(params.subscriptionId)
+    if (!handle) throw rpcError(RpcErrorCode.UnknownSubscription, `Unknown waitForLog subscription: ${params.subscriptionId}`)
+    await handle.interrupt()
   }
 
   async unattach(params: rpc.UnattachParams): Promise<void> {
@@ -385,16 +461,16 @@ export class Dispatcher {
     return this.internals.readBufferLog(params, 'build') as Promise<rpc.ReadBuildLogResult>
   }
 
-  async readTestLog(params: rpc.ReadBuildLogParams | undefined): Promise<rpc.ReadTestLogResult> {
-    return this.internals.readBufferLog(params, 'test') as Promise<rpc.ReadTestLogResult>
+  async readTestLog(params: rpc.ReadBuildLogParams | undefined): Promise<rpc.ReadBuildLogResult> {
+    return this.internals.readBufferLog(params, 'test') as Promise<rpc.ReadBuildLogResult>
   }
 
-  async readServerLog(params: rpc.ReadServerLogParams | undefined): Promise<rpc.ReadServerLogResult> {
-    return this.internals.readBufferLog(params, 'server') as Promise<rpc.ReadServerLogResult>
+  async readServerLog(params: rpc.ReadServerLogParams | undefined): Promise<rpc.ReadBuildLogResult> {
+    return this.internals.readBufferLog(params, 'server') as Promise<rpc.ReadBuildLogResult>
   }
 
+  // TODO: Implement an actual tail and buffer for this.
   async readClientLog(params: rpc.ReadClientLogParams | undefined): Promise<rpc.ReadClientLogResult> {
-    // TODO: Implement an actual tail and buffer for this.
     const cfg = await this.internals.requireActiveConfig()
     const clientPath = cfg.saveConfig?.clientPath
     if (!clientPath) {
@@ -450,7 +526,6 @@ export class Dispatcher {
       configPath: params.configPath,
       saveConfig: params.saveConfig,
       outputDir: params.outputDir,
-      // Watcher always logs at the project root, not under `test/`.
       logPath: `${params.projectRoot}/.sandstone/watch.log`,
       projectRoot: params.projectRoot,
       loadedAt: params.loadedAt,
@@ -480,14 +555,13 @@ export class Dispatcher {
     if (!ctx.notifyResourceUpdated) {
       throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to broadcast resource notifications')
     }
-    // The watcher stamps `at`; trust it. If absent, fall back to "now".
     const state: rpc.RebuildState = {
       state: params.state,
       fileCount: params.fileCount,
       errorCount: params.errorCount,
       warningCount: params.warningCount,
-      at: params.at ?? new Date().toISOString(),
-      ...(params.message !== undefined ? { message: params.message } : {}),
+      at: params.at,
+      ...add({ message: params.message }),
     }
     ctx.setRebuildState(state)
     ctx.notifyResourceUpdated('sandstone://rebuild-state')
@@ -499,6 +573,34 @@ export class Dispatcher {
       throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to expose rebuild state')
     }
     return { state: ctx.getRebuildState() ?? null }
+  }
+
+  async publishTestComplete(params: rpc.TestState) {
+    const ctx = this.internals
+    if (!ctx.setTestState) {
+      throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to track test state')
+    }
+    if (!ctx.notifyResourceUpdated) {
+      throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to broadcast resource notifications')
+    }
+    const state: rpc.TestState = {
+      state: params.state,
+      pass: params.pass,
+      fail: params.fail,
+      durationSec: params.durationSec,
+      at: params.at ?? new Date().toISOString(),
+      ...(params.message !== undefined ? { message: params.message } : {}),
+    }
+    ctx.setTestState(state)
+    ctx.notifyResourceUpdated('sandstone://test-state')
+  }
+
+  async getTestState(_params: undefined): Promise<rpc.GetTestStateResult> {
+    const ctx = this.internals
+    if (!ctx.getTestState) {
+      throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to expose test state')
+    }
+    return { state: ctx.getTestState() ?? null }
   }
 
   async publishWatcherStatus(params: rpc.PublishWatcherStatusParams) {
@@ -513,6 +615,7 @@ export class Dispatcher {
       connected: params.connected,
       mode: params.mode,
       manual: params.manual,
+      testingMode: params.testingMode,
       path: params.path,
       pid: params.pid,
       at: params.at ?? new Date().toISOString(),
@@ -530,9 +633,6 @@ export class Dispatcher {
   }
 
   async publishTriggerBuild(_params: undefined): Promise<rpc.PublishTriggerBuildResult> {
-    // Fan a `triggerBuild` event out to every connected session. The
-    // watcher subscribes (via `client.onTriggerBuild`) and runs its
-    // rebuild path; MCP clients ignore the event.
     const ctx = this.internals
     if (!ctx.broadcast) {
       throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to broadcast events')
@@ -540,25 +640,34 @@ export class Dispatcher {
     ctx.broadcast('triggerBuild', { at: new Date().toISOString() })
     return { triggered: true }
   }
+
+  async cancelTriggerBuild(_params: undefined): Promise<rpc.CancelTriggerBuildResult> {
+    const ctx = this.internals
+    if (!ctx.broadcast) {
+      throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to broadcast events')
+    }
+    ctx.broadcast('cancelTriggerBuild', { at: new Date().toISOString() })
+    return { cancelled: true }
+  }
+
+  async setBuildMode(params: rpc.SetBuildModeParams): Promise<rpc.SetBuildModeResult> {
+    const ctx = this.internals
+    if (!ctx.broadcast) {
+      throw rpcError(RpcErrorCode.InternalError, 'Daemon is not configured to broadcast events')
+    }
+    ctx.broadcast('setBuildMode', { mode: params.mode, at: new Date().toISOString() })
+    return { applied: true }
+  }
 }
 
-/**
- * Methods on `Dispatcher.prototype` that are NOT RPC handlers — the
- * RPC-name set is derived at runtime from the prototype, minus these
- * private helpers. Keep this list in sync when adding new private
- * helpers to the class.
- */
-const NON_RPC_METHODS = new Set([
-  'constructor',
-])
+const RPC_METHODS = new Set(Object.getOwnPropertyNames(Dispatcher.prototype))
+RPC_METHODS.delete('constructor')
 
-/** Set of every valid method name — used by the server to narrow a wire-string `method` to {@link RpcMethod}. */
 const KNOWN_METHODS: ReadonlySet<keyof Dispatcher | 'shutdown'> = new Set([
-  ...Object.getOwnPropertyNames(Dispatcher.prototype).filter((n) => !NON_RPC_METHODS.has(n)),
+  ...RPC_METHODS,
   'shutdown',
 ] as Array<keyof Dispatcher | 'shutdown'>)
 
-/** Narrow a parsed-wire method string to {@link RpcMethod}, throwing on unknown. */
 export function narrowMethod(method: string): rpc.RpcMethod {
   if (!KNOWN_METHODS.has(method as keyof Dispatcher | 'shutdown')) {
     throw rpcError(RpcErrorCode.MethodNotFound, `Unknown method: ${method}`)

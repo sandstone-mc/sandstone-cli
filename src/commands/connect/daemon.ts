@@ -1,42 +1,15 @@
-/**
- * Daemon orchestrator.
- *
- * Lifecycle:
- *   1. Validate the project's endpoint file isn't already serving a live
- *      daemon (pidAlive + age check).
- *   2. Instantiate the requested HostProvider via the registry.
- *   3. Start the WS server (host not yet connected; server is
- *      'welcome'-only until the host connects).
- *   4. Write the endpoint file.
- *   5. Register SIGINT/SIGTERM (and SIGBREAK on Windows) handlers.
- *   6. On signal or `shutdown` RPC, run the shutdown sequence:
- *      - Flush any pending log batches.
- *      - Drop all subscriptions.
- *      - Disconnect the host.
- *      - Delete the endpoint file.
- *      - Stop the server.
- *      - `process.exit(0)`.
- *
- * The shutdown sequence is idempotent; multiple triggers (signal +
- * RPC + another signal) collapse to one execution.
- */
-
 import { capabilitiesToRecord, Capability, type HostConfigInput, type HostProvider, type HostType } from '../../hosts/types.js'
 import { BootstrapError, bootstrapHost } from './bootstrap.js'
 import { loadActiveConfigFromDisk, type ActiveConfig } from './active-config.js'
+import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
+import type { SandstoneConfig } from 'sandstone'
 
-/**
- * Module-level state shared with `dispatch.ts` so handlers can flag
- * an imminent disconnect as expected (e.g. `runServerCommand("stop")`,
- * `restartServer`). The host-lost watcher consumes the flag and
- * leaves the daemon alive. One-shot — cleared after the next member
- * disconnect fires.
- */
+// TODO: Move this to actual state, not a module-level variable
 let expectedShutdown = false
 export const setExpectedShutdown = (v: boolean) => { expectedShutdown = v }
 export const getExpectedShutdown = () => expectedShutdown
 import { startServer, WsData } from './server.js'
-import type { RebuildState, WatcherStatus } from './rpc.js'
+import type { RebuildState, TestState, WatcherStatus, RpcEventName, RpcEventMap } from './rpc.js'
 import {
   deleteEndpoint,
   endpointPath,
@@ -54,30 +27,7 @@ export interface DaemonOptions {
   bind?: string
   /** Bind port. `0` lets the OS pick. */
   port?: number
-  /**
-   * Forwarded to {@link BootstrapOptions.userProvidedHostSettings}.
-   * When true, the caller passed explicit `--host-type` / `--host-config`
-   * / `--host-config-file` — suppresses the auto-`local-client` default.
-   */
   userProvidedHostSettings?: boolean
-}
-
-/** Result of a successful daemon start. */
-export interface DaemonHandle {
-  host: HostProvider
-  endpoint: EndpointFile
-  url: string
-  port: number
-  /**
-   * Trigger the shutdown sequence. Idempotent. Resolves once the
-   * process is ready to exit (endpoint file removed, server stopped).
-   */
-  shutdown(): Promise<void>
-  /**
-   * Resolves once teardown finishes. Fires for any shutdown trigger
-   * (signal, `shutdown` RPC, host loss).
-   */
-  done: Promise<void>
 }
 
 export class DaemonError extends Error {
@@ -90,7 +40,7 @@ export class DaemonError extends Error {
   }
 }
 
-export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
+export async function startDaemon(opts: DaemonOptions) {
   // 1. Reject if another daemon is already serving this project.
   const status = await endpointStatus(opts.projectRoot)
   if (status === 'live') {
@@ -144,6 +94,16 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     console.error(`[connect] failed to load sandstone.config.ts at boot:`, err)
   }
 
+  // 4b. Load the full `sandstone.config.ts` separately. Distinct from
+  // `activeConfig` (which is just the saveConfig-resolved projection):
+  // handlers that need fields like `name` read it via `getFullConfig`.
+  let fullConfig: SandstoneConfig | undefined
+  try {
+    fullConfig = await loadSandstoneConfig(opts.projectRoot)
+  } catch (err) {
+    console.error(`[connect] failed to load full sandstone.config.ts at boot:`, err)
+  }
+
   // 5. Start the WS server. We need the bound port to write the
   // endpoint file, so we run startServer first and write the endpoint
   // after.
@@ -157,10 +117,12 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   const LOG_BUFFER_CAP = 1000
 
   let rebuildState: RebuildState | undefined
+  let testState: TestState | undefined
+  
 
   let watcherEntry: { status: WatcherStatus; ws: Bun.ServerWebSocket<WsData> } | null = null
 
-  const pushTo = (target: 'build' | 'test' | 'server') => (entries: { line: string; ts: number }[]) => {
+  const pushTo = (target: 'build' | 'test' | 'server') => (entries: { line: string; ts: number; stream: 'stdout' | 'stderr' }[]) => {
     const buf = target === 'server' ? serverBuffer : target === 'test' ? testBuffer : buildBuffer
     buf.push(...entries)
     const overflow = buf.length - LOG_BUFFER_CAP
@@ -169,9 +131,15 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
 
   if (host.capabilities.has(Capability.AttachLog) && host.attachLog) {
     try {
-      await host.attachLog((lines) => {
-        if (lines.length === 0) return
-        pushTo('server')(lines.map((line) => ({ line, ts: Date.now() })))
+      await host.attachLog((chunks) => {
+        if (chunks.length === 0) return
+        for (const chunk of chunks) {
+          if (chunk.stream !== 'stdout') continue
+          if (/^\[\d{2}:\d{2}:\d{2}\] \[[^\]]+\/(?:ERROR|FATAL)]/.test(chunk.line)) {
+            chunk.stream = 'stderr'
+          }
+        }
+        pushTo('server')(chunks)
       })
     } catch (err) {
       console.error(`[connect] failed to attach host log for server-log buffer:`, err)
@@ -188,6 +156,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       handle.shutdown().catch(() => {})
     },
     getActiveConfig: () => activeConfig,
+    getFullConfig: () => fullConfig,
     setActiveConfig: (cfg) => {
       activeConfig = cfg
     },
@@ -195,6 +164,10 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
       rebuildState = state
     },
     getRebuildState: () => rebuildState,
+    setTestState: (state) => {
+      testState = state
+    },
+    getTestState: () => testState,
     getExpectedShutdown,
     setWatcherStatus: (status: WatcherStatus, ws: Bun.ServerWebSocket<WsData> | undefined) => {
       watcherEntry = ws ? { status, ws } : null
@@ -274,7 +247,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
   const done = new Promise<void>((r) => {
     resolveDone = r
   })
-  const handle: DaemonHandle = {
+  const handle = {
     host,
     endpoint,
     url: running.url,
@@ -296,7 +269,7 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
         resolveDone()
       }
     },
-  }
+  } as const
 
   const onSignal = (sig: NodeJS.Signals) => {
     console.error(`\n[connect] received ${sig}, shutting down...`)
@@ -326,13 +299,16 @@ export async function startDaemon(opts: DaemonOptions): Promise<DaemonHandle> {
     throw err
   }
 
+  // TODO: add notifications like the rebuild ones that tell the agent when a test has completed, it should give the agent the summary (tests failed, tests passed, and time elapsed in seconds)
+  throw new Error('This error was placed intentionally so I remember to work on this TODO ^')
+
   return handle
 }
 
 async function teardown(
   host: HostProvider,
   stopWS: () => Promise<void>,
-  broadcast: (event: string, data: unknown) => void,
+  broadcast: <K extends RpcEventName>(event: K, data: RpcEventMap[K]) => void,
   endpoint: EndpointFile,
   reason: 'signal' | 'shutdown-rpc' | 'host-lost',
   ownsServer: boolean,

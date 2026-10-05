@@ -14,6 +14,7 @@ export const DESCRIPTION =
 export async function call(
   _bridge: McpBridge,
   _args: { plan: string },
+  _signal?: AbortSignal,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   return {
     isError: true,

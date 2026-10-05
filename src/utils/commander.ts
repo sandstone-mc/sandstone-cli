@@ -50,10 +50,16 @@ const options = {
   shutdown: opt('--shutdown', 'With `sand connect`, read the project endpoint file and ask the running daemon to shut down.', { env: 'CONNECT_SHUTDOWN' }),
   deploy: opt('--deploy', 'With `sand connect`, upload the datapack zip from .sandstone/output to <serverPath>/world/datapacks/ via the host after the daemon starts.', { env: 'CONNECT_DEPLOY' }),
   restartServer: opt('--restart-server', 'With `sand connect`, stop and start the MC server after the daemon connects.', { env: 'CONNECT_RESTART_SERVER' }),
+  reload: opt('--reload', 'With `sand connect`, run `reloadResources()` against the daemon (announces Starting/Finished chat lines and waits for the reload to complete) after the daemon connects, then keep it running.', { env: 'CONNECT_RELOAD' }),
 
   // sand run — wait for a log-line match after sending the command.
   expect: opt('--expect <pattern>', 'With `sand run`, regex matched against subsequent log lines. Exits 0 on first match, 1 on timeout.', { env: 'RUN_EXPECT' }),
   timeout: opt('--timeout <seconds>', 'With `sand run`, seconds to wait for --expect before failing (default 30).', { env: 'RUN_TIMEOUT' }),
+
+  // sand test — emit test events + summary as minified JSON lines instead
+  // of formatted+colored text. Status / lifecycle logs (splash, "Running
+  // tests...") still go to stdout as plain text.
+  json: opt('--json', 'With `sand test`, emit one minified JSON object per test event and one for the summary, instead of formatted+colored output.'),
 
   // TODO: ssh
 

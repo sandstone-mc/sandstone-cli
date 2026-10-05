@@ -25,6 +25,26 @@ interface WatchUIProps {
    * the rebuilt pack via a running `sand connect` daemon.
    */
   onDeploy?: () => void
+  /**
+   * Called when the user presses `Escape`. Only fires when the ESC bind
+   * is currently displayed in the footer (i.e. a build has been running
+   * for at least 10 seconds). Parent is responsible for terminating the
+   * worker and unblocking the await.
+   */
+  onCancelBuild?: () => void
+  /**
+   * Called when the user presses `t` while the `T: tests` footer bind
+   * is visible (project has tests + no build/test currently running).
+   * Parent flips the toggle state and fires a rebuild with the new
+   * value.
+   */
+  onToggleTests?: () => void
+  /**
+   * Called when the user presses `Escape` while the `Esc: cancel test`
+   * footer bind is visible (a test has been in flight for ≥10s). Parent
+   * is responsible for aborting the in-flight test session.
+   */
+  onCancelTest?: () => void
 }
 
 function formatChangedFiles(files: TrackedChange[]): string {
@@ -135,7 +155,7 @@ function ContentDisplay({ mode, logLines, errorText, changes, scrollOffset, maxL
   )
 }
 
-export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDeploy }: WatchUIProps) {
+export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDeploy, onCancelBuild, onToggleTests, onCancelTest }: WatchUIProps) {
   const [status, setStatusState] = useState<WatchStatus>(manual ? 'pending' : 'watching')
   const [reason, setReason] = useState<string>()
   const [deployAvailable, setDeployAvailableState] = useState(false)
@@ -146,6 +166,12 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDe
   const [scrollOffset, setScrollOffset] = useState(0)
   const [mcHeader, setMcHeader] = useState<string | null>(null)
   const [updateCheckState, setUpdateCheckState] = useState<IndicatorState>({ kind: 'silent' })
+  const [canCancelBuild, setCanCancelBuild] = useState(false)
+  const [canToggleTests, setCanToggleTests] = useState(false)
+  // TODO: Investigate why hasTests is unused and whether canToggleTests actually gates on whether the project really has tests
+  const [hasTests, setHasTests] = useState(false)
+  const [testingMode, setTestingMode] = useState(false)
+  const [canCancelTest, setCanCancelTest] = useState(false)
 
   const isError = status === 'error' && buildResult?.error
   const isManualPending = manual && status === 'pending' && changedFiles.length > 0
@@ -267,6 +293,19 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDe
     if (input === 'd' && deployAvailable && deployHasChanges) {
       onDeploy?.()
     }
+
+    if (input === 't' && canToggleTests) {
+      onToggleTests?.()
+    }
+
+    if (key.escape && canCancelTest) {
+      onCancelTest?.()
+      return
+    }
+
+    if (key.escape && canCancelBuild) {
+      onCancelBuild?.()
+    }
   })
 
   useEffect(() => {
@@ -277,6 +316,13 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDe
       setLiveLog,
       setDeployAvailable,
       setDeployHasChanges,
+      setCanCancelBuild,
+      setCanToggleTests: (canToggle: boolean, has: boolean) => {
+        setCanToggleTests(canToggle)
+        setHasTests(has)
+      },
+      setTestingMode,
+      setCanCancelTest,
       exit: () => exit!(),
     }
     ;(globalThis as Record<string, unknown>).__watchUIAPI = api
@@ -297,7 +343,10 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDe
   const statusColor = status === 'error' ? 'red' : status === 'pending' ? 'yellow' : 'green'
 
   const footerParts: string[] = []
-  if (manual) footerParts.push('R/Enter: rebuild')
+  if (manual && changedFiles.length > 0) footerParts.push('R/Enter: rebuild')
+  if (canToggleTests) footerParts.push(`T: tests ${testingMode ? 'on' : 'off'}`)
+  if (canCancelTest) footerParts.push('Esc: cancel test')
+  if (canCancelBuild) footerParts.push('Esc: cancel build')
   if (logLines.length > effectiveContentLines || (isError && buildResult?.error && buildResult.error.split('\n').length > effectiveContentLines)) {
     footerParts.push('↑↓: scroll')
   }

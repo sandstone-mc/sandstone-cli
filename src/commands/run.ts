@@ -1,48 +1,9 @@
-/**
- * `sand run` — run a Minecraft console command on the configured server.
- *
- * Two invocation shapes:
- *  - **Raw command** (default): the joined `<command...>` args are sent
- *    to the server as a single console command.
- *  - **File path** (when the joined args end in `.ts` or `.mcfunction`):
- *    the file is read and expanded into a sequence of console commands:
- *      - `.mcfunction` — every non-empty, non-comment (`#`) line is sent
- *        in order, after `.trim()`.
- *      - `.ts` — the file is `import()`-ed as ESM; its `default` export
- *        must be a function. The function runs inside a one-off Sandstone
- *        MCFunction callback; Sandstone's default visitor pipeline
- *        compiles the body into mcfunction text. If the script created
- *        ANY extra user-level resources (a child `MCFunction`, an
- *        `Advancement`, a `Recipe`, …), `sand run` throws — only inline
- *        commands are supported.
- *
- * Two connection modes:
- *  - **Daemon mode** (preferred when a `sand connect` daemon is alive for
- *    the project): read `<projectRoot>/.sandstone/connect.url`, dial the
- *    WS, send `executeRawCommand`, exit. The host stays connected so the
- *    user can run more commands quickly.
- *  - **Direct mode** (no daemon): instantiate the host from
- *    `--host-config`, `connect()`, send the command, `disconnect()`. One
- *    round-trip per invocation; no state preserved.
- *
- * `--expect <pattern>`: match the regex against the command's
- * acknowledgement to decide the exit code.
- *  - Built-in response available (rcon, mcsmanager-login): match the
- *    regex against the returned string. Match → exit 0, no match →
- *    exit 1.
- *  - No built-in response (integrated writes to child stdin): attach to
- *    the log BEFORE sending the command and wait up to `--timeout`
- *    seconds (default 30) for a matching line. Match → exit 0, timeout
- *    → exit 1.
- *  - File mode applies `--expect` to the LAST emitted command only.
- */
-
 import { resolve, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { connect as openClient, type Client } from './connect/client.js'
 import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
 import { BootstrapError, bootstrapHost } from './connect/bootstrap.js'
-import type { HostConfigInput, HostProvider, HostType, LogChunkHandler } from '../hosts/types.js'
+import type { HostConfigInput, HostProvider, HostType, HostLogHandler, HostLogLine } from '../hosts/types.js'
 import { DEFAULT_HOST_TYPE } from './connect/index.js'
 import type { SandstoneContext } from 'sandstone'
 import { randomUUID as nodeRandomUUID } from 'node:crypto'
@@ -50,18 +11,12 @@ import chalk from 'chalk-template'
 import { parseHostConfig } from './connect/host-config.js'
 
 export interface RunCommandOptions {
-  /** `--host-type <type>` — required (same set as `sand connect`). */
-  hostType?: string
-  /** `--host-config <json>` */
-  hostConfig?: string
-  /** `--host-config-file <path>` */
-  hostConfigFile?: string
-  /** `--path <path>` (project root). */
-  path: string
-  /** `--expect <pattern>` — wait for this regex against subsequent log lines. */
-  expect?: string
-  /** `--timeout <seconds>` — wait up to this many seconds for `--expect` (default 30). */
-  timeout?: string
+  hostType?: string,
+  hostConfig?: string,
+  hostConfigFile?: string,
+  path: string,
+  expect?: string,
+  timeout?: string,
 }
 
 const DEFAULT_TIMEOUT_SECONDS = 30
@@ -87,9 +42,7 @@ export async function runCommand(
   }
 
   // 2. File-mode dispatch FIRST. When the joined argument ends in
-  // `.ts` or `.mcfunction`, compile/read it BEFORE any host work — a
-  // bad script should fail before we waste time on `readEndpoint` or
-  // `bootstrapHosts`.
+  // `.ts` or `.mcfunction`, compile/read it BEFORE any host work.
   if (command.endsWith('.mcfunction') || command.endsWith('.ts')) {
     const commands = command.endsWith('.mcfunction')
       ? await readMcfunctionFile(command)
@@ -106,7 +59,7 @@ export async function runCommand(
   const timeoutMs = parseTimeoutMs(opts.timeout)
 
   // 4. Detect an alive `sand connect` daemon. When present, the host
-  // type + config come from the daemon — neither flag is required.
+  // type + config come from the daemon.
   const endpoint = await readEndpoint(projectRoot)
   const daemonAlive = !!(endpoint && (await pidAlive(endpoint.pid)))
 
@@ -309,10 +262,10 @@ async function attachAwaitClient(
       new Promise<string>((resolve, reject) => {
         sub.onLines((lines) => {
           if (matched) return
-          for (const line of lines) {
-            if (regex.test(line)) {
+          for (const entry of lines) {
+            if (regex.test(entry.line)) {
               matched = true
-              resolve(line)
+              resolve(entry.line)
               return
             }
           }
@@ -346,12 +299,12 @@ async function attachAwaitHost(
   let subscription: { unattach: () => Promise<void> } | null = null
   let timer: ReturnType<typeof setTimeout> | null = null
   const promise = new Promise<string>((resolve, reject) => {
-    const handler: LogChunkHandler = (lines) => {
+    const handler: HostLogHandler = (lines) => {
       if (matched) return
-      for (const line of lines) {
-        if (regex.test(line)) {
+      for (const entry of lines) {
+        if (regex.test(entry.line)) {
           matched = true
-          resolve(line)
+          resolve(entry.line)
           return
         }
       }
@@ -538,9 +491,7 @@ async function runCommands(
 ): Promise<void> {
   const expectIdx = expectRegex ? commands.length - 1 : -1
 
-  // Minecraft's `return` only makes sense inside an mcfunction or as
-  // an `execute … run return` subcommand — sending it standalone via
-  // RCON is almost always a mistake. Reject both forms up-front.
+  // `return` only makes sense inside an mcfunction.
   const badReturn = commands.find((c) => c.startsWith('return ') || c.includes(' run return '))
   if (badReturn !== undefined) {
     console.error(

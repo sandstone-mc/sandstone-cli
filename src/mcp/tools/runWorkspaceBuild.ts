@@ -1,28 +1,3 @@
-/**
- * `runWorkspaceBuild` tool.
- *
- * Triggers a `sand build` ONLY when a watcher is connected in **manual
- * mode** — that's the only state where the user explicitly opts in to
- * push-driven builds. Pair with `resources/subscribe
- * sandstone://rebuild-state` to see the start/finish events.
- *
- * Why three branches:
- *   - **Watcher connected + manual**: rebuild makes sense. Fire the
- *     trigger via the daemon; the watcher consumes pending changes and
- *     rebuilds. Returns immediately; the result lives on
- *     `sandstone://rebuild-state`.
- *   - **Watcher connected + auto**: rebuild is wasted — the watcher
- *     already rebuilds on every file change. Surface that as an
- *     `isError: true` result with a clear "the watcher handles this"
- *     message.
- *   - **No watcher**: the project has no build pipeline. Error and
- *     tell the agent to use the `sand build` Bash command directly.
- *
- * Pair this with `resources/subscribe sandstone://rebuild-state` —
- * the trigger returns immediately; the build result lives on the
- * `rebuild-state` resource as `complete` / `failed` events.
- */
-
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
 import { type McpBridge } from '../bridge.js'
 
@@ -36,6 +11,8 @@ export const DESCRIPTION =
 
 export async function call(
   bridge: McpBridge,
+  _args: Record<string, never> = {},
+  _signal?: AbortSignal,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   const daemon = await bridge.requireDaemon()
 
@@ -78,7 +55,7 @@ export async function call(
 
   // Branch 1: watcher connected + manual. Trigger and return.
   try {
-    await daemon.publishTriggerBuild()
+    await daemon.publishTriggerBuild(_signal)
   } catch (err) {
     throw new McpError(
       ErrorCode.InternalError,
@@ -86,11 +63,18 @@ export async function call(
     )
   }
 
+  const testingMode = watcherStatus.testingMode === true
+  const testsHint = testingMode
+    ? 'The watcher is in tests-mode — every rebuild runs `sand test` against the freshly reloaded host, so expect the build to also kick off a test session. ' +
+      'To turn tests-mode off, call setBuildMode with a mode of \'normal\'. '
+    : 'To opt into test builds and testing per build, call setBuildMode with a mode of \'test\', a build will immediately follow, and subsequent builds will build in test mode and run tests. '
+
   return {
     content: [{
       type: 'text',
       text:
         'Build triggered. The watcher will consume any pending changes and rebuild.\n\n' +
+        testsHint +
         'Subscribe to `sandstone://rebuild-state` to see the build result (started → complete/failed with file counts and any error).',
     }],
   }

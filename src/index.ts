@@ -4,6 +4,7 @@ import chalk from 'chalk-template'
 
 import { CLI_VERSION } from './version.js'
 import { buildCommand, createCommand, watchCommand, installNativeCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand, testCommand, mcpCommand } from './commands/index.js'
+import { _buildCommand } from './commands/build/index.js'
 import { BuildOptions } from './utils/commander.js'
 
 if (Bun.which('bun') === null) {
@@ -119,6 +120,7 @@ CLI
   .addOption(BuildOptions.get('shutdown'))
   .addOption(BuildOptions.get('deploy'))
   .addOption(BuildOptions.get('restartServer'))
+  .addOption(BuildOptions.get('reload'))
   .action(connectCommand)
 
 CLI
@@ -148,15 +150,19 @@ CLI
   .addHelpText('after', `
 Examples:
   $ sand test
+  $ sand test --json | jq
 
 Requires the datapack to define GameTests (each test class registered via
 \`SandstoneTest\`; use \`sand build --test\` to opt them into the build).
 The CLI exits non-zero when any required test fails so it can be wired
-into CI as a drop-in check.`)
+into CI as a drop-in check. With --json, every stdout line is one
+minified JSON object: {event, ...} — events are "status" (lifecycle),
+"error", "warning", "test" (per-test result), and "summary" (totals).`)
   .addOption(BuildOptions.get('path'))
   .addOption(BuildOptions.get('hostType'))
   .addOption(BuildOptions.get('hostConfig'))
   .addOption(BuildOptions.get('hostConfigFile'))
+  .addOption(BuildOptions.get('json'))
   .action(testCommand)
 
 CLI
@@ -175,5 +181,9 @@ stdout stays valid.`)
   .addOption(BuildOptions.get('path'))
   .action(mcpCommand)
 
+// Don't register the CLI if we're getting imported for a worker
+if (process.env.SAND_WORKER !== '1') {
+  CLI.parse(process.argv)
+}
 
-CLI.parse(process.argv)
+export { _buildCommand }

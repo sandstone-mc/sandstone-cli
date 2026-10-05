@@ -1,38 +1,3 @@
-/**
- * The `sand mcp` MCP server.
- *
- * A stdio MCP server that exposes the project's Sandstone state to LLM
- * agents (Claude Code, Cursor, etc.). All state is read from the
- * running `sand connect` daemon — this server never touches the
- * filesystem directly, never parses `sandstone.config.ts` itself, and
- * never spawns anything. The one exception is `runServerCommand`,
- * which is allowed to bootstrap a direct host connection when the
- * daemon isn't running (mirrors `sand run`'s behaviour).
- *
- * Capability surface (advertised in `initialize`):
- *   - `tools: { listChanged: false }`     — static set of 7 tools
- *   - `resources: { subscribe: true, listChanged: false }` — agents
- *     can subscribe to specific resources and receive
- *     `notifications/resources/updated` when the daemon pushes
- *     `configChanged`.
- *   - `logging: {}`                        — server-initiated log
- *     notifications mirror console output. Agents see them only if
- *     their client surfaces logging notifications; mostly for humans.
- *
- * Lifecycle:
- *   1. Read `.sandstone/connect.url`. If no daemon is running, the
- *      server still starts (most resources will return
- *      `DaemonUnavailableError` per call). Forcing the agent to be
- *      useful even without a daemon isn't worth the complexity — v1
- *      keeps it honest.
- *   2. Connect to the daemon (best-effort). On success, subscribe to
- *      `configChanged` and translate events to
- *      `notifications/resources/updated` for `sandstone://save-config`.
- *   3. Register every resource + tool. Stubs stay stubs.
- *   4. Hand control to the MCP SDK; the process stays alive until
- *      stdin closes or the client disconnects.
- */
-
 import { McpServer, ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { SubscribeRequestSchema } from '@modelcontextprotocol/sdk/types.js'
@@ -51,14 +16,15 @@ import * as runWorkspaceBuild from './tools/runWorkspaceBuild.js'
 import * as deployToServer from './tools/deployToServer.js'
 import * as restartServer from './tools/restartServer.js'
 import * as runServerCommand from './tools/runServerCommand.js'
-import * as runTest from './tools/runTest.js'
+import * as setBuildMode from './tools/setBuildMode.js'
 import * as runSimPlayerPlan from './tools/runSimPlayerPlan.js'
 import * as getSimPlayerState from './tools/getSimPlayerState.js'
+import * as registerLogListener from './tools/registerLogListener.js'
+import * as getLogListener from './tools/getLogListener.js'
 
 import { makeContext } from './daemon-client.js'
 import { McpBridge } from './bridge.js'
 
-/** Build, register, and return an `McpServer` ready to connect. */
 export async function buildMcpServer(opts: { path: string; version: string }): Promise<{ server: McpServer; bridge: McpBridge }> {
   const ctx = makeContext(opts)
   const bridge = new McpBridge(ctx)
@@ -81,9 +47,6 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
     },
   )
 
-  // -----------------------------------------------------------------
-  // Resources
-  // -----------------------------------------------------------------
   server.registerResource(
     getSaveConfig.NAME,
     getSaveConfig.URI,
@@ -93,10 +56,6 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
       return { contents: [r] }
     },
   )
-  // Log readers use URI templates so callers can pass `tail` / `rangeFrom` /
-  // `rangeTo` / `since` / `until` query params. RFC 6570 expansion gives
-  // us `params` as a `{key: string}[]` we coerce to numbers for the
-  // handlers below.
   server.registerResource(
     readSandstoneLog.NAME,
     new ResourceTemplate(readSandstoneLog.URI, { list: undefined }),
@@ -106,9 +65,6 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
       return { contents: [r] }
     },
   )
-  // Fixed URI for the build-output root. The template `{path}` below
-  // can't match zero-length segments, so the root is registered twice:
-  // once as a fixed URI, once as the template for descendants.
   server.registerResource(
     `${readSandstoneOutput.NAME}-root`,
     readSandstoneOutput.FIXED_URI,
@@ -118,8 +74,6 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
       return { contents: [r] }
     },
   )
-  // Template: `sandstone://build-output/{path}` — agents descend with
-  // subpaths. `{path}` matches exactly one segment.
   server.registerResource(
     readSandstoneOutput.NAME,
     new ResourceTemplate(readSandstoneOutput.TEMPLATE_URI, { list: undefined }),
@@ -157,10 +111,6 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
       return { contents: [r] }
     },
   )
-  // Fixed URI: synthetic `sandstone://rebuild-state` resource backed by
-  // the daemon's latest `publishRebuild` snapshot. Watcher pushes
-  // state at build start + finish; daemon fires
-  // `notifications/resources/updated` to every subscribed client.
   server.registerResource(
     rebuildState.NAME,
     rebuildState.URI,
@@ -170,9 +120,6 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
       return { contents: [r] }
     },
   )
-  // Fixed URI: synthetic `sandstone://watcher-status` resource. Watcher
-  // publishes its runtime state on connect; daemon flips
-  // `connected: false` when the watcher's WS session closes.
   server.registerResource(
     watcherStatus.NAME,
     watcherStatus.URI,
@@ -182,24 +129,20 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
       return { contents: [r] }
     },
   )
-
-  // -----------------------------------------------------------------
-  // Tools
-  // -----------------------------------------------------------------
   server.registerTool(
     runWorkspaceBuild.NAME,
     { title: runWorkspaceBuild.NAME, description: runWorkspaceBuild.DESCRIPTION },
-    async () => runWorkspaceBuild.call(bridge),
+    async (extra) => runWorkspaceBuild.call(bridge, {}, extra.signal),
   )
   server.registerTool(
     deployToServer.NAME,
     { title: deployToServer.NAME, description: deployToServer.DESCRIPTION },
-    async () => deployToServer.call(bridge, {}),
+    async (extra) => deployToServer.call(bridge, {}, extra.signal),
   )
   server.registerTool(
     restartServer.NAME,
     { title: restartServer.NAME, description: restartServer.DESCRIPTION },
-    async () => restartServer.call(bridge, {}),
+    async (extra) => restartServer.call(bridge, {}, extra.signal),
   )
   server.registerTool(
     runServerCommand.NAME,
@@ -211,18 +154,57 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
         hostType: z.string().optional(),
         hostConfig: z.record(z.string(), z.unknown()).optional(),
         expect: z.string().optional(),
+        waitFor: z.object({
+          kind: z.enum(['endsWith', 'includes', 'glob', 'regex']),
+          value: z.string(),
+          timeoutMs: z.number().optional(),
+          closingLine: z.object({
+            kind: z.enum(['endsWith', 'includes', 'glob', 'regex']),
+            value: z.string(),
+            timeoutMs: z.number().optional(),
+          }).optional(),
+        }).optional(),
       },
     },
-    async (args) => runServerCommand.call(bridge, args as Parameters<typeof runServerCommand.call>[1]),
+    async (args, extra) => runServerCommand.call(bridge, args as Parameters<typeof runServerCommand.call>[1], extra.signal),
   )
   server.registerTool(
-    runTest.NAME,
+    registerLogListener.NAME,
     {
-      title: runTest.NAME,
-      description: runTest.DESCRIPTION,
-      inputSchema: { path: z.string() },
+      title: registerLogListener.NAME,
+      description: registerLogListener.DESCRIPTION,
+      inputSchema: {
+        pattern: z.object({
+          kind: z.enum(['endsWith', 'includes', 'glob', 'regex']),
+          value: z.string(),
+          timeoutMs: z.number().optional(),
+          closingLine: z.object({
+            kind: z.enum(['endsWith', 'includes', 'glob', 'regex']),
+            value: z.string(),
+            timeoutMs: z.number().optional(),
+          }).optional(),
+        }),
+      },
     },
-    async (args) => runTest.call(bridge, args as { path: string }),
+    async (args, extra) => registerLogListener.call(bridge, args as Parameters<typeof registerLogListener.call>[1], extra.signal),
+  )
+  server.registerTool(
+    getLogListener.NAME,
+    {
+      title: getLogListener.NAME,
+      description: getLogListener.DESCRIPTION,
+      inputSchema: { id: z.string() },
+    },
+    async (args, extra) => getLogListener.call(bridge, args as { id: string }, extra.signal),
+  )
+  server.registerTool(
+    setBuildMode.NAME,
+    {
+      title: setBuildMode.NAME,
+      description: setBuildMode.DESCRIPTION,
+      inputSchema: { mode: z.enum(['normal', 'test']) },
+    },
+    async (args, extra) => setBuildMode.call(bridge, args as Parameters<typeof setBuildMode.call>[1], extra.signal),
   )
   server.registerTool(
     runSimPlayerPlan.NAME,
@@ -231,46 +213,24 @@ export async function buildMcpServer(opts: { path: string; version: string }): P
       description: runSimPlayerPlan.DESCRIPTION,
       inputSchema: { plan: z.string() },
     },
-    async (args) => runSimPlayerPlan.call(bridge, args),
+    async (args, extra) => runSimPlayerPlan.call(bridge, args, extra.signal),
   )
   server.registerTool(
     getSimPlayerState.NAME,
     { title: getSimPlayerState.NAME, description: getSimPlayerState.DESCRIPTION },
-    async () => getSimPlayerState.call(bridge, {}),
+    async (extra) => getSimPlayerState.call(bridge, {}, extra.signal),
   )
-
-  // -----------------------------------------------------------------
-  // Subscribe handler
-  // -----------------------------------------------------------------
-  // The `McpServer` high-level API doesn't expose a `subscribe()` method,
-  // so wire the underlying `Server.setRequestHandler` directly. We
-  // accept every subscription — the resources we serve are static
-  // identifiers the agent can ask about — and return `{}`. Notification
-  // delivery is handled by `sendResourceUpdated` (see
-  // forwardConfigChangedToResource below for the build-log path).
   server.server.setRequestHandler(SubscribeRequestSchema, async () => ({}))
 
-  // -----------------------------------------------------------------
-  // Daemon event forwarding (best-effort)
-  // -----------------------------------------------------------------
-  // Don't block server startup if the daemon is down — most resources
-  // will surface the error per-call. The bridge caches the client
-  // across tool/resource calls; this is just the initial wire-up.
   bridge.attachForwarders(server)
 
   return { server, bridge }
 }
 
-/**
- * Start the MCP server on stdio. Blocks until stdin closes.
- */
 export async function runMcpServer(opts: { path: string; version: string }): Promise<void> {
   const { server, bridge } = await buildMcpServer(opts)
   const transport = new StdioServerTransport()
   await server.connect(transport)
-  // `server.connect()` resolves once the transport is wired — it does
-  // NOT block until stdin closes. Wait for the transport's `onclose`
-  // callback so the process stays alive while the parent is connected.
   await new Promise<void>((resolve) => {
     transport.onclose = () => {
       bridge.dispose()
@@ -279,14 +239,6 @@ export async function runMcpServer(opts: { path: string; version: string }): Pro
   })
 }
 
-/**
- * Coerce the string-keyed `params` map from a URI template expansion
- * into a typed number-bearing shape for the build/test log readers.
- * All six params are required per the `ReadBuildLogParams` contract;
- * `-1` is the sentinel for "no filter applied". Falls back to `-1` if
- * a value is missing/unparseable so the SDK's strict matching still
- * doesn't crash.
- */
 function coerceLogParams(params: Record<string, string | string[] | undefined>): {
   tail: number
   maxLines: number
@@ -310,10 +262,6 @@ function coerceLogParams(params: Record<string, string | string[] | undefined>):
   }
 }
 
-/**
- * Coerce params for the file-based log readers (client/server).
- * Three params; `-1` = "no filter".
- */
 function coerceFileLogParams(params: Record<string, string | string[] | undefined>): {
   tail: number
   from: number

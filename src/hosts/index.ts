@@ -1,18 +1,9 @@
-// Public surface + side-effect registrations.
-//
-// Importing this module (or any module that imports it) registers every
-// built-in host provider into the registry. Consumers then either:
-//   - `createHost('ssh', sshConfig)` to get a connected HostProvider
-//
-// Mirrors `src/launchers/index.ts`.
-
 export type {
   HostType,
-  ServerPath,
   HostCapabilities,
   Capability,
   LogSubscription,
-  LogChunkHandler,
+  HostLogHandler,
   HostProvider,
   CapabilityMethods,
   HostConfigInput,
@@ -27,7 +18,6 @@ export { ALL_CAPABILITIES, capabilitiesToRecord } from './types.js'
 export { registerProvider, getProvider, getProviders, createHost } from './registry.js'
 export { UnsupportedCapabilityError, NotConnectedError, HostAuthError } from './errors.js'
 
-// Side-effect: register all built-in providers.
 import { registerProvider } from './registry.js'
 import { createSshHost } from './providers/ssh.js'
 import { createFtpHost } from './providers/ftp.js'

@@ -1,8 +1,8 @@
-import { join as pathJoin } from 'node:path'
-import { createHash } from 'node:crypto'
-import { Readable, Writable } from 'node:stream'
+import { join as pathJoin } from 'path'
+import { createHash } from 'crypto'
+import { Readable, Writable } from 'stream'
+import { ChildProcessWithoutNullStreams, ChildProcess } from 'child_process'
 
-import { attachRconIfConfigured } from '../_shared/attach-rcon.js'
 import { NotConnectedError } from '../errors.js'
 import { ensureJava, requiredJavaMajor } from '../java.js'
 import { RconClient } from '../rcon-client.js'
@@ -18,69 +18,32 @@ import { sandstoneToMcVersion } from '../sandstone-version.js'
 import * as fs from '../../utils/fs.js'
 import { ghFetchText } from '../../utils/github.js'
 import { spawn as shellSpawn } from '../../utils/shell.js'
-import { Capability, type HostCapabilities, type HostProvider, type IntegratedHostConfig, type IntegratedHostModsConfig, type LogChunkHandler, type LogSubscription, type ServerPath } from '../types.js'
-import { ChildProcessWithoutNullStreams } from 'node:child_process'
+import type { HostCapabilities, HostProvider, HostLogLine, HostLogHandler, LogSubscription, IntegratedHostConfig, IntegratedHostModsConfig } from '../types.js'
+import { Capability } from '../types.js'
 import { MINECRAFT_LOG_PREFIX } from '../../commands/run.js'
 
-/** sha512 file hash of a tracked mod (Modrinth-installed or URL-installed). */
-type ModSha512 = string
-
-/** How an installed mod was sourced. URL-installed mods aren't auto-updated. */
 type ModSource = 'modrinth' | 'url'
 
-/**
- * Per-mod metadata persisted in `sandstone_manifest.json`. Keyed by
- * filename so the host can rename + remove files cleanly when an
- * update changes the version's primary filename.
- */
 interface InstalledModInfo {
   source: ModSource
-  sha512: ModSha512
-  // Modrinth-only — populated for `source: 'modrinth'`, undefined otherwise.
+  sha512: string
   versionId?: string
   versionNumber?: string
   projectId?: string
   datePublished?: string
 }
 
-/** Shape of `sandstone_manifest.json` in the integrated server dir. */
 interface SandstoneManifest {
   installedFabricLoader?: string
   installerVersion?: string
   minecraftVersion?: string
   installedAt?: string
-  /** ISO-8601 timestamp of the last successful mod update check. */
   lastModUpdateCheck?: string
-  /** Mods currently present in `<serverDir>/mods/`. Keyed by filename. */
   installedMods?: Record<string, InstalledModInfo>
 }
 
-/**
- * Minimum gap between two consecutive mod update checks on the same
- * server. Throttles the bulk POST to /version_files/update — the API
- * is rate-limited per-IP and we want connects to stay cheap.
- */
-const ONE_HOUR_MS = 60 * 60 * 1000
-
 const UnwhitelistedAttempt = new RegExp(`${MINECRAFT_LOG_PREFIX}${String.raw`(\w+) \(/([\w\.]+):`}`)
 
-/**
- * Integrated provider — CLI-managed local Fabric server inside
- * `${projectRoot}/.sandstone/mc-server/`. The CLI downloads the Fabric
- * server jar (Mojang server + Fabric loader) on first connect, writes
- * `eula.txt` automatically (this is a dev tool — Mojang's EULA is
- * accepted unconditionally by the user invoking the CLI), and exposes
- * the running JVM process via the standard host capabilities:
- *
- *  - `startServer` / `stopServer` — spawn + terminate the JVM.
- *  - `readFile` / `writeFile` — direct `node:fs/promises` against `serverDir`.
- *  - `attachLog` — tails the child's stdout + the file under
- *    `${serverDir}/logs/latest.log` (Minecraft writes both; we expose
- *    stdout since it's the live stream).
- *  - `executeRawCommand` — writes the command to the child's stdin.
- *    Response capture is best-effort: we read N stdout chunks after each
- *    write and return whatever shows up within the response window.
- */
 export class IntegratedHost implements HostProvider {
   readonly type = 'integrated' as const
   readonly displayName = 'Integrated Fabric Server'
@@ -98,68 +61,26 @@ export class IntegratedHost implements HostProvider {
   private readonly serverDir: string
   private readonly javaDir: string
   private java: Awaited<ReturnType<typeof ensureJava>> | null = null
-  /** Resolved MC version (with snapshot/pre-release suffix) — drives installer args. */
   private resolvedMinecraftVersion: string | null = null
   private resolvedMinecraftType: 'release' | 'snapshot' | null = null
   private child: ChildProcessWithoutNullStreams | null = null
-  /** RCON client. Re-established on every JVM spawn. */
   private rcon: RconClient | null = null
   private connected = false
-  // Shared line-splitter state — written by startServer's chunk handler,
-  // read by attachLog (replay) + forwarded to active handlers. Reset
-  // every startServer.
   private logBuffer: string[] = []
   private partialLine = ''
-  /**
-   * Multiple concurrent `attachLog` subscribers are supported — each
-   * call returns its own subscription. New lines are fanned out to every
-   * entry in the set.
-   */
-  private logHandlers = new Set<LogChunkHandler>()
-  /**
-   * Captured stderr from the JVM, used to make early-exit errors
-   * actionable. Unbounded — the early-exit path is short-lived (the
-   * server died before "Done ("), so the volume is tiny. Once the
-   * server is healthy this stays near-empty because Minecraft
-   * doesn't write to stderr.
-   */
+  private logHandlers = new Set<HostLogHandler>()
   private stderrTail: string[] = []
 
   private pushStderr(line: string): void {
     this.stderrTail.push(line)
   }
 
-  /**
-   * Set of liveness-loss listeners. Invoked when the JVM child exits
-   * unexpectedly (SIGTERM/SIGKILL from the OS, crash, internal stop,
-   * etc.) — NOT for the daemon's own `disconnect()` call. The daemon
-   * subscribes via {@link HostProvider.onDisconnected} to detect when
-   * the integrated host has gone away and trigger a coordinated shutdown.
-   */
   disconnectHandlers: Set<(reason: string) => void> = new Set<(reason: string) => void>()
 
   private doneDetected = false
   private rconReadyDetected = false
-  /**
-   * Set during `startServer()` when `doneDetected` was false at entry
-   * (i.e. the bootstrap actually spawned the JVM). Reset at the top of
-   * the next `startServer()` call. Read by the bootstrap to decide
-   * whether `sand run` should call `stopServer` on exit.
-   */
   private weStarted = false
-  /**
-   * Resolvers awaiting the next "Done (" line. Multiple callers may
-   * await startServer concurrently (e.g. `sand connect` runs it once,
-   * then `sand run` calls it again before the JVM is up — the second
-   * call joins the queue instead of throwing). Cleared after firing.
-   */
   private resolveReady: Array<() => void> = []
-  /**
-   * One-shot matcher for the next line matching a regex. Set by
-   * `awaitLogLine` and resolved by the line-splitter when a matching
-   * line arrives. Used to confirm that a console command's response
-   * was seen in the log before continuing.
-   */
   private pendingLineMatcher: { pattern: RegExp; resolve: (line: string) => void } | null = null
   /**
    * True if the server's world dir had no `level.dat` at connect time,
@@ -172,57 +93,31 @@ export class IntegratedHost implements HostProvider {
   private needsInitialWorldSetup = false
 
   constructor(config: IntegratedHostConfig) {
-    // `world` defaults to 'void' — the typical dev/test surface for
-    // the integrated host. Pass 'overworld' explicitly to opt out.
     this.config = { ...config, world: config.world ?? 'void' }
     this.serverDir =
       config.serverDir ?? pathJoin(config.projectRoot, '.sandstone', 'mc-server')
     this.javaDir = config.javaDir ?? pathJoin(this.serverDir, '.java')
   }
 
-  /**
-   * Lifecycle logger. Emits only when `config.verbose` is true — set
-   * by `sand connect` for long-running daemons. One-shot invocations
-   * (`sand run`) stay quiet by default.
-   */
   private logVerbose(...args: unknown[]): void {
     if (this.config.verbose) console.log(...args)
   }
 
   async connect(): Promise<void> {
     if (this.connected) return
-    await fs.ensureDir(this.serverDir)
-    // Dev tool — accept Mojang's EULA unconditionally on the user's behalf.
+    await fs.ensureDir(pathJoin(this.serverDir, 'debug'))
+    // Yeah yeah whatever
     await this.ensureEulaAccepted()
-    // Resolve the server port BEFORE writing server.properties so the
-    // chosen port is included in the file the JVM reads on boot.
     this.serverPort = await this.resolveServerPort()
-
-    // Write server.properties with the configured world preset BEFORE
-    // the server starts. Minecraft reads this on first launch and
-    // generates the world according to `level-type` + `generator-settings`.
-    // No-op when `world` is unset — Minecraft generates a fresh default
-    // overworld. We only overwrite the keys we own; user edits to other
-    // server.properties keys are preserved.
     await this.writeServerProperties()
-    // Resolve the MC version + java major up-front. Either `sandstoneVersion`
-    // (we derive MC via PrismLauncher's index.json) or explicit
-    // `minecraftVersion` (caller takes responsibility for the version string).
+
     const { version: mcVersion, type: mcType } = await this.resolveMinecraftVersion()
     this.resolvedMinecraftVersion = mcVersion
     this.resolvedMinecraftType = mcType
-    // Resolve a JVM that matches the Minecraft version up-front. The
-    // Fabric installer needs the *same* JVM we'll later run the server
-    // with — installing on Java 17 then launching on Java 25 leaves the
-    // loader bundled with bytecode it can't read.
+
     const major = await requiredJavaMajor(mcVersion)
     this.java = await ensureJava(major, this.javaDir)
-    // Decide whether to (re)install the Fabric server. Re-install when:
-    //  - `fabric-server-launch.jar` is missing (first run), OR
-    //  - `sandstone_manifest.json` records an older loader version than
-    //    the current latest stable. The latest loader is fully
-    //    backwards-compatible, so a bump is always safe — we delete the
-    //    installer's outputs and re-run.
+
     const latestLoader = await fetchLatestFabricLoader()
     const manifestPath = pathJoin(this.serverDir, 'sandstone_manifest.json')
     let installedLoader: string | null = null
@@ -235,15 +130,10 @@ export class IntegratedHost implements HostProvider {
       }
       installedLoader = manifest.installedFabricLoader ?? null
       manifestMcVersion = manifest.minecraftVersion ?? null
-    } catch {
-      // No manifest — first run.
-    }
+    } catch {}
     // Treat the install as stale if EITHER the loader is outdated OR the
     // recorded MC version doesn't match what the current sandstone version
-    // maps to. The previous check only considered the loader, which
-    // meant upgrading the sandstone minor (e.g. 1.1.0 → 1.2.0 = MC
-    // 26.2 → 26.3) without a loader bump left mods stuck on the old MC
-    // version's mod list.
+    // maps to.
     const mcChanged = manifestMcVersion !== null && manifestMcVersion !== mcVersion
     const loaderStale = installedLoader !== null && compareSemver(installedLoader, latestLoader) < 0
     const noManifest = installedLoader === null
@@ -255,10 +145,8 @@ export class IntegratedHost implements HostProvider {
         )
         await this.clearFabricInstall()
       }
-      // Reinstall the loader+jar in every stale case — no manifest, MC
-      // version mismatch, or loader bump all require a fresh jar because
-      // the launcher ships an MC-specific Minecraft server.jar.
       await this.installFabricServer(latestLoader)
+
       // Only wipe + re-install mods when the MC version changes. A
       // Fabric loader upgrade doesn't require touching mods.
       if (mcChanged || noManifest) {
@@ -269,30 +157,14 @@ export class IntegratedHost implements HostProvider {
         await this.installMods(mcVersion)
       }
     }
-    // Backfill the manifest's installedMods map for existing servers that
-    // pre-date auto-update tracking — hash every jar in mods/ and ask
-    // Modrinth which version each one is. No-op when already populated.
     await this.ensureModsTracked(mcVersion)
-    // Auto-update pass. Throttled by ONE_HOUR_MS via lastModUpdateCheck
-    // in the manifest — connect() calls within an hour of a prior check
-    // (or a fresh installMods pass) skip the POST entirely.
     await this.checkModUpdates(mcVersion)
-    // Track whether this connection will generate a fresh world — if the
-    // world dir had no level.dat before connect, we'll lay down the
-    // spawn platform after the server finishes booting.
-    const worldDir = pathJoin(this.serverDir, 'world')
-    this.needsInitialWorldSetup = !(await fs.fileExists(pathJoin(worldDir, 'level.dat')))
+
+    // TODO: Only toggle this on when in void mode
+    this.needsInitialWorldSetup = !(await fs.fileExists(pathJoin(this.serverDir, 'world', 'level.dat')))
     this.connected = true
   }
 
-  /**
-   * Resolve the Minecraft server port to write into `server.properties`.
-   * If the caller set `config.serverPort` to a positive value, use it
-   * verbatim. Otherwise (0 / undefined), scan `127.0.0.1` starting at
-   * 25565 and return the first port that successfully binds. We close
-   * the probe server before returning so the JVM can bind the same port
-   * immediately after.
-   */
   private async resolveServerPort(): Promise<number> {
     const configured = this.config.serverPort
     if (configured !== undefined && configured > 0) return configured
@@ -315,11 +187,6 @@ export class IntegratedHost implements HostProvider {
     throw new Error('No available port found in 25565-65534')
   }
 
-  /**
-   * Resolve the MC version + type from config. Either `sandstoneVersion`
-   * (mapped via PrismLauncher's index.json) or `minecraftVersion` (used
-   * verbatim) — never both.
-   */
   private async resolveMinecraftVersion(): Promise<{
     version: string
     type: 'release' | 'snapshot'
@@ -334,15 +201,9 @@ export class IntegratedHost implements HostProvider {
         this.config.sandstoneVersion,
         this.config.preferSnapshot ?? false,
       )
-      // sandstoneToMcVersion only matches 'release' | 'snapshot', so the
-      // type narrowing is safe here.
       return { version: mc.version, type: mc.type as 'release' | 'snapshot' }
     }
     if (this.config.minecraftVersion) {
-      // The caller passed a literal MC version. We don't have a separate
-      // signal for release-vs-snapshot here; treat anything with `-snapshot`
-      // or `-pre`/`-rc` in the string as a snapshot so the installer gets
-      // `-snapshot`. Plain releases (e.g. "26.3") stay "release".
       const isSnapshot = /-(snapshot|pre|rc)\d*$/i.test(this.config.minecraftVersion)
       return {
         version: this.config.minecraftVersion,
@@ -357,21 +218,13 @@ export class IntegratedHost implements HostProvider {
   async disconnect(): Promise<void> {
     if (!this.connected) return
     const child = this.child
-    // Mark rcon close as expected — disconnecting the socket ourselves
-    // shouldn't trip the host-lost handler.
     if (this.rcon) this.rcon.closeExpected = true
-    // Detach the disconnect-listener set BEFORE killing so the exit
-    // event fired by our own kill doesn't trigger our own handler.
+
     this.disconnectHandlers.clear()
     this.destroyRcon()
     if (child) {
-      // Wait for the child to actually exit so the test script doesn't
-      // return while the JVM still holds port 25565 — the next test run
-      // would fail to bind and Minecraft would auto-shut down.
       const exited = waitForExit(child)
       child.kill('SIGTERM')
-      // SIGKILL safety net after 2 minutes. Generous so a server
-      // that's mid-save or rolling back a region doesn't get yanked.
       const killer = setTimeout(() => {
         if (!child.killed) child.kill('SIGKILL')
       }, 120_000)
@@ -390,11 +243,6 @@ export class IntegratedHost implements HostProvider {
     return this.connected
   }
 
-  /**
-   * Subscribe to unexpected JVM exits. Returns an unsubscribe function.
-   * The daemon uses this to detect when the integrated host has gone
-   * away (e.g. `sand run "stop"` killed the JVM via RCON).
-   */
   onDisconnected(handler: (reason: string) => void): () => void {
     this.disconnectHandlers.add(handler)
     return () => {
@@ -402,28 +250,12 @@ export class IntegratedHost implements HostProvider {
     }
   }
 
-  /**
-   * Whether `startServer()` actually spawned the JVM during its most
-   * recent call (vs. returning immediately because the server was
-   * already running). Used by the bootstrap to decide whether
-   * `sand run` should send `stop` on exit. NOT on the HostProvider
-   * interface — only the integrated provider has meaningful
-   * "we started this" semantics; other providers either have no server
-   * to start (rcon) or treat startServer differently (ssh).
-   */
   weStartedThisCall(): boolean {
     return this.weStarted
   }
 
   async startServer(): Promise<void> {
     this.requireConnected('integrated')
-    // Idempotent: if a previous startServer already saw "Done (",
-    // return immediately. If one is in flight (child spawned, not yet
-    // done), join its resolver list and wait — concurrent callers
-    // (e.g. sand connect + sand run racing) shouldn't crash each other.
-    // `child.killed` stays false even after a clean exit, so stopServer
-    // explicitly nulls `this.child` after the JVM exits to make this
-    // branch skip the join when the previous JVM is already gone.
     this.weStarted = !this.doneDetected
     if (this.doneDetected) {
       return
@@ -441,7 +273,6 @@ export class IntegratedHost implements HostProvider {
       )
     }
 
-    // Reset log state + tear down any prior rcon client before the new JVM.
     this.logBuffer = []
     this.partialLine = ''
     this.doneDetected = false
@@ -463,17 +294,11 @@ export class IntegratedHost implements HostProvider {
       {
         cwd: this.serverDir,
         shell: true,
-        // stdin is kept open for graceful shutdown signaling, though
-        // we now drive the console exclusively via RCON. `detached: true`
-        // puts the JVM in its own process group so signal propagation
-        // from Bun doesn't race the `stop` command path.
         stdio: ['pipe', 'pipe', 'pipe'],
         detached: true,
       },
     )
 
-    // Watch for unexpected exit so the daemon can react (e.g. when the
-    // rcon-driven `stop` kills the JVM).
     const onUnexpectedExit = (code: number | null) => {
       for (const h of this.disconnectHandlers) {
         h(`JVM exited with code ${code}`)
@@ -487,20 +312,29 @@ export class IntegratedHost implements HostProvider {
     this.child.once('exit', onUnexpectedExit)
     this.child.once('error', onSpawnError)
 
-    // Shared line-splitter feeding `logBuffer` + the active handler +
-    // the "Done (" detector. Each chunk gets text-decoded + split.
-    const processChunk = (chunk: Buffer | Uint8Array | string) => {
+    const decoder = new TextDecoder('utf-8')
+    let stderrPartial = ''
+    const processChunk = (chunk: Buffer | Uint8Array | string, stream: 'stdout' | 'stderr') => {
       const text =
         typeof chunk === 'string'
           ? chunk
-          : new TextDecoder('utf-8').decode(chunk, { stream: true })
-      this.partialLine += text
-      const lines = this.partialLine.split('\n')
-      this.partialLine = lines.pop() ?? ''
-      if (lines.length === 0) return
-      for (const line of lines) {
-        if (this.logBuffer.length >= 10_000) this.logBuffer.shift()
-        this.logBuffer.push(line)
+          : decoder.decode(chunk, { stream: true })
+      const ts = Date.now()
+      const partial = stream === 'stdout' ? this.partialLine : stderrPartial
+      const combined = partial + text
+      const originalLines = combined.split('\n')
+      const leftover = originalLines.pop() ?? ''
+      if (stream === 'stdout') this.partialLine = leftover
+      else stderrPartial = leftover
+      if (originalLines.length === 0) return
+      const lines: HostLogLine[] = originalLines.map((line) => ({ line, ts, stream }))
+      for (const { line } of lines) {
+        if (stream === 'stdout') {
+          if (this.logBuffer.length >= 10_000) this.logBuffer.shift()
+          this.logBuffer.push(line)
+        } else {
+          this.pushStderr(line)
+        }
         if (line.endsWith('lost connection: You are not white-listed on this server!')) {
           const [_, localPlayer, clientAddress] = UnwhitelistedAttempt.exec(line)!
           if (clientAddress === '127.0.0.1') {
@@ -509,9 +343,6 @@ export class IntegratedHost implements HostProvider {
             this.executeRawCommand(`op ${localPlayer}`).catch(() => {})
           }
         }
-        // Resolve a pending one-shot matcher, if any. Used by
-        // `awaitLogLine` to confirm a console command's response arrived
-        // before continuing.
         const matcher = this.pendingLineMatcher
         if (matcher && matcher.pattern.test(line)) {
           this.pendingLineMatcher = null
@@ -527,7 +358,7 @@ export class IntegratedHost implements HostProvider {
         }
       }
       if (!this.doneDetected) {
-        for (const line of lines) {
+        for (const { line } of lines) {
           if (line.includes('Done (')) {
             this.doneDetected = true
             this.logVerbose(
@@ -546,7 +377,7 @@ export class IntegratedHost implements HostProvider {
         // pendingLineMatcher so the same detectLogLine path that
         // confirms `fill`/`setblock` responses also resolves this.
         const expectedPort = this.config.rcon.port
-        for (const line of lines) {
+        for (const { line } of lines) {
           if (
             this.pendingLineMatcher &&
             line.match(this.pendingLineMatcher.pattern) &&
@@ -565,38 +396,25 @@ export class IntegratedHost implements HostProvider {
       }
     }
 
-    // Spawn stream-pump tasks for stdout + stderr. Errors are caught
-    // silently — the early-exit check below will reject startServer
-    // if either stream errors out.
-    ;(async () => {
+    (async () => {
       try {
         for await (const chunk of this.child!.stdout) {
-          processChunk(chunk)
+          processChunk(chunk, 'stdout')
         }
       } catch {
         // ignore
       }
-    })()
-    ;(async () => {
+    })();
+    (async () => {
       try {
-        const decoder = new TextDecoder('utf-8')
-        let partial = ''
         for await (const chunk of this.child!.stderr) {
-          partial += decoder.decode(chunk, { stream: true })
-          const lines = partial.split('\n')
-          partial = lines.pop() ?? ''
-          for (const line of lines) this.pushStderr(line)
+          processChunk(chunk, 'stderr')
         }
       } catch {
         // ignore
       }
     })()
 
-    // Resolve as soon as "Done (" is detected (callback above). Reject
-    // if the child exits before that — include EVERY captured line so
-    // the caller can see why the JVM died (port conflict, missing jar,
-    // bad config, etc.). Unbounded by design: when the server died
-    // before "Done (" the buffer is small (seconds of output at most).
     const child = this.child
     const donePromise = new Promise<void>((resolve, reject) => {
       this.resolveReady.push(resolve)
@@ -613,12 +431,6 @@ export class IntegratedHost implements HostProvider {
       })
     })
 
-    // Wait for the RCON listener thread to bind its port. The JVM
-    // prints `Done (` BEFORE the rcon listener thread starts — we
-    // use the existing detectLogLine matcher to await both signals in
-    // parallel via Promise.all, so we return the moment BOTH are true
-    // (no fixed sleep). Matches the configured port exactly so a stale
-    // log line from a prior JVM can't satisfy the new waiter.
     const rconReadyPromise = this.config.rcon
       ? this.detectLogLine(
           new RegExp(`RCON running on 0\\.0\\.0\\.0:${this.config.rcon.port}`),
@@ -627,8 +439,6 @@ export class IntegratedHost implements HostProvider {
 
     await Promise.all([donePromise, rconReadyPromise])
 
-    // Both "Done (" and "RCON running on ..." have fired. Bring up
-    // the rcon client now that we know the listener is bound.
     await this.connectRcon()
 
     if (this.needsInitialWorldSetup) {
@@ -648,24 +458,12 @@ export class IntegratedHost implements HostProvider {
   async stopServer(): Promise<void> {
     this.requireConnected('integrated')
     const child = this.child
-    // Reset `doneDetected` so the next `startServer()` doesn't short-
-    // circuit on the "Done (" already seen" check. The flag's
-    // "Done (" was for the OLD JVM; the NEW JVM hasn't booted yet, so
-    // we need a fresh detection.
     this.doneDetected = false
     this.resolveReady = []
     if (!child || child.killed) {
-      // Already gone — just clean up rcon and bail.
       this.destroyRcon()
       return
     }
-    // Try to send `stop` via RCON first — that's the documented graceful
-    // path the JVM understands (save worlds, broadcast goodbye). The
-    // rcon protocol is request/response, but if the JVM dies mid-response
-    // the rcon client never receives a reply — `rcon.execute()` would
-    // hang indefinitely. Race it against `waitForExit(child)` so we
-    // proceed as soon as EITHER resolves. If the JVM exits first we
-    // abandon the pending execute (its socket will close).
     const timeoutMs = (this.config.gracefulStopTimeoutSeconds ?? 30) * 1000
     const exited = waitForExit(child)
     if (this.rcon) this.rcon.closeExpected = true
@@ -681,9 +479,6 @@ export class IntegratedHost implements HostProvider {
     if (!stopSent) {
       child.stdin?.write('stop\n')
     }
-    // Race the exit against the graceful timeout. If `stop` doesn't
-    // cause the JVM to exit within `gracefulStopTimeoutSeconds`, escalate
-    // to SIGTERM then SIGKILL.
     const killTimer = setTimeout(() => {
       if (!child.killed) {
         child.kill('SIGTERM')
@@ -696,44 +491,29 @@ export class IntegratedHost implements HostProvider {
     killTimer.unref?.()
     await exited
     clearTimeout(killTimer)
-    // JVM is gone — close rcon if it's still up. The close handler may
-    // have already fired (and we suppressed the host-lost event by
-    // detaching the listeners — see disconnect()).
     this.destroyRcon()
-    // Drop the child reference. `child.killed` stays false even after
-    // a clean exit (it only flips true when we call `child.kill()`), so
-    // leaving the old ref in place would make the next startServer
-    // think the JVM is still booting and join a resolver queue nobody
-    // resolves.
     this.child = null
   }
 
-  async readFile(path: ServerPath): Promise<Buffer> {
+  async readFile(path: string): Promise<Buffer> {
     this.requireConnected('integrated')
     const full = pathJoin(this.serverDir, path)
     return await fs.readBytes(full)
   }
 
-  /**
-   * Stream the file directly from disk. Wraps `fs.createReadStream`
-   * in a web `ReadableStream` so the daemon can pipe chunks via the
-   * Web Streams API all the way through.
-   */
-  async readFileStream(path: ServerPath): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }> {
+  async readFileStream(path: string): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }> {
     this.requireConnected('integrated')
     const full = pathJoin(this.serverDir, path)
     const { createReadStream, statSync } = await import('node:fs')
     let size: number | undefined
     try {
       size = statSync(full).size
-    } catch {
-      // Best-effort; some callers don't have a meaningful size.
-    }
+    } catch {}
     const node = createReadStream(full)
     return { stream: Readable.toWeb(node) as ReadableStream<Uint8Array>, size }
   }
 
-  async writeFile(path: ServerPath, data: Buffer | string): Promise<void> {
+  async writeFile(path: string, data: Buffer | string): Promise<void> {
     this.requireConnected('integrated')
     const full = pathJoin(this.serverDir, path)
     await fs.ensureDir(pathJoin(full, '..'))
@@ -742,16 +522,7 @@ export class IntegratedHost implements HostProvider {
       : fs.writeBytes(full, data))
   }
 
-  /**
-   * Stream-write to disk. Returns a `WritableStream` the caller
-   * pipes chunks into; closing the stream finalises the file.
-   * Parent directory is created up front so the stream doesn't race
-   * with the daemon's `ensureDir`.
-   *
-   * `opts.size` is ignored — `fs.createWriteStream` is a true
-   * streaming sink.
-   */
-  async writeFileStream(path: ServerPath, _opts?: { size?: number }): Promise<WritableStream<Uint8Array>> {
+  async writeFileStream(path: string, _opts?: { size?: number }): Promise<WritableStream<Uint8Array>> {
     this.requireConnected('integrated')
     const full = pathJoin(this.serverDir, path)
     await fs.ensureDir(pathJoin(full, '..'))
@@ -760,16 +531,6 @@ export class IntegratedHost implements HostProvider {
     return Writable.toWeb(node) as WritableStream<Uint8Array>
   }
 
-  /**
-   * Register a one-shot detector for a line matching `pattern` in the
-   * JVM's stdout. Returns a promise that resolves when a matching line
-   * arrives. Existing logBuffer is scanned first; if a match is already
-   * buffered, the promise resolves immediately.
-   *
-   * Used by the first-start setup to confirm a console command's
-   * response was processed before continuing — pattern should match the
-   * exact expected confirmation line.
-   */
   private detectLogLine(pattern: RegExp): Promise<string> {
     this.logVerbose(`[integrated] detectLogLine registered: ${pattern}`)
     for (const line of this.logBuffer) {
@@ -785,14 +546,8 @@ export class IntegratedHost implements HostProvider {
     })
   }
 
-  async attachLog(onChunk: LogChunkHandler): Promise<LogSubscription> {
+  async attachLog(onChunk: HostLogHandler): Promise<LogSubscription> {
     this.requireConnected('integrated')
-    // attachLog is callable both before and after startServer. Multiple
-    // concurrent subscribers are supported — each call adds to the set
-    // and gets its own subscription. Lines received after this point
-    // (whether the child is already spawning or about to spawn) flow
-    // through the shared line-splitter to every entry.
-
     this.logHandlers.add(onChunk)
     const self = this
 
@@ -800,9 +555,8 @@ export class IntegratedHost implements HostProvider {
       async unattach() {
         if (!self.logHandlers.has(onChunk)) return
         self.logHandlers.delete(onChunk)
-        // Flush any trailing partial line so callers see it.
         if (self.partialLine.length > 0) {
-          onChunk([self.partialLine])
+          onChunk([{ line: self.partialLine, ts: Date.now(), stream: 'stdout' }])
           self.partialLine = ''
         }
       },
@@ -817,15 +571,6 @@ export class IntegratedHost implements HostProvider {
     return await this.rcon.execute(command)
   }
 
-  /**
-   * Open the rcon-srcds client and authenticate against the JVM's RCON
-   * listener. Throws on auth failure (bad password) or transport error.
-   * Surface unexpected socket close as a host-lost event.
-   *
-   * Custom rather than the shared `attachRconIfConfigured` because
-   * integrated wires RCON socket close/error into its own
-   * `disconnectHandlers` set — the shared one doesn't know about that.
-   */
   private async connectRcon(): Promise<void> {
     const rconCfg = this.config.rcon
     if (!rconCfg) return
@@ -856,12 +601,6 @@ export class IntegratedHost implements HostProvider {
     }
   }
 
-  /**
-   * Synchronous socket teardown. Idempotent — safe to call from any
-   * shutdown path. `RconClient.destroy()` uses `rcon.connection.destroy()`
-   * (NOT `await rcon.disconnect()`) because the latter hangs when a
-   * request is in flight as the JVM exits.
-   */
   private destroyRcon(): void {
     this.rcon?.destroy()
     this.rcon = null
@@ -873,12 +612,7 @@ export class IntegratedHost implements HostProvider {
     if (!this.connected) throw new NotConnectedError(label)
   }
 
-  /**
-   * Read `sandstone_manifest.json` from the server dir. Returns an empty
-   * object when the file is missing or unreadable — every field is
-   * optional, so callers can treat the result as "what we know so far".
-   */
-  private async readManifest(): Promise<SandstoneManifest> {
+  private async readManifest() {
     const manifestPath = pathJoin(this.serverDir, 'sandstone_manifest.json')
     try {
       const raw = await fs.readText(manifestPath)
@@ -888,39 +622,18 @@ export class IntegratedHost implements HostProvider {
     }
   }
 
-  /** Persist `sandstone_manifest.json`. Pretty-printed for diffability. */
-  private async writeManifest(manifest: SandstoneManifest): Promise<void> {
+  private async writeManifest(manifest: SandstoneManifest) {
     await fs.writeText(
       pathJoin(this.serverDir, 'sandstone_manifest.json'),
       JSON.stringify(manifest, null, 2),
     )
   }
 
-  /**
-   * Compute a file's sha512 hash as a lowercase hex string. Used to
-   * populate the manifest's per-mod hash + to bulk-query Modrinth's
-   * update endpoint.
-   */
   private async sha512OfFile(absPath: string): Promise<string> {
     const bytes = await fs.readBytes(absPath)
     return createHash('sha512').update(bytes).digest('hex')
   }
 
-  /**
-   * First-connect bootstrap: when `manifest.installedMods` is empty
-   * (e.g. an existing server pre-dating auto-update tracking), hash
-   * every jar in `mods/` and ask Modrinth which ones it recognizes.
-   * Recognized jars are recorded as `source: 'modrinth'`, unrecognized
-   * as `source: 'url'`. The sha512 we record is always the on-disk
-   * hash — `/version_files/update` returns the *latest* matching
-   * version per hash, not the version we have installed, so we use it
-   * only to disambiguate source, never to record metadata. Version
-   * metadata is filled in by `installMods` on the next re-install.
-   *
-   * Idempotent: no-op when entries already exist. Also clears
-   * `lastModUpdateCheck` on the first bootstrap so the throttle
-   * doesn't suppress the very first update check.
-   */
   private async ensureModsTracked(mcVersion: string): Promise<void> {
     const manifest = await this.readManifest()
     if (manifest.installedMods && Object.keys(manifest.installedMods).length > 0) {
@@ -936,9 +649,7 @@ export class IntegratedHost implements HostProvider {
       try {
         const sha512 = await this.sha512OfFile(full)
         entries.push({ filename: entry, sha512 })
-      } catch {
-        // skip unreadable jars
-      }
+      } catch {}
     }
     if (entries.length === 0) return
 
@@ -951,10 +662,6 @@ export class IntegratedHost implements HostProvider {
       )
       modrinthHashes = new Set(latest.keys())
     } catch (err) {
-      // Network failure: every jar falls through to `source: 'url'`,
-      // which loses auto-update for these files until they're re-installed
-      // by `installMods`. Better than giving up on the manifest entirely.
-      // eslint-disable-next-line no-console
       console.warn(`mod tracking bootstrap failed: ${err}`)
     }
 
@@ -965,33 +672,17 @@ export class IntegratedHost implements HostProvider {
     }
 
     manifest.installedMods = installedMods
-    // Reset the throttle so the just-populated entries get checked. The
-    // upcoming `checkModUpdates` call will set `lastModUpdateCheck`
-    // itself (success or no-op).
     delete manifest.lastModUpdateCheck
     await this.writeManifest(manifest)
   }
 
-  /**
-   * Auto-update pass. Skips if the last check was within ONE_HOUR_MS,
-   * otherwise POSTs every Modrinth-sourced mod's sha512 to
-   * `/version_files/update` and downloads newer versions. Updates the
-   * manifest with new sha512 / version metadata + bumps
-   * `lastModUpdateCheck` to `now`, regardless of whether anything
-   * changed (so a no-op check still satisfies the throttle).
-   */
   private async checkModUpdates(mcVersion: string): Promise<void> {
     const manifest = await this.readManifest()
-
-    // Throttle: skip only when we have both a recent timestamp AND a
-    // populated installedMods map. Missing fields = the manifest's
-    // tracking state is incomplete (pre-feature install, partial write,
-    // etc.) — treat that as "never checked" and run.
     const hasMods =
       !!manifest.installedMods && Object.keys(manifest.installedMods).length > 0
     if (manifest.lastModUpdateCheck && hasMods) {
       const elapsed = Date.now() - new Date(manifest.lastModUpdateCheck).getTime()
-      if (elapsed < ONE_HOUR_MS) return
+      if (elapsed < 60 * 60 * 1000) return
     }
 
     const installedMods = manifest.installedMods ?? {}
@@ -999,8 +690,6 @@ export class IntegratedHost implements HostProvider {
       ([, info]) => info.source === 'modrinth' && info.sha512,
     )
     if (tracked.length === 0) {
-      // Nothing to check against — bump the timestamp so we don't loop
-      // on every connect when mods/ is empty or all entries are URL.
       manifest.lastModUpdateCheck = new Date().toISOString()
       await this.writeManifest(manifest)
       return
@@ -1014,8 +703,6 @@ export class IntegratedHost implements HostProvider {
         mcVersion,
       )
     } catch (err) {
-      // Don't bump the timestamp on failure — let the next connect retry.
-      // eslint-disable-next-line no-console
       console.warn(`mod update check failed: ${err}`)
       return
     }
@@ -1027,7 +714,7 @@ export class IntegratedHost implements HostProvider {
       const entry = hashToEntry.get(sha)
       if (!entry) continue
       const newFile = primaryFile(version)
-      if (newFile.hashes.sha512 === sha) continue // already current
+      if (newFile.hashes.sha512 === sha) continue
       this.logVerbose(
         `[integrated] mod update: ${entry.filename} ${entry.info.versionNumber ?? '?'} → ${version.version_number}`,
       )
@@ -1035,9 +722,7 @@ export class IntegratedHost implements HostProvider {
       if (newFile.filename !== entry.filename) {
         try {
           await fs.remove(pathJoin(modsDir, entry.filename))
-        } catch {
-          // ignore
-        }
+        } catch {}
       }
       delete next[entry.filename]
       next[newFile.filename] = {
@@ -1075,29 +760,17 @@ export class IntegratedHost implements HostProvider {
     }
   }
 
-  /** Resolved Minecraft server port — written to `server.properties` before startServer. */
   private serverPort: number | null = null
 
-  /**
-   * Compute the JSON `generator-settings` string for the configured
-   * world preset. Defaults to a void superflat with a single stone layer
-   * at the surface.
-   */
   private generatorSettings(): string {
     const w = this.config.world ?? 'void'
     let preset: { layers: Array<{ block: string; height: number }>; biome?: string }
     if (w === 'void') {
-      // The Minecraft "The Void" superflat preset. Vanilla MC
-      // automatically places a stone spawn platform with a single
-      // cobblestone block at the center when it sees a Void-biommed
-      // flat world — we don't need to encode the platform in the
-      // layers.
       preset = {
         layers: [{ block: 'minecraft:air', height: 1 }],
         biome: 'minecraft:the_void',
       }
     } else if (w === 'overworld') {
-      // Standard vanilla overworld.
       preset = {
         layers: [
           { block: 'minecraft:bedrock', height: 1 },
@@ -1112,15 +785,6 @@ export class IntegratedHost implements HostProvider {
     return JSON.stringify(preset)
   }
 
-  /**
-   * Write a minimal `server.properties` setting the world generator
-   * when `config.world` is provided. With `config.world` unset,
-   * Minecraft generates a fresh default overworld — we write nothing.
-   *
-   * Preserves any existing user-edited fields by reading first and
-   * overwriting just the keys we own. The server fills in defaults for
-   * any keys we don't set.
-   */
   private async writeServerProperties(): Promise<void> {
     if (this.serverPort === null && this.config.rcon?.enabled !== true && this.config.world === undefined) {
       return
@@ -1128,8 +792,6 @@ export class IntegratedHost implements HostProvider {
 
     const propsPath = pathJoin(this.serverDir, 'server.properties')
     const isFlat = this.config.world !== 'overworld'
-    // Owned keys we control. Anything else in server.properties is left
-    // alone — the user can edit it freely between runs.
     const owned = new Set([
       // World generator
       'level-type',
@@ -1157,11 +819,8 @@ export class IntegratedHost implements HostProvider {
     try {
       const existing = await fs.readText(propsPath)
       lines = existing.split('\n')
-    } catch {
-      // fresh
-    }
+    } catch {}
 
-    // Drop lines we own, then append our values at the end.
     lines = lines.filter((line) => {
       const key = line.split('=', 1)[0]?.trim()
       return !key || !owned.has(key)
@@ -1174,8 +833,6 @@ export class IntegratedHost implements HostProvider {
         lines.push(`generator-settings=${this.generatorSettings()}`)
       }
       lines.push(`level-name=world`)
-      // generate-structures is opt-out for void specifically — flat
-      // overworld still wants villages/dungeons etc. spawned in.
       if (worldName === 'void') {
         lines.push('generate-structures=false')
       }
@@ -1190,18 +847,13 @@ export class IntegratedHost implements HostProvider {
       lines.push(`rcon.password=${rcon.password ?? ''}`)
     }
 
-    // Always-on defaults. Dev-server UX: creative mode + flight, no
-    // spawn-protection near origin (so functions can build freely),
-    // generous render distance, full op-level for `/function`, no
-    // auto-pause when the player list empties.
     lines.push('gamemode=creative')
     lines.push('allow-flight=true')
     lines.push('spawn-protection=0')
     lines.push('view-distance=20')
     lines.push('function-permission-level=4')
     lines.push('pause-when-empty-seconds=0')
-    // MOTD includes the pack name when SandstoneConfig was wired
-    // through to the host; otherwise a generic message.
+
     const motd = this.config.sandstoneConfig?.name
       ? `Integrated ${this.config.sandstoneConfig.name} Sandstone Server`
       : 'Integrated Sandstone Server'
@@ -1210,21 +862,6 @@ export class IntegratedHost implements HostProvider {
     await fs.writeText(propsPath, lines.join('\n') + '\n')
   }
 
-  /**
-   * Download the latest Fabric installer jar from Fabric's Maven repo,
-   * run it with `java -jar installer.jar server -mcversion ...
-   * -downloadMinecraft` (no `-loader` — let the installer pick the
-   * latest stable for this MC version, which is fully backwards-
-   * compatible), then delete the installer. The installer produces
-   * `fabric-server-launch.jar` + libraries/ in `serverDir`.
-   *
-   * Captures the installer's stdout to learn which loader it picked and
-   * writes `sandstone_manifest.json` so future `connect()` calls can
-   * detect when a newer loader is available and re-install.
-   *
-   * Version resolution: parses `<latest>` from
-   * https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml.
-   */
   private async installFabricServer(latestLoader: string): Promise<void> {
     if (!this.resolvedMinecraftVersion) {
       throw new Error(
@@ -1238,7 +875,8 @@ export class IntegratedHost implements HostProvider {
     const metadataUrl =
       'https://maven.fabricmc.net/net/fabricmc/fabric-installer/maven-metadata.xml'
     const installerVersion = await fetchLatestVersion(metadataUrl)
-    const installerUrl = `https://maven.fabricmc.net/net/fabricmc/fabric-installer/${installerVersion}/fabric-installer-${installerVersion}.jar`
+    const installerUrl = 
+      `https://maven.fabricmc.net/net/fabricmc/fabric-installer/${installerVersion}/fabric-installer-${installerVersion}.jar`
 
     const installerPath = pathJoin(this.serverDir, `.fabric-installer-${installerVersion}.jar`)
     await downloadToFile(installerUrl, installerPath)
@@ -1255,13 +893,8 @@ export class IntegratedHost implements HostProvider {
         this.serverDir,
         '-downloadMinecraft',
       ]
-      // Fabric installer's `-snapshot` flag is required for any pre-release
-      // / snapshot / RC MC version. Without it, the installer rejects the
-      // version string.
       if (isSnapshot) args.push('-snapshot')
 
-      // Pipe stdout so we can scrape "Installing Fabric Loader X.Y.Z(MC)"
-      // to record what was actually picked.
       await new Promise<void>((resolve, reject) => {
         console.log('[integrated] running fabric server installer...')
         const proc = shellSpawn([this.java!.path, ...args], {
@@ -1288,10 +921,6 @@ export class IntegratedHost implements HostProvider {
               reject(new Error(`Fabric installer exited with code ${code}`))
               return
             }
-            // Parse "Installing Fabric Loader X.Y.Z(MC)" — installer prints
-            // this once near the top. We need the *picked* version, not the
-            // one we requested (we don't pass -loader so this is the
-            // installer's own choice).
             const match = stdoutBuf.match(
               /Installing Fabric Loader ([0-9]+\.[0-9]+\.[0-9]+)\(/,
             )
@@ -1311,17 +940,10 @@ export class IntegratedHost implements HostProvider {
     } finally {
       try {
         await fs.deleteFile(installerPath)
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
   }
 
-  /**
-   * Wipe the installer's outputs so the next `installFabricServer` call
-   * starts from a clean slate. Used when `sandstone_manifest.json` shows
-   * the installed loader is older than the current latest stable.
-   */
   private async clearFabricInstall(): Promise<void> {
     const targets = [
       '.fabric',
@@ -1338,26 +960,12 @@ export class IntegratedHost implements HostProvider {
     }
   }
 
-  /**
-   * Resolve and download the default + user-specified mods into
-   * `<serverDir>/mods/`. fabric-api is required and gates the rest of
-   * the install — if no fabric-api version exists for the resolved MC
-   * version, throws. Other defaults are best-effort (skipped if
-   * Modrinth has no matching version).
-   *
-   * Per-mod toggles default to enabled; set any to `false` in
-   * `config.mods` to skip. `fabric-api: false` is rejected up front.
-   */
   private async installMods(mcVersion: string): Promise<void> {
     const modsDir = pathJoin(this.serverDir, 'mods')
     await fs.ensureDir(modsDir)
     const cfg = this.config.mods ?? {}
     const enabled = (v: boolean | undefined) => v !== false
 
-    // Track every mod we install so auto-update can find them later.
-    // Modrinth-installed mods use the sha512 from the Modrinth version
-    // metadata (no extra disk read); URL-installed mods get hashed from
-    // disk after download.
     const manifest = await this.readManifest()
     const installedMods: Record<string, InstalledModInfo> = {
       ...(manifest.installedMods ?? {}),
@@ -1378,7 +986,6 @@ export class IntegratedHost implements HostProvider {
       installedMods[filename] = { source: 'url', sha512 }
     }
 
-    // Required gate: fabric-api.
     if (!enabled(cfg.fabricApi)) {
       throw new Error(
         'fabric-api is required for the integrated host — do not set mods.fabricApi=false',
@@ -1395,7 +1002,6 @@ export class IntegratedHost implements HostProvider {
       trackModrinth(version)
     }
 
-    // Best-effort defaults. Each maps config key → Modrinth slug.
     const optionalDefaults: Array<keyof IntegratedHostModsConfig> = [
       'packtest',
       'commandcrafter',
@@ -1421,8 +1027,6 @@ export class IntegratedHost implements HostProvider {
     let commandcrafterInstalled = false
     const unavailable: string[] = []
     for (const key of optionalDefaults) {
-      // Narrow cfg[key] to boolean | undefined — additionalMods is also
-      // under cfg with the same key prefix.
       const flag = cfg[key]
       if (typeof flag !== 'boolean' && flag !== undefined) continue
       if (!enabled(flag)) continue
@@ -1434,21 +1038,14 @@ export class IntegratedHost implements HostProvider {
       }
       const filename = primaryFileName(version)
       await downloadMod(version, pathJoin(modsDir, filename)).catch((err) => {
-        // eslint-disable-next-line no-console
-        console.error(`mod ${slug} download failed: ${err}`)
+        console.error(`[integrated] mod ${slug} download failed: ${err}`)
       })
       trackModrinth(version)
       if (key === 'commandcrafter') commandcrafterInstalled = true
     }
     if (unavailable.length > 0) {
-      // eslint-disable-next-line no-console
-      console.error(
-        `[integrated] mods with no version for MC ${mcVersion}: ${unavailable.join(', ')}`,
-      )
+      console.error(`[integrated] mods with no version for MC ${mcVersion}: ${unavailable.join(', ')}`)
     }
-
-    // commandcrafter pulls fabric-language-kotlin. MC-agnostic — use the
-    // project's latest version regardless of game_versions filter.
     if (commandcrafterInstalled) {
       const kotlin = await findModVersion('fabric-language-kotlin')
       if (kotlin) {
@@ -1457,8 +1054,6 @@ export class IntegratedHost implements HostProvider {
         trackModrinth(kotlin)
       }
     }
-
-    // User-specified extras.
     for (const extra of cfg.additionalMods ?? []) {
       if (extra.modrinthId) {
         const v = await findModVersion(extra.modrinthId, mcVersion)
@@ -1473,49 +1068,30 @@ export class IntegratedHost implements HostProvider {
         try {
           const sha512 = await this.sha512OfFile(pathJoin(modsDir, name))
           trackUrl(name, sha512)
-        } catch {
-          // Best-effort — skip tracking if hashing fails.
-        }
+        } catch {}
       }
     }
 
     manifest.installedMods = installedMods
-    // Mark the just-completed install as a recent update check so the
-    // auto-update pass on the same connect() doesn't redundantly POST
-    // /version_files/update for the files we already pulled latest.
     manifest.lastModUpdateCheck = new Date().toISOString()
     await this.writeManifest(manifest)
   }
 
-  /** Wipe `<serverDir>/mods/` so the next pass re-resolves from Modrinth. */
   private async clearMods(): Promise<void> {
     await fs.remove(pathJoin(this.serverDir, 'mods'), {
       recursive: true,
       force: true,
     })
   }
+}
 
-  }
-
-/** Factory used by the registry. */
 export function createIntegratedHost(config: IntegratedHostConfig): HostProvider {
   return new IntegratedHost(config)
 }
 
-/**
- * Fetch PrismLauncher's `net.fabricmc.fabric-loader/package.json` and
- * return the first entry of its `recommended` array (the latest stable
- * Fabric Loader for the current MC era). The Fabric installer doesn't
- * pin a default, so we read this to know whether the on-disk install is
- * stale.
- *
- * URL pattern: https://raw.githubusercontent.com/PrismLauncher/meta-launcher/master/net.fabricmc.fabric-loader/package.json
- */
 async function fetchLatestFabricLoader(): Promise<string> {
   const url =
     'https://raw.githubusercontent.com/PrismLauncher/meta-launcher/master/net.fabricmc.fabric-loader/package.json'
-  // github raw content — route through github.ts so `gh auth` and
-  // rate-limit handling kick in automatically.
   const json = JSON.parse(await ghFetchText(url)) as { recommended?: string[] }
   const first = json.recommended?.[0]
   if (!first) {
@@ -1524,11 +1100,6 @@ async function fetchLatestFabricLoader(): Promise<string> {
   return first
 }
 
-/**
- * Compare two semver-ish strings ("0.19.3", "0.16.5"). Returns < 0 if `a`
- * is older, > 0 if `a` is newer, 0 if equal. Doesn't handle pre-release
- * tags — sufficient for Fabric loader versions which use plain `MAJOR.MINOR.PATCH`.
- */
 function compareSemver(a: string, b: string): number {
   const [aMaj, aMin, aPatch] = a.split('.').map(Number)
   const [bMaj, bMin, bPatch] = b.split('.').map(Number)
@@ -1537,13 +1108,11 @@ function compareSemver(a: string, b: string): number {
   return (aPatch ?? 0) - (bPatch ?? 0)
 }
 
-/** Filename of the primary (or first) file in a Modrinth version. */
 function primaryFileName(version: ModrinthVersion): string {
   const primary = version.files.find((f) => f.primary)
   return (primary ?? version.files[0]).filename
 }
 
-/** Best-effort filename from a download URL's last path segment. */
 function basenameFromUrl(url: string): string {
   try {
     const u = new URL(url)
@@ -1554,13 +1123,8 @@ function basenameFromUrl(url: string): string {
   }
 }
 
-/**
- * Resolve a Promise that fulfills when a Node `ChildProcess` exits.
- * Mirrors Bun's `proc.exited` API for the spawn-from-`node:child_process`
- * path. If the process has already exited, resolves immediately.
- */
 function waitForExit(
-  child: import('node:child_process').ChildProcess,
+  child: ChildProcess,
 ): Promise<number | null> {
   if (child.exitCode !== null || child.signalCode !== null) {
     return Promise.resolve(child.exitCode)
@@ -1570,11 +1134,6 @@ function waitForExit(
   })
 }
 
-/**
- * Fetch a Maven `maven-metadata.xml` and return the `<latest>` tag's value,
- * falling back to `<release>` if `<latest>` is absent. Throws on fetch or
- * parse failure.
- */
 async function fetchLatestVersion(metadataUrl: string): Promise<string> {
   const resp = await fetch(metadataUrl)
   if (!resp.ok) {
@@ -1588,11 +1147,6 @@ async function fetchLatestVersion(metadataUrl: string): Promise<string> {
   throw new Error(`No <latest> or <release> tag in ${metadataUrl}`)
 }
 
-/**
- * Stream a URL's response body to a file path, rejecting on non-2xx.
- * Uses Bun's native `Bun.write(dest, response)` which streams from a
- * Response without buffering the full payload into memory.
- */
 async function downloadToFile(url: string, dest: string): Promise<void> {
   const resp = await fetch(url)
   if (!resp.ok) {

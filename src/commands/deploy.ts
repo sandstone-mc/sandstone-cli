@@ -18,6 +18,7 @@ export interface DeployInput {
   daemon: {
     writeFileStream: DeployWriteStream
     executeRawCommand?: (params: { command: string }) => Promise<unknown>
+    reloadResources?: () => Promise<void>
   }
   projectRoot: string
   outputDir?: string
@@ -315,19 +316,12 @@ export async function deployDatapack(input: DeployInput): Promise<DeployResult> 
 
   const anythingChanged = !mainInfo.unchanged || deps.some((d) => !d.unchanged)
   let reloaded = false
-  if (anythingChanged && input.daemon.executeRawCommand) {
-    const resolvedPackName = input.packName ?? sandstoneConfig!.name!
-    await input.daemon
-      .executeRawCommand({ command: `say [Sandstone @ ${resolvedPackName}] Updated pack(s) deployed, reloading...` })
-      .catch(() => {})
-    await input.daemon.executeRawCommand({ command: 'reload' }).catch((err) => {
+  if (anythingChanged && input.daemon.reloadResources) {
+    await input.daemon.reloadResources().catch((err) => {
       throw new Error(
         `deployed but reload failed: ${err instanceof Error ? err.message : String(err)}`,
       )
     })
-    await input.daemon
-      .executeRawCommand({ command: `say [Sandstone @ ${resolvedPackName}] Reload Finished!` })
-      .catch(() => {})
     reloaded = true
   }
 

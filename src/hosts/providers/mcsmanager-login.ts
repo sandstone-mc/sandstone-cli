@@ -1,26 +1,8 @@
 import { io as ioClient, type Socket } from 'socket.io-client'
 
 import { HostAuthError, NotConnectedError } from '../errors.js'
-import { Capability, type HostCapabilities, type HostProvider, type LogChunkHandler, type LogSubscription, type McsManagerHostConfig, type ServerPath } from '../types.js'
-
-/**
- * MCSManager provider — web-panel Login API variant. Cookie + session-
- * token auth via `/api/auth/login`. Files via the chunked-upload REST
- * protocol; logs and commands via a `socket.io-client` connection to
- * the panel's daemon WS (port 24444 by default).
- *
- * NOT the API-key variant — MCSManager also exposes an API-key style
- * protocol that a separate provider will implement later. The `-login`
- * suffix here exists to keep that future file from needing to rename
- * this one.
- *
- * Direct port of `.temp/mcsmanager-login-deploy.ts`. Differences from the
- * legacy script:
- *  - No `.env` writes. Callers persist the session themselves if needed.
- *  - Auth state is per-instance (the legacy script used module globals).
- *  - `executeRawCommand` buffers a brief post-emit window of stdout and
- *    returns it; matches RCON's "give back what the server said" contract.
- */
+import type { McsManagerHostConfig, HostCapabilities, HostProvider, HostLogLine, HostLogHandler, LogSubscription } from '../types.js'
+import { Capability } from '../types.js'
 
 interface FileUploadResponse {
   status: number
@@ -59,19 +41,11 @@ export class McsManagerLoginHost implements HostProvider {
   private socket: Socket | null = null
   private connected = false
 
-  // Track every attachLog subscription so disconnect can clean up listeners.
   private stdoutSubscriptions: Array<{
     handler: (packet: { data?: { text?: string } }) => void
     socket: Socket
   }> = []
 
-  /**
-   * Set of liveness-loss listeners. Fired when the panel's daemon WS
-   * drops or fails to handshake — NOT for our own `disconnect()`
-   * call. The daemon subscribes via {@link HostProvider.onDisconnected}
-   * to detect when a composite member has gone away and trigger a
-   * coordinated shutdown.
-   */
   disconnectHandlers: Set<(reason: string) => void> = new Set<(reason: string) => void>()
 
   constructor(config: McsManagerHostConfig) {
@@ -80,26 +54,15 @@ export class McsManagerLoginHost implements HostProvider {
 
   async connect(): Promise<void> {
     if (this.connected) return
-    // Seed session from env if present; otherwise force a login.
     this.cookie = process.env.MCS_MANAGER_COOKIE ?? ''
     this.token = process.env.MCS_MANAGER_TOKEN ?? ''
     await this.login()
     this.connected = true
-    // RCON target is the panel-managed daemon's local socket. We
-    // can't use the shared `attachRconIfConfigured` here because
-    // mcsmanager's RCON host string is a constructor-time concern
-    // (`config.endpoint`) and `attachRconIfConfigured` would bind it
-    // to `config.host`. For now we leave the legacy in-place RCON
-    // path — `executeRawCommand` is rarely used against panel
-    // sockets.
   }
 
   async disconnect(): Promise<void> {
     if (!this.connected) return
-    // Detach the disconnect-listener set BEFORE killing so the close
-    // event fired by our own disconnect doesn't trigger our own handler.
     this.disconnectHandlers.clear()
-    // Drop all attachLog listeners on their respective sockets.
     for (const sub of this.stdoutSubscriptions) {
       sub.socket.off('instance/stdout', sub.handler)
     }
@@ -115,19 +78,10 @@ export class McsManagerLoginHost implements HostProvider {
     return this.connected
   }
 
-  /**
-   * Whether the panel-managed MC server is reachable — true while
-   * we have a live authenticated session with the panel.
-   */
   isRunning(): boolean {
     return this.connected && this.socket?.connected === true
   }
 
-  /**
-   * Subscribe to panel-side WS liveness loss. Returns an unsubscribe
-   * function. The daemon uses this to detect when a composite member
-   * has gone away and trigger a coordinated shutdown.
-   */
   onDisconnected(handler: (reason: string) => void): () => void {
     this.disconnectHandlers.add(handler)
     return () => {
@@ -135,7 +89,7 @@ export class McsManagerLoginHost implements HostProvider {
     }
   }
 
-  async readFile(path: ServerPath): Promise<Buffer> {
+  async readFile(path: string): Promise<Buffer> {
     this.requireConnected('mcsmanager-login')
     const dl = await this.api<FileDownloadResponse>('files/download', { file_name: path })
     if (dl.status !== 200 || !dl.data?.password) {
@@ -152,17 +106,7 @@ export class McsManagerLoginHost implements HostProvider {
     return Buffer.from(ab)
   }
 
-  /**
-   * Streaming read. Uses the same `files/download` handshake as the
-   * buffering variant, then returns the HTTP response body directly —
-   * `fetch()` already exposes the body as a `ReadableStream<Uint8Array>`
-   * so chunks flow as the panel's download endpoint ships them.
-   *
-   * Size comes from `Content-Length` when the panel sets it; the
-   * daemon's dispatch surface ignores `undefined` so callers that
-   * need progress can fall back to byte counting.
-   */
-  async readFileStream(path: ServerPath): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }> {
+  async readFileStream(path: string): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }> {
     this.requireConnected('mcsmanager-login')
     const dl = await this.api<FileDownloadResponse>('files/download', { file_name: path })
     if (dl.status !== 200 || !dl.data?.password) {
@@ -183,7 +127,7 @@ export class McsManagerLoginHost implements HostProvider {
     return { stream: resp.body as ReadableStream<Uint8Array>, size }
   }
 
-  async writeFile(path: ServerPath, data: Buffer | string): Promise<void> {
+  async writeFile(path: string, data: Buffer | string): Promise<void> {
     this.requireConnected('mcsmanager-login')
     const buffer = typeof data === 'string' ? Buffer.from(data) : data
     const filename = path.replace(/^.*\//, '')
@@ -207,24 +151,7 @@ export class McsManagerLoginHost implements HostProvider {
     await this.uploadChunks(meta.data.id, port, buffer)
   }
 
-  /**
-   * Streaming write. Two paths:
-   *
-   *  - **Size known** (`opts.size !== undefined`): call `upload-new`
-   *    up front with the declared size, then ship each arriving
-   *    chunk as an `upload-piece` request. True end-to-end
-   *    streaming — nothing is buffered beyond the per-chunk upload
-   *    in flight.
-   *
-   *  - **Size unknown**: MCSManager's chunked-upload protocol
-   *    requires the total size up front in `upload-new`, which the
-   *    streaming shape can't provide. Accept the WritableStream API
-   *    (consumers see the same one-chunk-at-a-time flow as every
-   *    other host) but buffer internally until `close()` fires, then
-   *    run the existing chunked upload. Memory cost is the file
-   *    size — bounded by the host's available heap.
-   */
-  async writeFileStream(path: ServerPath, opts?: { size?: number }): Promise<WritableStream<Uint8Array>> {
+  async writeFileStream(path: string, opts?: { size?: number }): Promise<WritableStream<Uint8Array>> {
     this.requireConnected('mcsmanager-login')
     const filename = path.replace(/^.*\//, '')
     const uploadDir = path.replace(/[^/]+$/, '')
@@ -236,11 +163,6 @@ export class McsManagerLoginHost implements HostProvider {
     const uploadPath = uploadStart.data.password
 
     if (opts?.size !== undefined) {
-      // True streaming — register the upload up front, then coalesce
-      // arriving chunks into PIECE_SIZE pieces and ship each via
-      // `upload-piece`. Matches the chunked-upload protocol the
-      // panel expects (the buffered `writeFile` path uses the same
-      // size in `uploadChunks`).
       const meta = await this.api<UploadNewResponse>(
         'upload-new',
         {
@@ -253,8 +175,6 @@ export class McsManagerLoginHost implements HostProvider {
       )
       const uploadId = meta.data.id
       const expectedSize = opts.size
-      // Same chunk size as the buffered `uploadChunks` loop — keeps
-      // the panel-side behaviour consistent for both code paths.
       const PIECE_SIZE = 2_097_374
       let offset = 0
       let pending: Uint8Array[] = []
@@ -264,8 +184,7 @@ export class McsManagerLoginHost implements HostProvider {
         async write(chunk) {
           pending.push(chunk)
           pendingBytes += chunk.byteLength
-          // Drain full pieces; keep the tail (< PIECE_SIZE) for
-          // the next write() / close().
+
           while (pendingBytes >= PIECE_SIZE) {
             const merged = Buffer.concat(pending, pendingBytes)
             const take = merged.subarray(0, PIECE_SIZE)
@@ -315,13 +234,12 @@ export class McsManagerLoginHost implements HostProvider {
         await host.uploadChunks(meta.data.id, port, buffer)
       },
       abort() {
-        // Drop the buffered chunks — consumer cancelled before close.
         chunks.length = 0
       },
     })
   }
 
-  async attachLog(onChunk: LogChunkHandler): Promise<LogSubscription> {
+  async attachLog(onChunk: HostLogHandler): Promise<LogSubscription> {
     this.requireConnected('mcsmanager-login')
     const sock = await this.openDaemonSocket()
     let buffer = ''
@@ -334,7 +252,10 @@ export class McsManagerLoginHost implements HostProvider {
       buffer += text
       const lines = buffer.split('\n')
       buffer = lines.pop() ?? ''
-      if (lines.length > 0) onChunk(lines)
+      if (lines.length > 0) {
+        const chunks: HostLogLine[] = lines.map((line) => ({ line, ts: Date.now(), stream: 'stdout' }))
+        onChunk(chunks)
+      }
     }
 
     sock.on('instance/stdout', handler)
@@ -350,13 +271,14 @@ export class McsManagerLoginHost implements HostProvider {
           (s) => s.handler !== handler,
         )
         if (buffer.length > 0) {
-          onChunk([buffer])
+          onChunk([{ line: buffer, ts: Date.now(), stream: 'stdout' }])
           buffer = ''
         }
       },
     }
   }
 
+  // TODO: :concern:, investigate actual McsManager API again at some point
   async executeRawCommand(command: string): Promise<string> {
     this.requireConnected('mcsmanager-login')
     const sock = await this.openDaemonSocket()
@@ -367,24 +289,15 @@ export class McsManagerLoginHost implements HostProvider {
     }
     sock.on('instance/stdout', handler)
     sock.emit('stream/input', { data: { command } })
-    // Buffer ~1.5s of post-emit stdout. Fabric doesn't echo mc console
-    // commands, but MCSManager's daemon forwards `say`/`tellraw` and
-    // command outputs back as stdout events.
     await new Promise((r) => setTimeout(r, 1500))
     sock.off('instance/stdout', handler)
     return captured.trim()
   }
 
-  // ---------------------------------------------------------------------
-
   private requireConnected(label: string): void {
     if (!this.connected) throw new NotConnectedError(label)
   }
 
-  /**
-   * Login via the panel's `/api/auth/login`. Throws HostAuthError on
-   * failure. Mutates `cookie` and `token` on success.
-   */
   private async login(): Promise<void> {
     const username =
       this.config.username ?? process.env.MCS_MANAGER_USERNAME
@@ -529,11 +442,6 @@ export class McsManagerLoginHost implements HostProvider {
     }
   }
 
-  /**
-   * Single-piece `upload-piece` request. Used by both the streaming
-   * `writeFileStream` (one call per arriving chunk) and the
-   * buffered variant (chunked loop in {@link uploadChunks}).
-   */
   private async uploadChunk(
     uploadId: string,
     port: `${number}`,
@@ -552,10 +460,6 @@ export class McsManagerLoginHost implements HostProvider {
     )
   }
 
-  /**
-   * Open the daemon WebSocket if not already open, authenticate via
-   * `stream/auth`, and return the connected socket.
-   */
   private async openDaemonSocket(): Promise<Socket> {
     if (this.socket?.connected) return this.socket
     const channel = await this.api<StreamChannelResponse>(
@@ -575,11 +479,6 @@ export class McsManagerLoginHost implements HostProvider {
       transports: ['websocket'],
       path: (channel.data.prefix ? channel.data.prefix.replace(/\/$/, '') : '') + '/socket.io',
     })
-
-    // Fire the onDisconnected handlers whenever the panel's WS dies
-    // or the initial handshake fails. The daemon's composite-shutdown
-    // path subscribes to this so an `[ftp, mcsmanager-login]`
-    // composite doesn't keep trying to dispatch into a dead socket.
     sock.on('disconnect', (reason: string) => {
       for (const h of this.disconnectHandlers) h(`MCSManager daemon disconnected: ${reason}`)
     })
@@ -608,11 +507,6 @@ export class McsManagerLoginHost implements HostProvider {
   }
 }
 
-// Reference for the panel's response contracts is now expressed via the
-// typed `FileDownloadResponse` / `FileUploadResponse` / etc. interfaces at
-// the top of the file.
-
-/** Factory used by the registry. */
 export function createMcsManagerHost(config: McsManagerHostConfig): HostProvider {
   return new McsManagerLoginHost(config)
 }

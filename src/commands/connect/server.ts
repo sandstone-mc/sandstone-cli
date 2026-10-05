@@ -27,11 +27,14 @@ import {
 import { capabilitiesToRecord } from '../../hosts/types.js'
 import { RpcHandlerError, ShutdownSignal, Dispatcher, dispatch, narrowMethod, type DispatcherContext } from './dispatch.js'
 import type { ActiveConfig } from './active-config.js'
-import { type RebuildState, type WatcherStatus, notification } from './rpc.js'
-import { SubscriptionRegistry } from './subscriptions.js'
+import type { RebuildState, TestState, WatcherStatus, RpcEventName, RpcEventMap, LogLineEntry } from './rpc.js'
+import { notification } from './rpc.js'
+import { SubscriptionRegistry, WaitLogSubscriptionRegistry } from './subscriptions.js'
+import { LogMatcher } from './wait-log.js'
 import { StreamRegistry } from './streams.js'
 import { encodeRpc, decodeStreamChunk, streamIdHex, STREAM_MAGIC } from './codec.js'
 import type { HostProvider } from '../../hosts/types.js'
+import type { SandstoneConfig } from 'sandstone'
 
 export interface WsData {
   secret: string
@@ -39,29 +42,16 @@ export interface WsData {
 
 export interface SessionContext {
   host: HostProvider
-  /** Owns subscriptions for THIS ws; cleared on disconnect. */
   subscriptions: Set<string>
-  /** Per-subscription log line coalescer state. The wire `log` event
-   *  carries the subscriptionId so the client can route the batch to the
-   *  right `onLines` callback — multiple subscriptions in one session
-   *  (e.g. attachLog + attachLogs) must stay separated, even within the
-   *  same coalescer window. */
-  pendingBySub: Map<string, string[]>
+  pendingBySub: Map<string, LogLineEntry[]>
   flushTimerBySub: Map<string, ReturnType<typeof setTimeout>>
-  /** True after `daemonShutdown` was sent — stops accepting requests. */
   shuttingDown: boolean
-  /**
-   * One dispatcher per WS session, constructed in `open()`. Reused
-   * across every message on this session so handlers don't rebuild
-   * the dispatch internals on every call.
-   */
   dispatcher: Dispatcher
 }
 
 /** Max WS payload size. */
 const MAX_PAYLOAD = 128 * 1024 * 1024
 
-/** Coalesce log lines across ≤50ms windows; also cap batch size. */
 const LOG_FLUSH_MS = 50
 const LOG_MAX_BATCH = 64
 
@@ -72,31 +62,19 @@ export interface ServerOptions {
   bind: string
   /** Port to bind. `0` lets the OS pick a free port. */
   port: number
-  /** Invoked when the first client sends `shutdown` RPC. */
   onShutdown: () => Promise<void>
-  /** Invoked when any WS session closes. */
   onWsClose?: (ws: ServerWebSocket<WsData>) => void
-  /**
-   * Live `sandstone.config.ts` `saveConfig` state. Seeded by the daemon at boot from
-   * disk (`loadActiveConfigFromDisk`) and refreshed whenever the
-   * watcher pushes a new snapshot via `publishConfig`.
-   *
-   * `undefined` only when the daemon was started without a project
-   * root (unusual; handlers surface that as `NotConnected`).
-   */
   getActiveConfig?: () => ActiveConfig | undefined
   setActiveConfig?: (cfg: ActiveConfig) => void
-  /**
-   * Snapshot read of the latest build state the watcher pushed via
-   * `publishRebuild`. `undefined` until the first push.
-   */
   getRebuildState?: () => RebuildState | undefined
   setRebuildState?: (state: RebuildState) => void
+  getTestState?: () => TestState | undefined
+  setTestState?: (state: TestState) => void
   getWatcherStatus?: () => WatcherStatus | null
   setWatcherStatus?: (status: WatcherStatus, ws: Bun.ServerWebSocket<WsData> | undefined) => void
   getExpectedShutdown?: () => boolean
-  /** Append log entries to one of the daemon's bounded buffers. */
-  appendLogLines?: (entries: { line: string; ts: number }[], target: 'build' | 'test' | 'server') => void
+  getFullConfig?: () => SandstoneConfig | undefined
+  appendLogLines?: (entries: LogLineEntry[], target: 'build' | 'test' | 'server') => void
   readLogBuffer?: (target: 'build' | 'test' | 'server', opts?: {
     tail?: number | null
     maxLines?: number | null
@@ -117,17 +95,18 @@ export interface RunningServer {
   url: string
   port: number
   server: ReturnType<typeof Bun.serve>
-  /** Gracefully stop. Returns when all handlers have exited. */
   stop(): Promise<void>
-  broadcast(eventName: string, data: unknown): void
+  broadcast<K extends RpcEventName>(eventName: K, data: RpcEventMap[K]): void
   notifyResourceUpdated(uri: string): void
 }
 
 export function startServer(opts: ServerOptions): RunningServer {
   const subscriptions = new SubscriptionRegistry()
+  const waitLogSubs = new WaitLogSubscriptionRegistry()
   const streams = new StreamRegistry()
   const startedAt = Date.now()
   const sessions = new Map<ServerWebSocket<WsData>, SessionContext>()
+  const logMatcher = opts.host.attachLog ? new LogMatcher(opts.host.attachLog.bind(opts.host)) : null
 
   const notifyAll = (uri: string) => {
     const envelope = encodeRpc(notification('notifications/resources/updated', { uri }))
@@ -136,7 +115,7 @@ export function startServer(opts: ServerOptions): RunningServer {
     }
   }
 
-  function broadcast(eventName: string, data: unknown): void {
+  function broadcast<K extends RpcEventName>(eventName: K, data: RpcEventMap[K]): void {
     const envelope = encodeRpc(event(eventName, data))
     const isShutdown = eventName === 'daemonShutdown'
     for (const [ws, ctx] of sessions) {
@@ -162,6 +141,8 @@ export function startServer(opts: ServerOptions): RunningServer {
       const dispatchCtx: DispatcherContext = {
         host: opts.host,
         subscriptions,
+        waitLogSubscriptions: waitLogSubs,
+        logMatcher: logMatcher ?? new LogMatcher(async () => { throw new Error('Host does not support attachLog') }),
         ws,
         streams,
         pushLog: (lines, subscriptionId) => pushLog(ctx, ws, subscriptionId, lines),
@@ -171,6 +152,7 @@ export function startServer(opts: ServerOptions): RunningServer {
         getRebuildState: opts.getRebuildState,
         setRebuildState: opts.setRebuildState,
         getExpectedShutdown: opts.getExpectedShutdown,
+        getFullConfig: opts.getFullConfig,
         getWatcherStatus: opts.getWatcherStatus,
         setWatcherStatus: opts.setWatcherStatus,
         appendLogLines: opts.appendLogLines,
@@ -327,6 +309,7 @@ export function startServer(opts: ServerOptions): RunningServer {
       for (const timer of ctx.flushTimerBySub.values()) clearTimeout(timer)
       ctx.flushTimerBySub.clear()
       await subscriptions.dropAllForWs(ws)
+      await waitLogSubs.dropAllForWs(ws)
       // Detects watcher disconnects and flips `connected: false` on the cached `WatcherStatus`.
       opts.onWsClose?.(ws)
       streams.closeAll(new Error('ws session closed'))
@@ -378,7 +361,7 @@ export function startServer(opts: ServerOptions): RunningServer {
   }
 }
 
-function pushLog(ctx: SessionContext, ws: ServerWebSocket<WsData>, subscriptionId: string, lines: string[]): void {
+function pushLog(ctx: SessionContext, ws: ServerWebSocket<WsData>, subscriptionId: string, lines: LogLineEntry[]): void {
   let pending = ctx.pendingBySub.get(subscriptionId)
   if (!pending) {
     pending = []

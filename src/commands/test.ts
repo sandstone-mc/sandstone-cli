@@ -1,78 +1,110 @@
-/**
- * `sand test` — run GameTests on the configured server and parse failures
- * from the server log.
- *
- * Behavior:
- *  - Connects through the same machinery as `sand run`: prefers a live
- *    `sand connect` daemon (WS), falls back to direct-mode host bootstrap.
- *  - Sends exactly one console command: `test run *:*`.
- *  - **Before** sending the command, attaches to the server log so every
- *    line the server emits is captured. While lines stream in, toggles a
- *    `collecting` flag on each occurrence of `Running test environment …`
- *    (enter) and `Game Test complete!` (exit). Between those two markers
- *    the tool runs every line through `parseFailureLog` (exported from
- *    `sandstone/test`) and accumulates the parsed failures.
- *  - Loads `<project>/.sandstone/tests.json` to learn each registered
- *    test's description + optional flag. Renders one line per test
- *    using parsed failure data (or absence of it) so passing tests are
- *    visible too.
- *
- * Exit codes:
- *  - 0 — no required failures (either no failures at all, or only
- *    optional ones).
- *  - 1 — at least one required failure, or the run did not see a
- *    closing `Game Test complete!`.
- *  - 2 — argument / connection error (mirrors `sand run`).
- */
-
 import path, { join, resolve } from 'path'
-import { connect as openClient } from './connect/client.js'
+import { initTestLogger, logInfo } from '../ui/logger.js'
+import { readdir, unlink } from 'fs/promises'
+import { subscribe } from '@parcel/watcher'
+import { connect as openClient, type Client } from './connect/client.js'
 import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
 import { BootstrapError, bootstrapHost } from './connect/bootstrap.js'
 import { KNOWN_HOST_TYPES } from '../hosts/types.js'
-import type { HostProvider, HostType, LogChunkHandler, LogSubscription } from '../hosts/types.js'
+import type { HostProvider, HostType, HostLogHandler, LogSubscription } from '../hosts/types.js'
 import { DEFAULT_HOST_TYPE } from './connect/index.js'
 import { parseHostConfig } from './connect/host-config.js'
-import { parseFailureLog, type ParsedFailureLog } from 'sandstone/test'
-import { stripMinecraftPrefix } from './run.js'
+import { parseFailureLog, type ParsedFailureLog, type LogExtra } from 'sandstone/test'
 import { printSplash } from '../utils/index.js'
 import chalk from 'chalk-template'
+import { formatSnbt } from 'sandstone/test'
+
+export type TestEvent = (
+  {
+    event: 'status',
+    message: string,
+    type?: 'daemon_connected' | 'host_bootstrapping' | 'tests_running' | 'server_stopping' | 'tests_cancelled' | (string & {}),
+    url?: string,
+    host_type?: string,
+  } | {
+    event: 'error',
+    message: string,
+  } | {
+    event: 'test_log',
+    message: string,
+    level: string,
+    trace?: string | number,
+    server_trace?: ErrorTrace,
+    build_trace?: ErrorTrace,
+    debug?: true,
+    debug_trace?: { values?: DebugTraceValue[] },
+  } | {
+    event: 'test_result',
+    name: string,
+    description?: string,
+    passed: boolean,
+    optional: boolean,
+    ticks_elapsed: number,
+    error?: {
+      message: string,
+      position: [number, number, number],
+      server_trace: ErrorTrace,
+      build_trace?: ErrorTrace,
+    },
+    source_file?: string,
+  } | {
+    event: 'server_log',
+    line: string,
+    source?: string,
+    level?: string,
+  } | {
+    event: 'summary',
+    total: number,
+    pass: number,
+    fail: number,
+    required_count: number,
+    optional_count: number,
+    elapsed_ms: number,
+    file_count: number,
+  }
+)
+
+export type TestEventSink = (event: TestEvent) => void
 
 export interface TestCommandOptions {
   hostType?: string
   hostConfig?: string
   hostConfigFile?: string
-  /** `--path <path>` (project root). */
   path: string
+  /** `--json`: emit one minified JSON object per event (status, error,
+   *  per-test, warning, summary) on stdout instead of formatted+colored
+   *  text. Suppresses the splash banner. */
+  json?: boolean
 }
 
 const TRIGGER_PREFIX = 'Running test environment'
 const COMPLETE_PREFIX = 'Game Test complete!'
 const TEST_COMMAND = 'test run *:*'
+const LOG_PREFIX_RE = /^\[\d{2}:\d{2}:\d{2}\] \[([^\]]+)\/(\w+)\]: (.*)$/
+const TEST_LOG_RE = /%test-log%(.*?)%\/test-log%/
+const RCON_START_ECHO_RE =
+  /^System chat: \[Rcon: Starting environment [a-z0-9\-_]+:[a-z0-9\-_]+ batch \d+\]$/
 
 interface TestEntry {
   name: string
   description?: string
   optional?: boolean
-  /** Source file where `Test.create(...)` was invoked. Lets `sand test`
-   * report an accurate "Ran M tests across N files" count without
-   * inferring files from the `throwables` record (which only contains
-   * fallable tests). */
   sourceFile?: string
+  sourceLine?: number
+  sourceColumn?: number
 }
 
 interface ThrowableEntry {
-  trace?: { file?: string; line?: number; column?: number; name?: string }
+  trace?: ErrorTrace
   command?: string
   line?: number
 }
 
 interface TestsManifest {
   tests: TestEntry[]
-  /** Keyed by `${namespace}:${name}@${command}:${sourceLine}` as
-   *  emitted by the build step's `throwableStack`. Lets us link a
-   *  runtime failure to the user source line that produced it. */
+  /** Keyed by `${namespace}:${name}@${command}:${sourceLine}` */
   throwables: Record<string, ThrowableEntry>
+  log_traces: Record<`${number}`, { server_trace: ErrorTrace; build_trace?: ErrorTrace; extras?: LogExtra[] }>
 }
 
 async function loadTestsManifest(projectRoot: string): Promise<TestsManifest | null> {
@@ -84,70 +116,240 @@ async function loadTestsManifest(projectRoot: string): Promise<TestsManifest | n
     return null
   }
   try {
-    const parsed = JSON.parse(text) as { tests?: unknown; throwables?: unknown }
+    const parsed = JSON.parse(text) as { tests?: unknown; throwables?: unknown; log_traces?: unknown }
     const raw = Array.isArray(parsed.tests) ? parsed.tests : []
     const entries: TestEntry[] = []
     for (const item of raw) {
-      if (typeof item === 'string') {
-        entries.push({ name: item })
-      } else if (item && typeof item === 'object' && typeof (item as { name?: unknown }).name === 'string') {
-        const e = item as { name: string; description?: unknown; optional?: unknown }
-        entries.push({
-          name: e.name,
-          description: typeof e.description === 'string' ? e.description : undefined,
-          optional: typeof e.optional === 'boolean' ? e.optional : undefined,
-        })
-      }
+      const e = item as { name: string; description?: unknown; optional?: unknown; sourceFile?: unknown; sourceLine?: unknown; sourceColumn?: unknown }
+      const sourceFile = typeof e.sourceFile === 'string' ? e.sourceFile : undefined
+      entries.push({
+        name: e.name,
+        description: typeof e.description === 'string' ? e.description : undefined,
+        optional: typeof e.optional === 'boolean' ? e.optional : undefined,
+        ...(sourceFile !== undefined ? {
+          sourceFile,
+          sourceLine: typeof e.sourceLine === 'number' ? e.sourceLine : 0,
+          sourceColumn: typeof e.sourceColumn === 'number' ? e.sourceColumn : 0,
+        } : {}),
+      })
     }
     const throwables: Record<string, ThrowableEntry> =
       parsed.throwables && typeof parsed.throwables === 'object'
         ? (parsed.throwables as Record<string, ThrowableEntry>)
         : {}
-    return { tests: entries, throwables }
+    const log_traces: TestsManifest['log_traces'] =
+      parsed.log_traces && typeof parsed.log_traces === 'object'
+        ? (parsed.log_traces as TestsManifest['log_traces'])
+        : {}
+    return { tests: entries, throwables, log_traces }
   } catch {
     return null
   }
 }
 
-/** Cyan `[test]`-prefixed status line for any lifecycle event the
- *  user might want to see. Centralized so the visual style stays
- *  consistent across the command's phases. */
-function logStatus(message: string): void {
-  console.log(chalk`{cyan [test]} ${message}`)
+function emitStatus(
+  message: string,
+  onEvent: TestEventSink,
+  type?: string,
+  fields?: Record<string, unknown>,
+): void {
+  onEvent({
+    event: 'status',
+    message,
+    ...(type !== undefined ? { type } : {}),
+    ...(fields ?? {}),
+  } as TestEvent)
 }
 
-export async function testCommand(opts: TestCommandOptions): Promise<void> {
-  const projectRoot = resolve(opts.path)
+function emitError(message: string, onEvent: TestEventSink): void {
+  onEvent({ event: 'error', message })
+}
 
-  printSplash()
+export function formatDebugTraceValues(
+  values: DebugTraceValue[],
+  extras: LogExtra[] | undefined,
+  keyword: string,
+): string {
+  if (extras === undefined || extras.length === 0) return ''
 
-  // Load the test manifest before doing any host work — without it we
-  // can't tell passing tests from missing ones, so the command is
-  // meaningless.
-  const manifest = await loadTestsManifest(projectRoot)
-  if (!manifest) {
-    console.error(
-      chalk`{red Error:} Test manifest not found. Run {gray \`sand build --test\`} to generate tests, then retry.`,
-    )
-    process.exit(2)
+  const pad = ' '.repeat(Math.max(0, keyword.length - 'ext'.length))
+  const bulletPad = pad + ' '
+  const lines = [chalk`${pad}ext{gray :}`]
+
+  for (let i = 0; i < extras.length; i++) {
+    const extra = extras[i]!
+    const parsed = values[i + 1]
+    let valueRendered: string
+    if (parsed?.snbt !== undefined) {
+      valueRendered = formatSnbt(parsed.snbt)
+    } else if (parsed?.result !== undefined) {
+      valueRendered = chalk`{green ${parsed.result}}`
+    } else {
+      valueRendered = '?'
+    }
+    lines.push(chalk`${bulletPad}{gray - }${extra.name}{gray :} ${valueRendered}{gray ,}`)
+  }
+  lines.push('')
+  return lines.join('\n')
+}
+
+export function emitTestLog(
+  payload: Record<string, unknown>,
+  debug: Record<string, unknown> | undefined,
+  extras: LogExtra[] | undefined,
+  onEvent: TestEventSink,
+): void {
+  const merged: Record<string, unknown> = { ...payload, debug: true }
+  if (debug !== undefined) merged.debug_trace = debug
+  onEvent({ event: 'test_log', ...merged } as TestEvent)
+}
+
+export function flushPendingLogs(state: CollectionState, onEvent: TestEventSink): void {
+  for (const [, pending] of state.pendingLogs) {
+    emitTestLog(pending.payload, undefined, undefined, onEvent)
+  }
+  state.pendingLogs.clear()
+}
+
+export interface DebugTraceValue {
+  command: string
+  snbt?: string
+  result?: string
+}
+
+const DEBUG_TRACE_C_RE = /^\s*\[C\]\s+(.+)$/
+const DEBUG_TRACE_M_RE = /^\s*\[M]\s+.*has the following contents:\s*(.+)$/
+const DEBUG_TRACE_R_RE = /^\s*\[R\s*=\s*(.+?)\s*\]\s+(.+)$/
+
+export function parseDebugTrace(body: string): DebugTraceValue[] {
+  const out: DebugTraceValue[] = []
+  let current: DebugTraceValue | undefined
+  for (const line of body.split('\n')) {
+    const cMatch = line.match(DEBUG_TRACE_C_RE)
+    if (cMatch !== null) {
+      current = { command: cMatch[1]!.trim() }
+      out.push(current)
+      continue
+    }
+    if (current === undefined) continue
+    const mMatch = line.match(DEBUG_TRACE_M_RE)
+    if (mMatch !== null) {
+      current.snbt = mMatch[1]!.trim()
+      continue
+    }
+    const rMatch = line.match(DEBUG_TRACE_R_RE)
+    if (rMatch !== null) {
+      current.result = rMatch[1]!.trim()
+      current = undefined
+    }
+  }
+  return out
+}
+
+export async function startDebugWatcher(
+  hostType: HostType,
+  projectRoot: string,
+  onDebug: (debug: PendingDebug) => void,
+): Promise<DebugWatcher | null> {
+  if (hostType !== 'integrated') return null
+  const debugDir = join(projectRoot, '.sandstone', 'mc-server', 'debug')
+
+  const ingestTraceFile = async (filePath: string): Promise<void> => {
+    let body: string
+    try {
+      body = await Bun.file(filePath).text()
+    } catch {
+      return
+    }
+    const firstLine = body.split('\n', 1)[0]
+    if (firstLine === undefined) return
+    const slash = firstLine.lastIndexOf('/')
+    const colon = firstLine.lastIndexOf(':')
+    const traceId = firstLine.slice(Math.max(slash, colon) + 1).trim()
+    if (traceId === '') return
+    onDebug({
+      content: {
+        trace: traceId,
+        values: parseDebugTrace(body),
+      },
+      filePath,
+    })
+  }
+  for (const existing of await readdir(debugDir).catch(() => [])) {
+    if (existing.endsWith('.txt')) {
+      await ingestTraceFile(join(debugDir, existing))
+    }
   }
 
-  // Host-type resolution (same rules as `sand run`).
+  const subscription = await subscribe(
+    debugDir,
+    (err, events) => {
+      if (err !== null) return
+      for (const event of events) {
+        if (event.type === 'create' && event.path.endsWith('.txt')) {
+          void ingestTraceFile(event.path)
+        }
+      }
+    },
+  )
+
+  return {
+    ingest: onDebug,
+    close: async () => {
+      await subscription.unsubscribe().catch(() => {})
+    },
+  }
+}
+
+export async function runTests(
+  opts: TestCommandOptions,
+  signal?: AbortSignal,
+  onEvent?: TestEventSink,
+  existingClient?: Client,
+): Promise<number> {
+  const projectRoot = resolve(opts.path)
+  const sink: TestEventSink = onEvent ?? ((e) => console.log(JSON.stringify(e)))
+
+  const manifest = await loadTestsManifest(projectRoot)
+  if (!manifest) {
+    emitError(
+      'Test manifest not found. Run `sand build --test` to generate tests, then retry.',
+      sink,
+    )
+    return 2
+  }
+
+  if (existingClient) {
+    emitStatus(chalk`Using watcher-owned \`sand connect\` client`, sink, 'daemon_connected', { url: '' })
+    return runDaemon(undefined, manifest, sink, projectRoot, signal, existingClient)
+  }
+
   const endpoint = await readEndpoint(projectRoot)
   const daemonAlive = !!(endpoint && (await pidAlive(endpoint.pid)))
   if (daemonAlive && endpoint) {
-    logStatus(chalk`Using existing \`sand connect\` daemon at {cyan ${endpoint.url}}`)
+    emitStatus(
+      chalk`Using existing \`sand connect\` daemon at {cyan ${endpoint.url}}`,
+      sink,
+      'daemon_connected',
+      { url: endpoint.url },
+    )
   } else {
-    logStatus(chalk`Bootstrapping {bold ${opts.hostType ?? DEFAULT_HOST_TYPE}} host...`)
+    emitStatus(
+      chalk`Bootstrapping {bold ${opts.hostType ?? DEFAULT_HOST_TYPE}} host...`,
+      sink,
+      'host_bootstrapping',
+      { host_type: opts.hostType ?? DEFAULT_HOST_TYPE },
+    )
   }
 
   let hostType: HostType | undefined
   if (opts.hostType) {
     if (opts.hostType.includes(',')) {
-      console.error(
-        chalk`{red Error:} Only one --host-type is supported, got '${opts.hostType}'. Composite daemons were removed.`,
+      emitError(
+        `Only one --host-type is supported, got '${opts.hostType}'. Composite daemons were removed.`,
+        sink,
       )
-      process.exit(2)
+      return 2
     }
     hostType = opts.hostType as HostType
   }
@@ -155,12 +357,12 @@ export async function testCommand(opts: TestCommandOptions): Promise<void> {
   if (!daemonAlive) {
     if (!hostType) hostType = DEFAULT_HOST_TYPE
     if (!KNOWN_HOST_TYPES.has(hostType as HostType)) {
-      console.error(chalk`{red Error:} Unknown --host-type '${hostType}'`)
-      process.exit(2)
+      emitError(`Unknown --host-type '${hostType}'`, sink)
+      return 2
     }
     if (opts.hostConfig && opts.hostConfigFile) {
-      console.error(chalk`{red Error:} Pass either --host-config or --host-config-file, not both`)
-      process.exit(2)
+      emitError('Pass either --host-config or --host-config-file, not both', sink)
+      return 2
     }
     if (!opts.hostConfig && !opts.hostConfigFile) {
       opts.hostConfig = JSON.stringify({})
@@ -169,125 +371,143 @@ export async function testCommand(opts: TestCommandOptions): Promise<void> {
   const resolvedHostType: HostType = hostType ?? DEFAULT_HOST_TYPE
 
   if (daemonAlive && endpoint) {
-    await runDaemon(endpoint, manifest)
-    return
+    return runDaemon(endpoint, manifest, sink, projectRoot, signal)
   }
 
-  await runDirect(projectRoot, resolvedHostType, opts, userProvidedHostSettings, manifest)
+  return runDirect(projectRoot, resolvedHostType, opts, userProvidedHostSettings, manifest, sink, signal)
 }
 
-// ---------------------------------------------------------------------------
-// Shared test session
-// ---------------------------------------------------------------------------
+export async function testCommand(opts: TestCommandOptions): Promise<void> {
+  const json = opts.json === true
+  if (!json) printSplash()
+  const closeFileLogger = initTestLogger(opts.path)
+  const sink: TestEventSink = json
+    ? (e) => { logInfo(JSON.stringify(e)) }
+    : (e) => { for (const line of renderTestEvent(e)) logInfo(line) }
+  try {
+    process.exit(await runTests(opts, undefined, sink))
+  } finally {
+    await closeFileLogger()
+  }
+}
 
-/**
- * Transport-agnostic handle for running a single test session. Both the
- * `sand connect` daemon path (which uses a WS `Client`) and the direct
- * path (which uses a `HostProvider`) build a thin session that exposes
- * just the operations the test runner needs: attach to the server log,
- * send the raw console command, and clean up.
- *
- * Keeping this surface narrow is what lets `runSession` be a single
- * implementation shared between both modes — every lifecycle event
- * (attach, send, batch start/complete, summary) lives in one place.
- */
 interface TestSession {
-  /** Subscribe to server log lines. Lines arrive in chunks split on `\n`. */
-  attachLog(handler: LogChunkHandler): Promise<LogSubscription>
-  /** Send `test run *:*` and resolve when the host accepts it. */
-  executeRawCommand(): Promise<unknown>
-  /** Unattach any active subscription and release the host. */
+  attachLog(handler: HostLogHandler): Promise<LogSubscription>
+  executeRawCommand(): Promise<unknown> // TODO: This is known, grab the type and put it here
   cleanup(): Promise<void>
 }
 
-/**
- * Run the actual test session against any transport. Owns the
- * collection state, the tail window, the summary render, and the exit
- * code; `runDaemon`/`runDirect` just produce the right `TestSession`
- * adapter for their transport and forward into it.
- */
-async function runSession(session: TestSession, manifest: TestsManifest): Promise<number> {
+async function runSession(
+  session: TestSession,
+  manifest: TestsManifest,
+  onEvent: TestEventSink,
+  hostType: HostType,
+  projectRoot: string,
+  signal?: AbortSignal,
+): Promise<number> {
   const startMs = Date.now()
-  const state: CollectionState = { collecting: false, triggers: 0, completes: 0, failures: [] }
+  const state = {
+    collecting: false,
+    failed: new Set<string>(),
+    failedRecap: [],
+    optionalErrors: new Set<string>(),
+    pendingLogs: new Map(),
+    pendingDebugs: new Map(),
+  }
 
-  // Drive completion off the log stream itself: when a chunk arrives that
-  // contains the closing marker, resolve. No polling, no intervals —
-  // the work finishes the moment the server tells us it did.
-  let resolveComplete!: () => void
-  const completed = new Promise<void>((resolve) => {
-    resolveComplete = resolve
+  const debugWatcher = await startDebugWatcher(hostType, projectRoot, (debug) => {
+    const key = debug.content.trace as `${number}`
+    const extras = manifest.log_traces[key]?.extras
+    pairDebugTrace(state, debug, extras, onEvent)
   })
+  let resolveComplete!: () => void
+  let rejectAborted!: (err: Error) => void
+  const completed = new Promise<void>((resolve, reject) => {
+    resolveComplete = resolve
+    rejectAborted = reject
+  })
+  if (signal !== undefined) {
+    if (signal.aborted) rejectAborted(new Error('aborted'))
+    else signal.addEventListener('abort', () => rejectAborted(new Error('aborted')), { once: true })
+  }
 
   const subscription = await session.attachLog((lines) => {
-    for (const line of lines) {
-      processLine(line, state, manifest)
-      if (stripMinecraftPrefix(line).includes(COMPLETE_PREFIX) && state.triggers > 0) {
+    if (signal?.aborted === true) return
+    for (const entry of lines) {
+      processLine(entry.line, state, manifest, onEvent)
+      if (entry.line.includes(COMPLETE_PREFIX) && !state.collecting) {
         resolveComplete()
       }
     }
   })
-  logStatus(chalk`Running tests...`)
+  emitStatus(chalk`Running tests...`, onEvent, 'tests_running')
   const cmdPromise = session.executeRawCommand().catch(() => undefined)
 
   let exitCode = 0
   try {
     await completed
-    printSummary(makeSummary(state, true), manifest, Date.now() - startMs)
-    exitCode = state.failures.some((f) => !f.optional) ? 1 : 0
+    flushPendingLogs(state, onEvent)
+    printSummary(state, manifest, Date.now() - startMs, onEvent)
+    exitCode = state.failed.size > 0 ? 1 : 0
     await cmdPromise.catch(() => {})
   } catch (err) {
-    console.error(
-      chalk`{red Error:} ${err instanceof Error ? err.message : String(err)}`,
-    )
-    exitCode = 1
+    if (signal?.aborted === true) {
+      flushPendingLogs(state, onEvent)
+      emitStatus('Tests cancelled by user', onEvent, 'tests_cancelled')
+      exitCode = 130
+    } else {
+      emitError(err instanceof Error ? err.message : String(err), onEvent)
+      exitCode = 1
+    }
   } finally {
     await subscription.unattach().catch(() => {})
+    await debugWatcher?.close().catch(() => {})
     await session.cleanup()
   }
   return exitCode
 }
 
-// ---------------------------------------------------------------------------
-// Daemon-mode fast path
-// ---------------------------------------------------------------------------
-
 async function runDaemon(
-  endpoint: NonNullable<Awaited<ReturnType<typeof readEndpoint>>>,
+  endpoint: NonNullable<Awaited<ReturnType<typeof readEndpoint>>> | undefined,
   manifest: TestsManifest,
-): Promise<void> {
-  const client = await openClient({ endpoint })
+  onEvent: TestEventSink,
+  projectRoot: string,
+  signal?: AbortSignal,
+  existingClient?: Client,
+): Promise<number> {
+  const ownsClient = !existingClient
+  const client = existingClient ?? (await openClient({ endpoint: endpoint! }))
   if (!client.welcome.capabilities.executeRawCommand) {
-    console.error(chalk`{red Error:} Host does not support executeRawCommand`)
-    client.close()
+    emitError('Host does not support executeRawCommand', onEvent)
+    if (ownsClient) client.close()
     process.exit(2)
   }
   if (!client.welcome.capabilities.attachLog) {
-    console.error(chalk`{red Error:} Host does not support attachLog`)
-    client.close()
+    emitError('Host does not support attachLog', onEvent)
+    if (ownsClient) client.close()
     process.exit(2)
   }
 
-  process.exit(
-    await runSession(
-      {
-        attachLog: async (handler) => client.attachLog().then((sub) => {
-          sub.onLines((lines) => handler(lines))
-          return sub
-        }),
-        executeRawCommand: () => client.executeRawCommand({ command: TEST_COMMAND }),
-        cleanup: () => {
-          client.close()
-          return Promise.resolve()
-        },
+  const hostType = client.welcome.hostType as HostType
+  return runSession(
+    {
+      attachLog: async (handler) => client.attachLog().then((sub) => {
+        sub.onLines((lines) => handler(lines))
+        return sub
+      }),
+      executeRawCommand: () => client.executeRawCommand({ command: TEST_COMMAND }),
+      cleanup: () => {
+        if (ownsClient) client.close()
+        return Promise.resolve()
       },
-      manifest,
-    ),
+    },
+    manifest,
+    onEvent,
+    hostType,
+    projectRoot,
+    signal,
   )
 }
-
-// ---------------------------------------------------------------------------
-// Direct-mode path
-// ---------------------------------------------------------------------------
 
 async function runDirect(
   projectRoot: string,
@@ -295,7 +515,9 @@ async function runDirect(
   opts: TestCommandOptions,
   userProvidedHostSettings: boolean,
   manifest: TestsManifest,
-): Promise<void> {
+  onEvent: TestEventSink,
+  signal?: AbortSignal,
+): Promise<number> {
   const parsedConfig = await parseHostConfig(opts.hostConfig, opts.hostConfigFile)
   const hostConfig = parsedConfig.config
   if (hostConfig.projectRoot === undefined) hostConfig.projectRoot = projectRoot
@@ -318,117 +540,204 @@ async function runDirect(
         : err instanceof Error
           ? err.message
           : String(err)
-    console.error(chalk`{red Error:} ${msg}`)
+    emitError(msg, onEvent)
     process.exit(2)
   }
 
   if (!host.capabilities.has('executeRawCommand')) {
-    console.error(chalk`{red Error:} Host '${resolvedHostType}' does not support executeRawCommand`)
+    emitError(`Host '${resolvedHostType}' does not support executeRawCommand`, onEvent)
     await safeDisconnect(host)
     process.exit(2)
   }
   if (!host.capabilities.has('attachLog') || !host.attachLog) {
-    console.error(chalk`{red Error:} Host '${resolvedHostType}' does not support attachLog`)
+    emitError(`Host '${resolvedHostType}' does not support attachLog`, onEvent)
     await safeDisconnect(host)
     process.exit(2)
   }
 
-  process.exit(
-    await runSession(
-      {
-        attachLog: (handler) => host.attachLog!(handler),
-        executeRawCommand: () => host.executeRawCommand!(TEST_COMMAND),
-        cleanup: async () => {
-          if (weStarted && host.type === 'integrated' && host.stopServer && host.capabilities.has('stopServer')) {
-            logStatus('Stopping server...')
-            await host.stopServer().catch(() => {})
-          }
-          await safeDisconnect(host)
-        },
+  return runSession(
+    {
+      attachLog: (handler) => host.attachLog!(handler),
+      executeRawCommand: () => host.executeRawCommand!(TEST_COMMAND),
+      cleanup: async () => {
+        if (weStarted && host.type === 'integrated' && host.stopServer && host.capabilities.has('stopServer')) {
+          emitStatus('Stopping server...', onEvent, 'server_stopping')
+          await host.stopServer().catch(() => {})
+        }
+        await safeDisconnect(host)
       },
-      manifest,
-    ),
+    },
+    manifest,
+    onEvent,
+    host.type,
+    projectRoot,
+    signal,
   )
 }
 
-// ---------------------------------------------------------------------------
-// Collection state + line processing
-// ---------------------------------------------------------------------------
-
-interface CollectionState {
+export interface CollectionState {
   collecting: boolean
-  /** Number of `Running test environment …` lines seen total. */
-  triggers: number
-  /** Number of `Game Test complete!` lines seen total. */
-  completes: number
-  failures: ParsedFailureLog[]
+  failed: Set<string>
+  /** Pre-rendered "✗ <ns:id> > <desc> [<tick>t]" lines. */
+  failedRecap: string[]
+  /** Test names that emitted at least one optional failure. */
+  optionalErrors: Set<string>
+  pendingLogs: Map<`${number}`, PendingLog>
+  pendingDebugs: Map<`${number}`, PendingDebug>
+}
+
+export interface PendingLog {
+  /** The expanded payload object (server_trace / build_trace baked in,
+   *  raw `trace` field removed). This is what gets emitted. */
+  payload: Record<string, unknown> // TODO: Tyyyypeeeesss
+}
+
+export function pairDebugTrace(
+  state: CollectionState,
+  debug: PendingDebug,
+  extras: LogExtra[] | undefined,
+  onEvent: TestEventSink,
+): boolean {
+  const key = debug.content.trace as `${number}`
+  const pendingLog = state.pendingLogs.get(key)
+  if (pendingLog !== undefined) {
+    state.pendingLogs.delete(key)
+    void unlink(debug.filePath).catch(() => {})
+    emitTestLog(pendingLog.payload, debug.content, extras, onEvent)
+    return true
+  }
+  state.pendingDebugs.set(key, debug)
+  return false
+}
+
+export function pairLogLine(
+  state: CollectionState,
+  traceKey: `${number}`,
+  payload: Record<string, unknown>,
+  extras: LogExtra[] | undefined,
+  onEvent: TestEventSink,
+): boolean {
+  const pendingDebug = state.pendingDebugs.get(traceKey)
+  if (pendingDebug !== undefined) {
+    state.pendingDebugs.delete(traceKey)
+    void unlink(pendingDebug.filePath).catch(() => {})
+    emitTestLog(payload, pendingDebug.content, extras, onEvent)
+    return true
+  }
+  state.pendingLogs.set(traceKey, { payload })
+  return false
+}
+
+export interface PendingDebug {
+  /** Parsed JSON body of the trace file. */
+  content: Record<string, unknown> // TODO: Typeessssss
+  filePath: string
+}
+
+export interface DebugWatcher {
+  ingest: (debug: PendingDebug) => void
+  close: () => Promise<void>
 }
 
 function processLine(
   line: string,
   state: CollectionState,
   manifest: TestsManifest,
+  onEvent: TestEventSink,
 ): void {
   if (line.includes(TRIGGER_PREFIX)) {
     state.collecting = true
-    state.triggers++
     return
   }
   if (line.includes(COMPLETE_PREFIX)) {
     state.collecting = false
-    state.completes++
     return
   }
   if (!state.collecting) return
+
   const parsed = parseFailureLog(line)
-  if (!parsed) return
-  state.failures.push(parsed)
-  const entry = manifest.tests.find((t) => t.name === parsed.source)
-  const optional = parsed.optional || entry?.optional === true
-  console.log(formatTestLine(entry, parsed, optional, manifest.throwables))
-}
+  if (parsed) {
+    const entry = manifest.tests.find((t) => t.name === parsed.source)
+    const optional = parsed.optional || entry?.optional === true
+    if (optional) {
+      state.optionalErrors.add(parsed.source)
+    } else {
+      state.failed.add(parsed.source)
+    }
+    const throwableKey = findThrowableKey(parsed, manifest.throwables)
+    const throwable = throwableKey !== undefined ? manifest.throwables[throwableKey] : undefined
+    const [namespace, id] = parsed.source.split(':')
+    const anonymous = parsed.line === 0
+    const serverTrace = {
+      blame: anonymous ? '<anonymous>' : 'fail',
+      file: join(process.cwd(), '.sandstone', 'output', 'datapack', 'data', namespace, 'test', `${id.replaceAll('/', path.sep)}.mcfunction`),
+      line: parsed.line || 1,
+      column: 0,
+    }
+    const buildTrace = buildTraceFromFailure(throwable, entry)
 
-interface Summary {
-  triggers: number
-  completes: number
-  failures: ParsedFailureLog[]
-  requiredCount: number
-  optionalCount: number
-  completed: boolean
-}
+    onEvent({
+      event: 'test_result',
+      name: parsed.source,
+      ...(entry?.description !== undefined ? { description: entry.description } : {}),
+      passed: optional,
+      optional,
+      ticks_elapsed: parsed.tick ?? 0,
+      error: {
+        message: parsed.message,
+        position: [parsed.x, parsed.y, parsed.z],
+        server_trace: serverTrace,
+        ...(buildTrace ? { build_trace: buildTrace } : {}),
+      },
+    })
 
-function makeSummary(state: CollectionState, completed: boolean): Summary {
-  let required = 0
-  let optional = 0
-  for (const f of state.failures) {
-    if (f.optional) optional++
-    else required++
+    if (!parsed.optional) {
+      // Cache the already-formatted header so `printSummary` doesn't
+      // re-run `formatTestResult` for the recap.
+      state.failedRecap.push(formatTestResult(entry, parsed.source, optional, optional, parsed.tick))
+    }
+    return
   }
-  return {
-    triggers: state.triggers,
-    completes: state.completes,
-    failures: state.failures,
-    requiredCount: required,
-    optionalCount: optional,
-    completed,
+
+  const parsedPrefix = line.match(LOG_PREFIX_RE)
+  const content = parsedPrefix ? parsedPrefix[3] : line
+  if (RCON_START_ECHO_RE.test(content)) return
+  const logMatch = content.match(TEST_LOG_RE)
+  if (logMatch) {
+    try {
+      const rawPayload = JSON.parse(logMatch[1]) as Record<string, unknown> // TODO: Typessss
+      const payload: Record<string, unknown> = { ...rawPayload }
+      const traceId = payload.trace as `${number}` | undefined
+      if (traceId !== undefined) {
+        const entry = manifest.log_traces[traceId]
+        if (entry) {
+          payload.server_trace = entry.server_trace
+          if (payload.build_trace === undefined && entry.build_trace !== undefined) {
+            payload.build_trace = entry.build_trace
+          }
+        }
+        if (payload.debug) {
+          delete payload.trace
+          pairLogLine(state, traceId, payload, manifest.log_traces[traceId]?.extras, onEvent)
+          return
+        }
+      }
+      onEvent({ event: 'test_log', ...payload } as TestEvent)
+      return
+    } catch {}
   }
+  const event: TestEvent = {
+    event: 'server_log',
+    line: content,
+    ...(parsedPrefix !== null ? {
+      source: parsedPrefix[1]!,
+      level: parsedPrefix[2] === 'WARN' ? 'warning' : parsedPrefix[2]!.toLowerCase(),
+    } : {}),
+  }
+  onEvent(event)
 }
 
-// ---------------------------------------------------------------------------
-// Output
-// ---------------------------------------------------------------------------
-
-/**
- * Render the trailing header line of a test result — glyph + namespaced
- * id + optional annotation + description + tick. Shared by the
- * live-printed `formatTestLine` (which prepends stack frames) and the
- * brief recap (`formatFailureBrief`, which omits frames entirely).
- *
- * `passed` drives the glyph (passing tests always get ✓ regardless of
- * whether they're marked optional). `optional` only controls the
- * `(optional)` annotation and the brief recap's overall outcome.
- */
-function formatTestHeader(
+function formatTestResult(
   entry: TestEntry | undefined,
   source: string,
   passed: boolean,
@@ -445,77 +754,84 @@ function formatTestHeader(
   return header
 }
 
-function formatTestLine(
-  entry: TestEntry | undefined,
+function findThrowableKey(
   failure: ParsedFailureLog,
-  optional: boolean,
   throwables: Record<string, ThrowableEntry>,
-): string {
-  // Match a runtime line back to the source-level throwable that
-  // produced it. `throwableStack` keys are `${source}@${command}:${srcLine}`;
-  // the runtime parser only knows the source + line, so pick any entry
-  // whose prefix + `:${failure.line}` suffix lines up. If two commands
-  // share a line (rare) we keep the first one — the user can disambiguate
-  // by looking at the source line.
-  let throwableKey: string | undefined
+): string | undefined {
   const prefix = `${failure.source}@`
   const suffix = `:${failure.line}`
   for (const key of Object.keys(throwables)) {
-    if (key.startsWith(prefix) && key.endsWith(suffix)) {
-      throwableKey = key
-      break
+    if (key.startsWith(prefix) && key.endsWith(suffix)) return key
+  }
+  return undefined
+}
+
+function buildTraceFromFailure(
+  throwable: ThrowableEntry | undefined,
+  entry: TestEntry | undefined,
+): ErrorTrace | undefined {
+  if (throwable?.trace?.file !== undefined) {
+    return {
+      blame: 'Test#create',
+      file: throwable.trace.file,
+      line: throwable.trace.line ?? 1,
+      column: throwable.trace.column ?? 0,
     }
   }
-  const throwable = throwableKey !== undefined ? throwables[throwableKey] : undefined
-
-  // Assemble each "frame" into a list, then prepend the stack-trace
-  // header (error / pos / runtime-at) and append the test header. The
-  // brief recap reuses `formatTestHeader` without the frames.
-  const frames: string[] = []
-  frames.push(chalk`\n{red error}{gray :} {bold ${failure.message}}`)
-  frames.push(chalk`\n  pos{gray :} {greenBright ${failure.x} ${failure.y} ${failure.z}}{gray ,}\n`)
-
-  let runtimeFrame = chalk`\n${' '.repeat(6)}{gray at} {bold {italic ${throwable?.command ?? `<anonymous>`}}} `
-  const [namespace, id] = failure.source.split(':')
-  runtimeFrame += chalk`{gray (}{blue ${join(process.cwd(), '.sandstone', 'output', 'datapack', 'data')}${path.sep}}`
-  runtimeFrame += chalk`{cyan ${namespace}${path.sep}test${path.sep}${id.replaceAll('/', path.sep)}.mcfunction}`
-  runtimeFrame += chalk`{gray :}{yellowBright ${failure.line}}{gray :}{yellow 0}{gray )}`
-  frames.push(runtimeFrame)
-
-  if (throwable?.trace?.file) {
-    let traceFrame = chalk`\n${' '.repeat(6)}{gray at} {bold {italic Test#create}} `
-    const cwd = `${process.cwd()}${path.sep}`
-    traceFrame += chalk`{gray (}{blue ${cwd}}`
-    traceFrame += chalk`{cyan ${throwable.trace.file.replace(cwd, '')}}`
-    traceFrame += chalk`{gray :}{yellowBright ${throwable.trace.line}}{gray :}{yellow ${throwable.trace.column}}{gray )}\n`
-    frames.push(traceFrame)
+  if (entry?.sourceFile === undefined) return undefined
+  return {
+    blame: 'Test#create',
+    file: entry.sourceFile,
+    line: entry.sourceLine!,
+    column: entry.sourceColumn!,
   }
-
-  return frames.join('') + '\n' + formatTestHeader(entry, failure.source, optional, optional, failure.tick)
 }
 
-/**
- * Single-line recap of a failure, no stack frames. Used by the end-of-run
- * summary so each failure appears once compactly without duplicating the
- * full live-printed stack. Shares its header rendering with the live
- * print via {@link formatTestHeader}.
- */
-function formatFailureBrief(
-  entry: TestEntry | undefined,
-  failure: ParsedFailureLog,
-  optional: boolean,
+interface ErrorTrace {
+  blame: string
+  file: string
+  line: number
+  column?: number
+}
+
+function formatDiagnostic(
+  message: string,
+  stackTrace: ErrorTrace[],
+  options?: {
+    keyword?: string,
+    keywordColor?: string,
+    position?: [number, number, number],
+    footer?: string,
+  }
 ): string {
-  const elapsedPart = '' // hook for per-test timing once PackTest reports it
-  return '\n' + formatTestHeader(entry, failure.source, optional, optional, failure.tick) + elapsedPart
-}
-
-/**
- * Single-line rendering for a passing test. Mirrors {@link formatTestHeader}
- * shape (same glyph + name + optional + description slot) so the summary
- * block reads consistently whether the test passed or failed.
- */
-function formatPassLine(entry: TestEntry, optional: boolean): string {
-  return '\n' + formatTestHeader(entry, entry.name, true, optional, null)
+  const keyword = options?.keyword ?? 'error'
+  let out = ''
+  out += chalk`\n{${options?.keywordColor ?? 'red'} ${keyword}}{gray :} {bold ${message}}`
+  if (options?.position !== undefined) {
+    const [ x, y, z ] = options.position
+    out += chalk`\n  pos{gray :} {greenBright ${x} ${y} ${z}}{gray ,}\n`
+  }
+  for (const trace of stackTrace) {
+    let frame = chalk`\n${' '.repeat(6)}{gray at} {bold {italic ${trace.blame ?? '<anonymous>'}}} `
+    if (trace.file !== undefined) {
+      frame += chalk`{gray (}`
+      const cwd = process.cwd()
+      const datapackOutput = join(cwd, '.sandstone', 'output', 'datapack', 'data')
+      if (trace.file.startsWith(datapackOutput)) {
+        frame += chalk`{blue ${datapackOutput}${path.sep}}{cyan ${trace.file.slice(datapackOutput.length + 1)}}`
+      } else if (trace.file.startsWith(cwd)) {
+        frame += chalk`{blue ${cwd}${path.sep}}{cyan ${trace.file.slice(cwd.length + 1)}}`
+      } else {
+        frame += chalk`{cyan ${trace.file}}`
+      }
+      frame += chalk`{gray :}`
+      if (trace.line !== undefined) frame += chalk`{yellowBright ${trace.line}}`
+      frame += chalk`{gray :}{yellow ${trace.column ?? 0}}{gray )}`
+    }
+    out += frame
+  }
+  if (options?.footer !== undefined) out += `\n${options.footer}`
+  return out
 }
 
 function formatMs(ms: number): string {
@@ -524,65 +840,138 @@ function formatMs(ms: number): string {
 }
 
 function printSummary(
-  summary: Summary,
+  state: CollectionState,
   manifest: TestsManifest,
   elapsedMs: number,
+  onEvent: TestEventSink,
 ): void {
-  // Bucket tests by outcome. A test that emitted any failure is a
-  // "fail" — the brief recap picks the first as the canonical failure so
-  // we don't list a single test multiple times.
-  const failureBySource = new Map<string, ParsedFailureLog>()
-  for (const f of summary.failures) {
-    if (!failureBySource.has(f.source)) failureBySource.set(f.source, f)
-  }
-  const failedSources = new Set(failureBySource.keys())
-
-  // Passes first so the failing block reads as a self-contained delta.
+  let requiredCount = 0
+  let optionalCount = 0
   for (const t of manifest.tests) {
-    if (failedSources.has(t.name)) continue
-    console.log(formatPassLine(t, t.optional === true))
+    if (t.optional === true) optionalCount++
+    else requiredCount++
   }
 
-  // Header + failure recap (no frames).
-  if (summary.failures.length > 0) {
-    const header = failedSources.size === 1 ? '1 test failed:' : `${failedSources.size} tests failed:`
-    console.log(chalk`\n{red ${header}}`)
-    for (const t of manifest.tests) {
-      const failure = failureBySource.get(t.name)
-      if (!failure) continue
-      const entry = manifest.tests.find((m) => m.name === t.name)
-      const optional = t.optional === true || failure.optional
-      console.log(formatFailureBrief(entry, failure, optional))
-    }
-  }
+  const failedSources = state.failed
+  const allErroredSources = new Set<string>([...failedSources, ...state.optionalErrors])
 
-  // Vitest-style totals footer.
   const total = manifest.tests.length
   const fail = failedSources.size
   const pass = total - fail
-  // Count distinct source files from the manifest entries — every test
-  // reports its defining file, so passing tests count too (unlike the
-  // throwables-based count which only sees fallable tests).
   const fileCount = new Set(manifest.tests.map((t) => t.sourceFile ?? '')).size
-  let line = ''
-  line += chalk`\n {green ${pass} pass}`
-  line += chalk`\n {${fail === 0 ? 'gray' : 'red'} ${fail} fail}`
-  line += chalk`\nRan ${total} test${total === 1 ? '' : 's'} across ${fileCount} file${fileCount === 1 ? '' : 's'}. {gray [${formatMs(elapsedMs)}]}`
-  console.log(line)
 
-  if (!summary.completed) {
-    console.log(
-      chalk`{yellow [test]} no \`Game Test complete!\` marker seen after ${summary.triggers} batch start${summary.triggers === 1 ? '' : 's'}`,
-    )
+  for (const t of manifest.tests) {
+    if (allErroredSources.has(t.name)) continue
+    onEvent({
+      event: 'test_result',
+      name: t.name,
+      ...(t.description !== undefined ? { description: t.description } : {}),
+      passed: true,
+      optional: t.optional === true,
+      ticks_elapsed: 0,
+      ...(t.sourceFile !== undefined ? { source_file: t.sourceFile } : {}),
+    })
   }
-}
 
-// ---------------------------------------------------------------------------
-// Misc
-// ---------------------------------------------------------------------------
+  onEvent({
+    event: 'summary',
+    total,
+    pass,
+    fail,
+    required_count: requiredCount,
+    optional_count: optionalCount,
+    elapsed_ms: elapsedMs,
+    file_count: fileCount,
+  })
+}
 
 async function safeDisconnect(host: HostProvider): Promise<void> {
   try {
     await host.disconnect()
   } catch {}
+}
+
+export function renderTestEvent(event: TestEvent): string[] {
+  switch (event.event) {
+    case 'status': {
+      const message = event.message
+      const text = chalk`{cyan [test]} ${message}`
+      return [text]
+    }
+    case 'error': {
+      return [chalk`{red Error:} ${event.message}`]
+    }
+    case 'test_log': {
+      const level = typeof event.level === 'string' ? event.level : 'info'
+      const values = Array.isArray(
+        event.debug_trace?.values,
+      )
+        ? (event as { debug_trace: { values: DebugTraceValue[] } }).debug_trace.values
+        : []
+      const footer = formatDebugTraceValues(values, undefined, level)
+      const out = formatDiagnostic(
+        typeof event.message === 'string' ? event.message : '',
+        [
+          event.server_trace as ErrorTrace,
+          ...(event.build_trace !== undefined ? [event.build_trace as ErrorTrace] : []),
+        ],
+        {
+          keyword: level,
+          keywordColor: level === 'warning' ? 'yellow' : level === 'info' ? 'white' : 'red',
+          ...(footer !== '' ? { footer: '\n' + footer } : {}),
+        },
+      )
+      return [out]
+    }
+    case 'test_result': {
+      const entry: TestEntry | undefined = undefined
+      const line = formatTestResult(
+        entry,
+        event.name,
+        event.passed,
+        event.optional,
+        event.ticks_elapsed || null,
+      )
+      if (event.error !== undefined) {
+        const trace: ErrorTrace[] = []
+        if (event.error.server_trace !== undefined) trace.push(event.error.server_trace as ErrorTrace)
+        if (event.error.build_trace !== undefined) trace.push(event.error.build_trace as ErrorTrace)
+        const diag = formatDiagnostic(
+          event.error.message,
+          trace,
+          {
+            keyword: 'error',
+            keywordColor: 'red',
+            position: event.error.position,
+            footer: '\n' + line,
+          },
+        )
+        return [diag]
+      }
+      return ['\n' + line]
+    }
+    case 'server_log': {
+      const level = event.level
+      let levelColor: string | undefined
+      if (level === 'warning') levelColor = 'yellow'
+      else if (level === 'error') levelColor = 'red'
+      const prefix = level !== undefined && level !== 'info'
+        ? chalk`{${levelColor} ${level}}{gray :} `
+        : ''
+      return [chalk`{cyan [connect]} ${prefix}${event.line}`]
+    }
+    case 'summary': {
+      const lines: string[] = []
+      const fail = event.fail
+      const pass = event.pass
+      const total = event.total
+      const fileCount = event.file_count
+      lines.push(
+        chalk`\n {green ${pass} pass}`,
+        chalk`\n {${fail === 0 ? 'gray' : 'red'} ${fail} fail}`,
+        chalk`\nRan ${total} test${total === 1 ? '' : 's'} across ${fileCount} file${fileCount === 1 ? '' : 's'}. {gray [${formatMs(event.elapsed_ms)}]}`,
+      )
+      return lines
+    }
+  }
 }

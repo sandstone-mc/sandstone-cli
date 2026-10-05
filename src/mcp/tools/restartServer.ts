@@ -1,6 +1,7 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
 import { type McpBridge } from '../bridge.js'
 import { restartServer as runRestart, checkRestartCapabilities } from '../../commands/restart-server.js'
+import { raceAbort } from './_raceAbort.js'
 
 export const NAME = 'restartServer'
 
@@ -17,6 +18,7 @@ export const DESCRIPTION =
 export async function call(
   ctx: McpBridge,
   _args: Record<string, never> = {},
+  _signal?: AbortSignal,
 ): Promise<{ content: Array<{ type: 'text'; text: string }>; isError?: boolean }> {
   const daemon = await ctx.requireDaemon()
 
@@ -26,7 +28,7 @@ export async function call(
   }
 
   try {
-    const result = await runRestart(daemon)
+    const result = await raceAbort(runRestart(daemon), _signal)
     return {
       content: [{
         type: 'text',

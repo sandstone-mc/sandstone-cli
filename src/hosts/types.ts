@@ -1,33 +1,12 @@
-/**
- * Direct server management — provider types.
- *
- * Each provider implements any subset of the capabilities below.
- * `integrated` and `mcsmanager-login` speak the Minecraft console
- * protocol directly (RCON and MCSManager WS respectively); SSH and FTP
- * are file/transport only — pair them with a console-capable host via
- * the operator if you need remote console access.
- *
- * `executeRawCommand` returns a real response (not just echoed to
- * stdin) when the underlying transport supports it.
- */
-
 import type { SandstoneConfig } from 'sandstone'
 
-export type HostType =
+export type HostType = (
   | 'ssh'
   | 'ftp'
   | 'integrated'
   | 'mcsmanager-login'
+)
 
-/** Path on the host's filesystem. Provider-specific meaning. */
-export type ServerPath = string
-
-/**
- * Canonical list of every capability the host system understands. New
- * capabilities are added here AND in the {@link HostCapabilities} defaults
- * — the const is the single source of truth for both provider
- * declarations and runtime checks (`host.capabilities.has(Capability.X)`).
- */
 export const Capability = {
   StartServer: 'startServer',
   StopServer: 'stopServer',
@@ -36,16 +15,9 @@ export const Capability = {
   WriteFileStream: 'writeFileStream',
   AttachLog: 'attachLog',
   ExecuteRawCommand: 'executeRawCommand',
-  /**
-   * True when `executeRawCommand` returns a non-empty response from the
-   * underlying server transport (RCON, MCSManager WS, etc.). Lets
-   * callers like `sand run --expect` skip the attach-and-await path
-   * when a built-in response already signals success.
-   */
   ExecuteRawCommandHasResponse: 'executeRawCommandHasResponse',
 } as const
 
-/** Every valid host type literal. */
 export const HOST_TYPES = [
   'ssh',
   'ftp',
@@ -53,38 +25,24 @@ export const HOST_TYPES = [
   'mcsmanager-login',
 ] as const satisfies readonly HostType[]
 
-/** Frozen set of valid host types — use for runtime validation. */
 export const KNOWN_HOST_TYPES: ReadonlySet<HostType> = new Set(HOST_TYPES)
 
-/** Union of every capability name string. */
 export type Capability = (typeof Capability)[keyof typeof Capability]
 
-/**
- * A host's set of declared capabilities. Stored as a `Set<Capability>`
- * so providers declare membership with a literal:
- *
- *   capabilities: new Set([Capability.StartServer, Capability.StopServer])
- *
- * and consumers check with `host.capabilities.has(Capability.X)`. Extensible
- * by adding a new key to {@link Capability} — every check site gets the
- * literal name back without touching call sites.
- */
 export type HostCapabilities = Set<Capability>
 
 export interface LogSubscription {
-  /** Stop receiving chunks, release the underlying stream. Idempotent. */
   unattach(): Promise<void>
 }
 
-/** Per-chunk callback signature. Lines already split on `\n`. */
-export type LogChunkHandler = (lines: string[]) => void
+export interface HostLogLine {
+  line: string
+  ts: number
+  stream: 'stdout' | 'stderr'
+}
 
-/**
- * Base interface. Capability methods are optional on the type but each
- * provider implementation only defines the ones matching its capabilities.
- * Registry callers should consult `capabilities` first, then narrow with
- * the methods they need.
- */
+export type HostLogHandler = (lines: HostLogLine[]) => void
+
 export interface HostProvider {
   readonly type: HostType
   readonly displayName: string
@@ -93,95 +51,27 @@ export interface HostProvider {
   connect(): Promise<void>
   disconnect(): Promise<void>
   isConnected(): boolean
-  /**
-   * Whether the underlying server/process is currently running. Lets
-   * `sand run` distinguish "we started it" (safe to send `stop` on
-   * exit) from "someone else started it" (don't touch their session).
-   * Optional — defaults to false if not implemented.
-   */
   isRunning?(): boolean
 
   startServer?(): Promise<void>
   stopServer?(): Promise<void>
-  readFile?(path: ServerPath): Promise<Buffer>
-  /**
-   * Streaming variant of {@link readFile}. When the host exposes
-   * this, the daemon uses it directly (no buffer allocation in the
-   * daemon process). Otherwise the daemon falls back to the buffer
-   * variant and wraps the result in a one-shot `ReadableStream`.
-   */
-  readFileStream?(path: ServerPath): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }>
-  writeFile?(path: ServerPath, data: Buffer | string): Promise<void>
-  /**
-   * Streaming variant of {@link writeFile}. Returns a
-   * `WritableStream` the daemon pipes binary-frame chunks into.
-   * Otherwise the daemon collects all chunks into a buffer and
-   * calls the buffer variant once.
-   *
-   * `opts.size` carries the final byte count when the caller knows
-   * it (e.g. the file lives at a known size on disk). Hosts whose
-   * upload protocol requires a known size up front (MCSManager's
-   * chunked-upload handshake) use this to avoid buffering the
-   * whole file in memory. Hosts with native streaming backends
-   * ignore it.
-   */
-  writeFileStream?(path: ServerPath, opts?: { size?: number }): Promise<WritableStream<Uint8Array>>
-  attachLog?(onChunk: LogChunkHandler): Promise<LogSubscription>
-  /**
-   * Minecraft console command only. RCON / MCSManager WS. Returns the
-   * server's response when the underlying transport supports it;
-   * `undefined` when the transport is fire-and-forget (e.g. SSH driving
-   * a screen/tmux session — the response, if any, streams to the
-   * attached server log instead of being capturable inline).
-   */
+  readFile?(path: string): Promise<Buffer>
+  readFileStream?(path: string): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }>
+  writeFile?(path: string, data: Buffer | string): Promise<void>
+  writeFileStream?(path: string, opts?: { size?: number }): Promise<WritableStream<Uint8Array>>
+  attachLog?(onChunk: HostLogHandler): Promise<LogSubscription>
+  /** Minecraft console command */
   executeRawCommand?(command: string): Promise<string | undefined>
-  /**
-   * Subscribe to unexpected liveness loss — the spawned child exited,
-   * the socket disconnected, etc. The daemon uses this to detect when
-   * the host has gone away and trigger a coordinated shutdown.
-   *
-   * `handler` receives a short reason string for logging. Returns an
-   * unsubscribe function. Not invoked for graceful `disconnect()`
-   * calls — only for unexpected exits.
-   */
   onDisconnected?(handler: (reason: string) => void): () => void
 }
 
-/** Per-provider config shapes — exported from each provider module. */
-
-/**
- * Fields every host config shares. Concrete configs extend this so
- * `HostConfigInput` (the CLI's parsed JSON type) carries `projectRoot`
- * uniformly without per-provider unions.
- */
 export interface BaseHostConfig {
-  /** Absolute path to the user's sandstone project root. Injected by `sand connect` / `sand run` from `--path`. */
   projectRoot?: string
-  /** Set by `sand connect` so the integrated host prints lifecycle events. Ignored by other providers. */
   verbose?: boolean
-  /**
-   * The full `sandstone.config.ts` payload, auto-loaded by `sand connect`
-   * and `sand run` from the project root. Optional — providers that
-   * don't care about it can ignore the field. `undefined` means no
-   * config was found at runtime (e.g. CLI invoked outside a project).
-   */
   sandstoneConfig?: SandstoneConfig
 }
 
-/**
- * RCON configuration shared by every host that supports
- * `executeRawCommand`. When present, the host opens a persistent
- * rcon-srcds client and forwards console commands through it. The
- * `enabled` flag is a guard so providers can detect "user mentioned
- * rcon but didn't enable it" — true means the host SHOULD connect;
- * false means the user explicitly opted out and the host MUST NOT.
- *
- * For `integrated` this is mandatory (the JVM only accepts console
- * input over RCON, not stdin). For `ssh` / `ftp` it's optional —
- * file/transport-only setups don't need it.
- */
 export interface RconConfig {
-  /** Defaults to true. `false` opts the host out of RCON entirely. */
   enabled?: boolean
   password?: string
   /** Defaults to 25575 (Minecraft's standard RCON port). */
@@ -194,7 +84,6 @@ export interface SshHostConfig extends BaseHostConfig {
   username: string
   password?: string
   privateKey?: string | Buffer
-  /** e.g. '/home/mc/server'. Used as base for logs + relative file paths. */
   serverDir: string
   /** Shell command to launch the server (e.g. `systemctl start minecraft@main`, `screen -dmS mc ./start.sh`). */
   startCommand: string
@@ -202,16 +91,10 @@ export interface SshHostConfig extends BaseHostConfig {
   stopCommand: string
   /** Seconds to wait for graceful `stop` to exit before falling back. Default 30. */
   gracefulStopTimeoutSeconds?: number
-  /** screen/tmux session name. Drives `stop` internally during graceful stop — NOT exposed via `executeRawCommand`. */
+  /** screen/tmux session name. Drives `stop` internally during graceful stop. */
   consoleSession?: string
   /** Path to the log file. Default: `${serverDir}/logs/latest.log`. */
   logPath?: string
-  /**
-   * When set AND `enabled` (default), the SSH host exposes
-   * `executeRawCommand` over RCON in addition to its built-in SFTP /
-   * shell commands. SSH exec remains for `startCommand` / `stopCommand`
-   * (those aren't `executeRawCommand` — they're lifecycle).
-   */
   rcon?: RconConfig
 }
 
@@ -220,49 +103,20 @@ export interface FtpHostConfig extends BaseHostConfig {
   port?: number
   user: string
   password: string
-  /**
-   * Server working directory on the remote host. All read/write paths
-   * are resolved relative to this directory (matching how SSH /
-   * MCSManager handle `serverDir`). Required.
-   */
   serverPath: string
   /** Path to the log file relative to serverPath. Default: 'logs/latest.log'. */
   logPath?: string
   /** How often to poll the log file for new bytes. Default 500ms. */
   pollIntervalMs?: number
-  /**
-   * When set AND `enabled` (default), the FTP host exposes
-   * `executeRawCommand` over RCON. FTP itself has no native exec
-   * channel — this is the only way to send console commands to an
-   * FTP-managed server.
-   */
   rcon?: RconConfig
 }
 
 export interface IntegratedHostConfig extends BaseHostConfig {
   /** Absolute path to the directory the CLI should manage the Fabric server inside. Default: `${projectRoot}/.sandstone/mc-server/`. */
   serverDir?: string
-  /**
-   * When true, the host logs lifecycle events to stdout
-   * ("Done (" detected, mod updates applied, etc.). Useful for long-
-   * running daemons where the operator wants to see the boot timeline;
-   * noisy for one-shot `sand run` invocations. Default false.
-   */
   verbose?: boolean
-  /**
-   * Minecraft server port written to `server.properties` as
-   * `server-port=`. If `0` or omitted, the host scans starting at 25565
-   * and writes the first bindable port it finds. Pass an explicit value
-   * (e.g. 25565) to pin it.
-   */
   serverPort?: number
-  /**
-   * RCON configuration. The integrated host ALWAYS enables RCON and
-   * connects via this client once the JVM is up — commands go over
-   * the rcon-srcds protocol, not the child's stdin.
-   */
   rcon?: {
-    /** Defaults to true. `false` is rejected (RCON is required). */
     enabled?: boolean
     password?: string
     /** Defaults to 25575 (Minecraft's standard RCON port). */
@@ -271,70 +125,28 @@ export interface IntegratedHostConfig extends BaseHostConfig {
   /**
    * Sandstone version (e.g. "1.2.5"). The MC version + Java major are
    * derived from this via `sandstoneToMcVersion` + `requiredJavaMajor`.
-   * Mutually exclusive with `minecraftVersion` — set exactly one.
    */
   sandstoneVersion?: string
   /**
-   * Override MC version detection. If set, skips the sandstone→MC mapping
-   * and uses this version directly. Pass the FULL version string from
-   * PrismLauncher's meta-launcher (e.g. "26.3" or "26.3-snapshot-10").
+   * Override MC version detection.
    */
   minecraftVersion?: string
   /** Fabric loader version. Default: latest stable. */
   fabricLoaderVersion?: string
-  /** Path to the user's sandstone project root (where sandstone.config.ts lives). */
+  /** Path to sandstone project root (where sandstone.config.ts lives). */
   projectRoot: string
   /** Seconds to wait for graceful `stop` to exit before SIGTERM/SIGKILL. Default 30. */
   gracefulStopTimeoutSeconds?: number
-  /**
-   * Directory the integrated host uses to cache downloaded JDKs. Defaults
-   * to `<serverDir>/.java/` — keeping the JDK co-located with the managed
-   * server. Auto-downloads the required Java major (per PrismLauncher's
-   * meta-launcher) into this dir if no matching system Java is found.
-   */
   javaDir?: string
-  /**
-   * When deriving MC version from a `sandstoneVersion`, accept the
-   * latest snapshot/pre-release (e.g. "26.3-snapshot-10") instead of the
-   * latest stable release. Default false — most callers want the
-   * released MC version that corresponds to their sandstone minor.
-   */
   preferSnapshot?: boolean
-  /**
-   * Auto-mod installation. Default mods are installed (best-effort) if
-   * a Fabric-compatible version exists for the resolved MC version.
-   * Per-mod toggles default to enabled; set any to `false` to skip that
-   * one. `fabricApi: false` throws on connect — fabric-api is required
-   * for the integrated host to function.
-   *
-   * `additionalMods` lets the caller add mods beyond the default set.
-   * Each entry is either a Modrinth project id/slug OR a direct URL
-   * to a JAR file. When both are present, `modrinthId` wins.
-   */
   mods?: IntegratedHostModsConfig
-  /**
-   * World preset for the integrated server. Maps to server.properties:
-   * `level-type=minecraft:flat` + a JSON `generator-settings` string.
-   *
-   * If omitted, Minecraft generates a fresh default overworld (no
-   * overrides written to server.properties). Use `'void'` for a flat
-   * superflat with the Void biome, `'overworld'` for a flat superflat
-   * mimicking the default surface (bedrock + dirt + grass_block), or
-   * a custom preset.
-   */
   world?:
     | 'void'
     | 'overworld'
     | { layers: Array<{ block: string; height: number }>; biome?: string }
 }
 
-/**
- * Mod config for the integrated host. Each boolean defaults to true;
- * set to false to skip that mod. `fabric-api` cannot be disabled — it
- * is required for the server to boot.
- */
 export interface IntegratedHostModsConfig {
-  /** Required — fabric-api is mandatory. `false` throws on connect. */
   fabricApi?: boolean
   packtest?: boolean
   commandcrafter?: boolean
@@ -345,11 +157,6 @@ export interface IntegratedHostModsConfig {
   ferriteCore?: boolean
   lazyDfu?: boolean
   scalablelux?: boolean
-  /**
-   * Extra mods. Each entry: either a Modrinth project id/slug
-   * (`modrinthId`) or a direct URL to a `.jar` file (`url`). Optional
-   * `filename` overrides the saved filename when downloading from URL.
-   */
   additionalMods?: Array<{
     modrinthId?: string
     url?: string
@@ -358,13 +165,12 @@ export interface IntegratedHostModsConfig {
 }
 
 export interface McsManagerHostConfig extends BaseHostConfig {
-  /** e.g. https://panel.example.com */
   endpoint: string
   daemonId: string
   uuid: string
-  /** Optional overrides; defaults to env-derived values used by the legacy deploy script. */
+  /** Defaults to env-derived value. */
   username?: string
-  /** base64-encoded, matches the legacy script. */
+  /** base64-encoded, defaults to env-derived value. */
   password?: string
 }
 
@@ -372,18 +178,12 @@ export interface McsManagerHostConfig extends BaseHostConfig {
 export interface CapabilityMethods {
   startServer(): Promise<void>
   stopServer(): Promise<void>
-  readFile(path: ServerPath): Promise<Buffer>
-  writeFile(path: ServerPath, data: Buffer | string): Promise<void>
-  attachLog(onChunk: LogChunkHandler): Promise<LogSubscription>
+  readFile(path: string): Promise<Buffer>
+  writeFile(path: string, data: Buffer | string): Promise<void>
+  attachLog(onChunk: HostLogHandler): Promise<LogSubscription>
   executeRawCommand(command: string): Promise<string | undefined>
 }
 
-/**
- * Union of every host config shape, all fields optional. Lets the CLI
- * layer type `--host-config` JSON as a single value (`HostConfigInput`)
- * without per-provider casting. Each provider's factory narrows to its
- * own config type at the boundary.
- */
 export type HostConfigInput = Partial<
   | SshHostConfig
   | FtpHostConfig
@@ -402,7 +202,6 @@ export const ALL_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   Capability.ExecuteRawCommandHasResponse,
 ])
 
-/** Serialize a `Set<Capability>` to the wire `Record<string, boolean>`. */
 export function capabilitiesToRecord(caps: HostCapabilities): Record<string, boolean> {
   const out: Record<string, boolean> = {}
   for (const cap of ALL_CAPABILITIES) out[cap] = caps.has(cap)

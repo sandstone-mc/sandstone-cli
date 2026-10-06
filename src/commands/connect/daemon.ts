@@ -1,4 +1,5 @@
 import { resolve as resolvePath } from 'path'
+import chalk from 'chalk-template'
 
 import * as fs from '../../utils/fs.js'
 import * as rpc from './rpc.js'
@@ -14,7 +15,7 @@ import {
   type RpcMethodParams,
   type RpcResult,
 } from './rpc.js'
-import { WaitLogSubscriptionRegistry } from './subscriptions.js'
+import { WaitLogSubscriptionRegistry } from './wait-log.js'
 import { StreamRegistry, type OpenStream, makeStreamEndBridge } from './streams.js'
 import { encodeRpc, encodeStreamChunk, newStreamId, streamIdHex, hexToBytes, decodeStreamChunk, STREAM_MAGIC } from './codec.js'
 import { LogMatcher, type LogPattern } from './wait-log.js'
@@ -102,6 +103,12 @@ export class Daemon {
   private serverBuffer: rpc.LogLineEntry[] = []
   private pushToLog: (target: 'build' | 'test' | 'server') => (entries: rpc.LogLineEntry[]) => void
 
+  // ---- Client log tail state (system `tail` / PowerShell follower) ----
+  private clientLogPath: string | null = null
+  private clientLogBuffer: rpc.LogLineEntry[] = []
+  private clientLogPartial = ''
+  private clientLogSub: { proc: Bun.Subprocess, cancel: () => void } | null = null
+
   // ---- Hosted-mode WS state ----
   private wsServer: ReturnType<typeof Bun.serve> | null = null
   private wsUrl = ''
@@ -124,13 +131,14 @@ export class Daemon {
     port?: number
     projectRoot: string
     fullConfig?: SandstoneConfig
-    /** Logger for daemon-side diagnostics. Defaults to NULL_LOGGER. */
     logger?: DaemonLogger
-    /** Called on SIGINT/SIGTERM to trigger daemon teardown. */
     onShutdown?: () => Promise<void> | void
   }): Promise<DaemonHandle> {
     const daemon = new Daemon(opts.host, opts.fullConfig, opts.logger)
-    return daemon.enableWsServer(opts)
+    const handle = await daemon.enableWsServer(opts)
+    daemon.logger.info(chalk`{cyan [connect]} listening on {bold ${handle.url}} (pid ${handle.endpoint.pid})`)
+    daemon.logger.info(chalk`{cyan [connect]} endpoint file: ${opts.projectRoot + '/.sandstone/connect.url'}`)
+    return handle
   }
 
   /** Direct mode: no WS server, no signal handlers, no endpoint file. Methods
@@ -328,6 +336,18 @@ export class Daemon {
       const matched = filter ? lines.filter((l) => filter.test(l.line)) : lines
       if (matched.length === 0) return
       for (const l of listeners) l(matched)
+      for (const [ws, session] of this.sessions) {
+        if (session.attachSub?.subscriptionId !== subscriptionId) continue
+        const buf = session.pendingBySub.get(subscriptionId) ?? []
+        buf.push(...matched)
+        session.pendingBySub.set(subscriptionId, buf)
+        if (!session.flushTimerBySub.has(subscriptionId)) {
+          session.flushTimerBySub.set(subscriptionId, setTimeout(() => {
+            session.flushTimerBySub.delete(subscriptionId)
+            this.flushLogs(session, ws, subscriptionId)
+          }, LOG_FLUSH_MS))
+        }
+      }
     }
     const hostSub = await this.host.attachLog(handler)
 
@@ -343,9 +363,6 @@ export class Daemon {
       },
     }
 
-    if (this.sessions.size > 0) {
-      for (const [, session] of this.sessions) session.attachSub = { subscriptionId, unattach: sub.unattach }
-    }
     this.directSubscriptions.set(subscriptionId, sub)
     return sub
   }
@@ -421,7 +438,6 @@ export class Daemon {
     return this.readBufferLog(params, 'server') as Promise<rpc.ReadBuildLogResult>
   }
 
-  // TODO: Implement an actual tail and buffer for this.
   async readClientLog(params: rpc.ReadClientLogParams | undefined): Promise<rpc.ReadClientLogResult> {
     const cfg = await this.requireActiveConfig()
     const clientPath = cfg.saveConfig?.clientPath
@@ -435,31 +451,89 @@ export class Daemon {
     const maxLines = params?.maxLines ?? null
     const range = params?.range ?? null
     const logPath = `${clientPath}/logs/latest.log`
-    const lines = await this.readLogFile(logPath)
-    const totalLines = lines.length
+    await this.ensureClientLogTail(logPath)
 
-    let selected = lines
-    if (range && range.from !== -1 && range.to !== -1) {
-      const len = selected.length
-      const startIdx = len - 1 - Math.min(range.from, len - 1)
-      const endIdx = len - 1 - Math.min(range.to, len - 1)
-      const lo = Math.max(0, Math.min(startIdx, endIdx))
-      const hi = Math.min(len - 1, Math.max(startIdx, endIdx))
-      selected = selected.slice(lo, hi + 1)
-    }
-    const matchedLines = selected.length
-
-    const want = tail ?? maxLines ?? 200
-    const truncated = selected.length > want
-    const finalLines = truncated ? selected.slice(-want) : selected
+    const { selected, totalLines, matchedLines, truncated } = this.selectLines<rpc.LogLineEntry>(
+      this.clientLogBuffer,
+      { tail, maxLines, range },
+    )
 
     return {
       path: logPath,
-      lines: finalLines,
+      lines: selected.map((e) => e.line),
       totalLines,
       matchedLines,
       truncated,
     }
+  }
+
+  private async ensureClientLogTail(logPath: string): Promise<void> {
+    if (this.clientLogSub !== null && this.clientLogPath === logPath) return
+    if (this.clientLogSub !== null) {
+      this.clientLogSub.cancel()
+      this.clientLogSub = null
+    }
+    this.clientLogPath = logPath
+    this.clientLogBuffer = []
+    this.clientLogPartial = ''
+
+    const cmd = process.platform === 'win32'
+      ? ['powershell', '-NoProfile', '-Command', `Get-Content -Path '${logPath.replace(/'/g, "''")}' -Tail 0 -Wait`]
+      : ['tail', '-F', '-n', '0', logPath]
+    const proc = Bun.spawn(cmd, { stdout: 'pipe', stderr: 'pipe' })
+    let cancelled = false
+    const cancel = () => {
+      if (cancelled) return
+      cancelled = true
+      try { proc.kill() } catch {}
+    }
+    this.clientLogSub = { proc, cancel }
+
+    const decoder = new TextDecoder('utf-8')
+    const handleChunk = (chunk: string) => {
+      const combined = this.clientLogPartial + chunk
+      const parts = combined.split('\n')
+      this.clientLogPartial = parts.pop() ?? ''
+      if (parts.length === 0) return
+      const now = Date.now()
+      for (const line of parts) {
+        this.clientLogBuffer.push({ line, ts: now, stream: 'stdout' })
+      }
+    }
+
+    void (async () => {
+      const reader = proc.stdout.getReader()
+      try {
+        while (true) {
+          const { value, done } = await reader.read()
+          if (done) break
+          handleChunk(decoder.decode(value, { stream: true }))
+        }
+      } catch {}
+      finally { reader.releaseLock() }
+    })()
+
+    void (async () => {
+      const reader = proc.stderr.getReader()
+      try { while (true) { const { done } = await reader.read(); if (done) break } }
+      catch {}
+      finally { reader.releaseLock() }
+    })()
+
+    void proc.exited.then(() => {
+      if (this.clientLogSub?.proc === proc) this.clientLogSub = null
+    })
+  }
+
+  private stopClientLogTail(): void {
+    this.clientLogSub?.cancel()
+    this.clientLogSub = null
+  }
+
+  private async startClientLogTailFromConfig(): Promise<void> {
+    const clientPath = this.activeConfig?.saveConfig?.clientPath
+    if (typeof clientPath !== 'string' || clientPath.length === 0) return
+    await this.ensureClientLogTail(`${clientPath}/logs/latest.log`)
   }
 
   async publishConfig(params: rpc.PublishConfigParams): Promise<void> {
@@ -473,6 +547,7 @@ export class Daemon {
       loadedAt: params.loadedAt,
     }
     this.activeConfig = next
+    await this.startClientLogTailFromConfig()
     this.broadcast('configChanged', {
       saveConfig: next.saveConfig,
       mode: next.mode,
@@ -590,23 +665,42 @@ export class Daemon {
     const cfg = await this.requireActiveConfig()
     const path = target === 'build' ? cfg.logPath : target === 'test' ? '<test-runner-buffer>' : '<host-stdout-buffer>'
 
-    const totalLines = buf.length
     const nowMs = Date.now()
-
     // Time filter: `since`/`until` are seconds-relative-to-now. Convert
     // to ms boundaries against the line's `ts`. `null` = no filter.
     const sinceMs = since != null ? nowMs - since * 1000 : null
     const untilMs = until != null ? nowMs - until * 1000 : null
-    let timeFiltered = buf
-    if (sinceMs !== null || untilMs !== null) {
-      timeFiltered = buf.filter((e) => {
-        if (sinceMs !== null && e.ts < sinceMs) return false
-        if (untilMs !== null && e.ts > untilMs) return false
-        return true
-      })
-    }
+    const timeFiltered = (sinceMs !== null || untilMs !== null)
+      ? buf.filter((e) => {
+          if (sinceMs !== null && e.ts < sinceMs) return false
+          if (untilMs !== null && e.ts > untilMs) return false
+          return true
+        })
+      : buf
 
-    let selected = timeFiltered
+    const { selected, totalLines, matchedLines, truncated, oldestTs, newestTs } = this.selectLines(
+      timeFiltered,
+      { tail, maxLines, range },
+    )
+
+    return {
+      path,
+      lines: selected.map((e) => e.line),
+      totalLines,
+      matchedLines,
+      oldestTs,
+      newestTs,
+      truncated,
+    }
+  }
+
+  private selectLines<T>(
+    buf: readonly T[],
+    params: { tail: number | null, maxLines: number | null, range: { from: number, to: number } | null },
+  ): { selected: T[], totalLines: number, matchedLines: number, truncated: boolean, oldestTs: string | null, newestTs: string | null } {
+    const { tail, maxLines, range } = params
+    const totalLines = buf.length
+    let selected: T[] = buf.slice()
     const matchedLines = selected.length
     if (range) {
       const { from, to } = range
@@ -617,31 +711,18 @@ export class Daemon {
       const hi = Math.min(len - 1, Math.max(startIdx, endIdx))
       selected = selected.slice(lo, hi + 1)
     }
-
     const want = tail ?? maxLines ?? 200
     const truncated = selected.length > want
     const finalLines = truncated ? selected.slice(-want) : selected
-
-    return {
-      path,
-      lines: finalLines.map((e) => e.line),
-      totalLines,
-      matchedLines,
-      oldestTs: finalLines[0] ? new Date(finalLines[0].ts).toISOString() : null,
-      newestTs: finalLines[finalLines.length - 1] ? new Date(finalLines[finalLines.length - 1].ts).toISOString() : null,
-      truncated,
-    }
+    const oldestTs = this.entryTs(finalLines[0])
+    const newestTs = this.entryTs(finalLines[finalLines.length - 1])
+    return { selected: finalLines, totalLines, matchedLines, truncated, oldestTs, newestTs }
   }
 
-  private async readLogFile(path: string): Promise<string[]> {
-    try {
-      const text = await fs.readText(path)
-      const lines = text.split('\n')
-      if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
-      return lines
-    } catch (err) {
-      throw new Error(`Failed to read log at ${path}: ${err instanceof Error ? err.message : String(err)}`)
-    }
+  private entryTs(entry: unknown): string | null {
+    if (!entry || typeof entry !== 'object') return null
+    const ts = (entry as { ts?: unknown }).ts
+    return typeof ts === 'number' ? new Date(ts).toISOString() : null
   }
 
   private async listDirectory(
@@ -671,10 +752,6 @@ export class Daemon {
         if (done) break
         record.bytes += value.byteLength
         try {
-          // Fire to every WS session that opened this stream — same as
-          // server.ts's original logic. The reader of close-before-open
-          // races is solved by `streams.close` which fires the
-          // `streamEnd`/`streamError` notification back to clients.
           for (const [ws] of this.sessions) {
             try { ws.send(encodeStreamChunk(hexToBytes(streamId), value)) } catch {}
           }
@@ -726,18 +803,14 @@ export class Daemon {
     }
   }
 
-  /**
-   * Load the persisted active config (used by `enableWsServer`).
-   * Direct callers can call this directly if they want the same behavior.
-   */
   async loadInitialActiveConfig(projectRoot: string): Promise<void> {
     try {
       const loaded = await loadActiveConfigFromDisk(projectRoot)
       this.activeConfig = loaded
     } catch {}
+    await this.startClientLogTailFromConfig()
   }
 
-  /** Wire the host's disconnect handler (called by hosted-mode startup). */
   bindHostDisconnect(onHostLost: () => void): void {
     if (!this.host.onDisconnected) return
     this.host.onDisconnected(() => {
@@ -746,32 +819,16 @@ export class Daemon {
     })
   }
 
-  // ===========================================================================
-  // Client-shaped surface — implemented here so callers can be
-  // source-agnostic. In WS mode these are used by the WS adapter; in
-  // direct mode they're used by in-process callers. Both modes expose
-  // the same methods with the same signatures.
-  // ===========================================================================
-
-  /** Register a handler fired when the daemon shuts down. No-op safe
-   *  in direct mode (the daemon only "shuts down" when explicitly
-   *  torn down via `disableWsServer`). Returns an unsubscribe fn. */
   onShutdown(handler: (reason: string) => void): () => void {
     this.shutdownHandlers.add(handler)
     return () => this.shutdownHandlers.delete(handler)
   }
 
-  /** Receive `triggerBuild` notifications (when the daemon tells us to
-   *  rebuild — e.g. an MCP agent called `publishTriggerBuild`). Returns
-   *  an unsubscribe fn. */
   onTriggerBuild(handler: (event: { at: string }) => void): () => void {
     this.triggerBuildHandlers.add(handler)
     return () => this.triggerBuildHandlers.delete(handler)
   }
 
-  /** Receive arbitrary notifications the daemon doesn't have a typed
-   *  handler for (e.g. `cancelTriggerBuild`, `setBuildMode`). Returns
-   *  an unsubscribe fn. */
   setFallbackNotificationHandler(
     handler: (notif: { method: string; params?: unknown }) => Promise<void> | void,
   ): () => void {
@@ -779,8 +836,6 @@ export class Daemon {
     return () => this.fallbackNotificationHandlers.delete(handler)
   }
 
-  /** Clean up client-side resources. Mirrors `DaemonClient.close()`.
-   *  Idempotent; safe in both modes. */
   close(): void {
     for (const sub of this.directSubscriptions.values()) void sub.unattach().catch(() => {})
     this.directSubscriptions.clear()
@@ -789,39 +844,21 @@ export class Daemon {
     this.fallbackNotificationHandlers.clear()
   }
 
-  // Internal handler registries — keep above.
   private shutdownHandlers = new Set<(reason: string) => void>()
   private triggerBuildHandlers = new Set<(event: { at: string }) => void>()
   private fallbackNotificationHandlers = new Set<(notif: { method: string; params?: unknown }) => Promise<void> | void>()
 
-  // ===========================================================================
-  // Hosted-mode lifecycle
-  // ===========================================================================
-
-  /**
-   * Bind a WS server, write the endpoint file, install signal handlers,
-   * and return a `DaemonHandle` whose `daemon` field is this same
-   * instance — direct in-process calls (`d.executeRawCommand(...)`) and
-   * WS roundtrips share the same `Daemon` state.
-   *
-   * Throws if a WS server is already live on this instance. Call
-   * `disableWsServer()` first if you need to re-bind.
-   */
   async enableWsServer(opts: {
     host: HostProvider
     bind?: string
     port?: number
     projectRoot: string
     fullConfig?: SandstoneConfig
-    /** Called on SIGINT/SIGTERM to trigger daemon teardown. */
     onShutdown?: () => Promise<void> | void
   }): Promise<DaemonHandle> {
     if (this.wsServer !== null) {
       throw new Error('Daemon: WS server is already live. Call disableWsServer() before re-binding.')
     }
-    // Refuse to clobber a live peer's endpoint file. Stale or recently
-    // orphaned files are auto-cleaned (matching the original daemon
-    // startup behavior) so a crashed previous run doesn't block us.
     const status = await endpointStatus(opts.projectRoot)
     if (status === 'live') {
       throw new Error(
@@ -856,7 +893,7 @@ export class Daemon {
           shuttingDown: false,
         }
         this.sessions.set(ws, session)
-        console.log(`[ws] connection opened (${ws.remoteAddress})`)
+        this.logger.info(`[ws] connection opened (${ws.remoteAddress})`)
         const welcome: rpc.WelcomeEvent = {
           protocol: PROTOCOL_VERSION,
           hostType: this.host.type,
@@ -876,7 +913,7 @@ export class Daemon {
         session.flushTimerBySub.clear()
         await this.waitLogSubs.dropAllForWs(ws.data.secret)
         this.streams.closeAll(new Error('ws session closed'))
-        console.log(`[ws] connection closed (${ws.remoteAddress})`)
+        this.logger.info(`[ws] connection closed (${ws.remoteAddress})`)
       },
     }
 
@@ -1061,10 +1098,6 @@ export class Daemon {
     params: RpcMethodParams[M],
     session: SessionContext,
   ): Promise<unknown> {
-    // `readFile`, `writeFile`, and `attachLog` exist as both high-level
-    // file APIs (string path / data param) AND as wire-shaped RPC entry
-    // points. The WS layer wires raw host calls + stream registry here
-    // — direct callers use the high-level methods.
     if (method === 'readFile') {
       if (!this.host.readFileStream) throw unsupportedCap('readFileStream')
       const info = await this.host.readFileStream((params as rpc.ReadFileParams).path)
@@ -1096,8 +1129,6 @@ export class Daemon {
       return { streamId }
     }
     if (method === 'attachLog') {
-      // For the WS path, `attachLog` returns a subscriptionId. We also
-      // tag the session so per-session log lines fan out to this client.
       const sub = await this.attachLog(params as rpc.AttachLogParams | undefined)
       session.attachSub = { subscriptionId: sub.subscriptionId, unattach: sub.unattach }
       return { subscriptionId: sub.subscriptionId }
@@ -1115,15 +1146,11 @@ export class Daemon {
     if (typeof fn === 'function') await fn.call(this, params)
   }
 
-  /**
-   * Tear down the WS server, remove the endpoint file, and disconnect
-   * the host. The `Daemon` instance stays alive for direct in-process
-   * calls; only the WS transport is dropped. Idempotent.
-   */
   async disableWsServer(): Promise<void> {
     if (this.shuttingDown) return
     this.shuttingDown = true
     try {
+      this.stopClientLogTail()
       this.broadcast('daemonShutdown', { reason: 'shutdown-rpc' })
       await new Promise<void>((r) => setTimeout(r, SHUTDOWN_BROADCAST_DELAY_MS))
       const ownsServer = this.host.type === 'integrated'
@@ -1145,16 +1172,11 @@ export class Daemon {
     }
   }
 
-  // ===========================================================================
-  // Exposed for direct mode (and any consumer that wants a low-level view)
-  // ===========================================================================
-
-  /** Set the persisted active config from outside (e.g. `startHosted` after load). */
   setActiveConfig(cfg: ActiveConfig | undefined): void {
     this.activeConfig = cfg
+    void this.startClientLogTailFromConfig()
   }
 
-  /** Direct accessor for the WS attachLog baton, used by hosted-mode `attachLog`. */
   getWatcherStatusRaw(): rpc.WatcherStatus | null {
     return this.watcherStatus
   }

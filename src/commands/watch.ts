@@ -7,26 +7,26 @@ import path, { join, relative, resolve } from 'path'
 import { pathToFileURL } from 'url'
 
 import { normalizePath } from '../utils/index.js'
+import { loadSandstoneConfig } from '../utils/sandstoneConfig.js'
 import { _buildCommand, type BuildOptions } from './build/index.js'
 import type { BuildResult } from '../ui/types.js'
 import { repackIfLinked } from './link.js'
 import { WatchUI, getWatchUIAPI } from '../ui/WatchUI.js'
-import { initLogger, log, logInfo, logWarn, logError, logDebug, logTrace, setLiveLogCallback } from '../ui/logger.js'
+import { logger, type LoggerSink } from '../utils/logger.js'
 import type { TrackedChange, ChangeCategory } from '../ui/types.js'
 import * as fs from '../utils/fs.js'
 import { run, spawn } from '../utils/shell.js'
-import { connect as openDaemonClient, type Client as DaemonClient } from './connect/client.js'
+import { Client as DaemonClient } from './connect/client.js'
 import { endpointStatus, readEndpoint } from './connect/endpoint-file.js'
-import { BootstrapError, bootstrapHost } from './connect/bootstrap.js'
+import { prepareConnectSink, resolveHostAndConfig, startInProcessDaemon } from './connect/daemon-setup.js'
 import { Daemon, type DaemonHandle } from './connect/daemon.js'
 import { deployDatapack, checkDeployState } from './deploy.js'
 import { stripCliFrames } from '../utils/strip-cli-frames.js'
-import { stripVTControlCharacters } from 'node:util'
 import chalk from 'chalk-template'
 import { runTests, renderTestEvent, type TestEvent, type TestEventSink } from './test.js'
 import type { WorkerResponse, WorkerRequest } from './build/worker-types.js'
 import type { SandstoneConfig } from 'sandstone'
-import { Capability, HostProvider, type HostConfigInput, type HostType } from '../hosts/types.js'
+import { Capability, type HostType } from '../hosts/types.js'
 import { IntegratedHost } from 'src/hosts/providers/integrated.js';
 
 const MinecraftTimestampRegex = /^\[\d{2}:\d{2}:\d{2}\] /
@@ -50,6 +50,18 @@ export async function watchCommand(opts: WatchOptions) {
   let currentBuildWorker: Worker | null = null
   const workerInflight = new Map<number, { resolve: (r: BuildResult) => void; reject: (e: Error) => void; cleanup: () => void; request: WorkerRequest }>()
 
+  // Read the user's `sandstone.config.ts` so `connect.watcherAuto` /
+  // `connect.host` can fill in for missing CLI flags. CLI flag wins —
+  // a flag that's been explicitly set (even to `false`) means "I know
+  // what I'm doing, don't second-guess me." Loading the config is
+  // best-effort: a missing or broken file just leaves the fallbacks
+  // empty.
+  const sandstoneCfg = await loadSandstoneConfig(opts.path)
+  if (opts.daemon === undefined && sandstoneCfg?.connect?.watcherAuto) {
+    opts.daemon = true
+  }
+  const connectHost = sandstoneCfg?.connect?.host
+
   const folder = opts.library ? join(opts.path, 'test') : opts.path
 
   let daemonClient: DaemonClient | undefined
@@ -63,11 +75,15 @@ export async function watchCommand(opts: WatchOptions) {
 
   let subscription: Awaited<ReturnType<typeof subscribe>>
 
-  const closeLogger = initLogger(opts.path)
-
-  setLiveLogCallback((level, args) => {
+  // Process-wide logger. Sinks are registered as the watcher boots:
+  // 'watch' is the first, 'connect' joins when the daemon comes up,
+  // 'test' joins for the duration of a test run. Local aliases for
+  // the per-sink log methods keep the call sites readable.
+  logger.registerSink('watch', join(opts.path, '.sandstone', 'watch.log'), 'Watch')
+  logger.sinks.watch.setLiveCallback((level, args) => {
     getWatchUIAPI()?.setLiveLog(level, args)
   })
+  const { log, logInfo, logWarn, logError, logDebug, logTrace } = logger.sinks.watch
 
   let unmountInk: (() => void) | undefined
 
@@ -239,7 +255,7 @@ export async function watchCommand(opts: WatchOptions) {
   const syncTestsBindings = () => {
     const api = getWatchUIAPI()
     if (!api) return
-    api.setCanToggleTests(currentHasTests && !alreadyBuilding && !alreadyTesting, currentHasTests)
+    api.setCanToggleTests(currentHasTests && !alreadyBuilding && !alreadyTesting)
     api.setTestingMode(testingMode)
   }
 
@@ -280,14 +296,12 @@ export async function watchCommand(opts: WatchOptions) {
 
     // Mirror `sand test`'s `.sandstone/test.log` from the watcher, and
     // feed the daemon's test log buffer so `sandstone://test-log`
-    // reflects this run. FileSink buffers internally and auto-flushes
-    // at the high-water mark, so per-line cost is just a buffer append.
-    const testLogPath = join(opts.path, '.sandstone', 'test.log')
-    let testLogWriter: Bun.FileSink | null = null
+    // reflects this run. The `test` sink is registered alongside
+    // `watch` and `connect` for the duration of the test run; the
+    // `test` and `connect` sinks are closed explicitly in the
+    // `finally` block so they don't accumulate across runs.
     try {
-      await fs.ensureDir(join(opts.path, '.sandstone'))
-      await Bun.write(testLogPath, `=== Watch test session started at ${new Date(sessionStartedAt).toISOString()} ===\n`)
-      testLogWriter = Bun.file(testLogPath).writer({ highWaterMark: 16 * 1024 })
+      logger.registerSink('test', join(opts.path, '.sandstone', 'test.log'), 'Watch test session')
     } catch (err) {
       logWarn(`[watch] could not open test log: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -302,26 +316,14 @@ export async function watchCommand(opts: WatchOptions) {
             if (e.passed) testPassCount++
             else testFailCount++
           } else if (e.event === 'summary') {
-            // Authoritative — overwrites per-test tallies (handles
-            // both successful builds that emit summary and edge cases
-            // where a per-test event fires before its complement).
             testPassCount = e.pass
             testFailCount = e.fail
           }
           const lines = renderTestEvent(e)
           for (const line of lines) log(line)
-          // Mirror to .sandstone/test.log (sans ANSI) and daemon test buffer.
+          // Mirror to .sandstone/test.log and daemon test buffer.
           if (lines.length > 0) {
-            if (testLogWriter) {
-              try {
-                const stripped = lines
-                  .map((l) => stripVTControlCharacters(l).replace(/\n+$/, ''))
-                  .join('\n') + '\n'
-                testLogWriter.write(stripped)
-              } catch (err) {
-                logWarn(`[watch] test log write failed: ${err instanceof Error ? err.message : String(err)}`)
-              }
-            }
+            for (const line of lines) log(line)
             void dc.publishLog({
               target: 'test',
               entries: lines.map((line) => ({ line, ts: Date.now(), stream: 'stdout' })),
@@ -346,10 +348,6 @@ export async function watchCommand(opts: WatchOptions) {
       testAbortController = null
       alreadyTesting = false
       suppressHostLog = false
-      if (testLogWriter) {
-        try { await testLogWriter.end() } catch {}
-        testLogWriter = null
-      }
       getWatchUIAPI()?.setStatus('watching')
       syncTestsBindings()
       if (needRebuild) {
@@ -401,9 +399,9 @@ export async function watchCommand(opts: WatchOptions) {
       onToggleTests: handleToggleTests,
       onCancelTest: handleCancelTest,
       cwd: opts.path,
-      exit: () => exit(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient, daemonHandle),
+      exit: () => exit(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, log, unmountInk, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient, daemonHandle),
       onRunUpdates: async (commands) => {
-        await cleanup(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient, daemonHandle)
+        await cleanup(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, log, unmountInk, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient, daemonHandle)
         for (const cmd of commands) {
           try {
             console.log(`$ ${cmd}`)
@@ -790,7 +788,6 @@ export async function watchCommand(opts: WatchOptions) {
       }
     })
     try {
-      // TODO: onLines never fires when the daemon surface is a DaemonClient, please investigate, if you can't figure it out add debug logging. I want you to run `bun ../sandstone-cli/lib/index.js connect` inside of the sandstone-template directory with a Bash tool set to background mode so you can view the daemon logs
       const sub = await s.attachLog()
       activeLogSub = sub
       sub.onLines((lines) => {
@@ -810,49 +807,36 @@ export async function watchCommand(opts: WatchOptions) {
     }
   }
 
-  /** Empty default host config — `watch --daemon` currently doesn't
-   *  expose `--host-config`/`--host-config-file`; bootstrapHost picks
-   *  defaults from the chosen host type. */
-  const loadHostConfig = async (): Promise<HostConfigInput> => {
-    return { projectRoot: opts.path }
-  }
-
   const ensureOwnDaemon = (): Promise<DaemonHandle> => {
     if (daemonHandle) return Promise.resolve(daemonHandle)
     if (!bootstrapInFlight) {
       bootstrapInFlight = (async () => {
         daemonLog('Starting in-process connect daemon')
-        const hostConfig = await loadHostConfig()
-        if (hostConfig.projectRoot === undefined) hostConfig.projectRoot = opts.path
-        let host: HostProvider
-        weSpawnedIntegrated = false
-        const hostType: HostType = opts.hostType ?? 'integrated'
-        try {
-          if (hostType === 'integrated') {
-            daemonLog('Integrated connect host starting up...')
-          }
-          const result = await bootstrapHost({
-            hostType,
-            config: hostConfig,
-            silent: true,
-            userProvidedHostSettings: !!opts.hostType,
-          })
-          if (result.host.type === 'integrated') {
-            const integrated = result.host as IntegratedHost
-            setTimeout(() => daemonLog(chalk`Integrated connect host online! Join in-game at {yellow localhost${integrated.serverPort === 25565 ? '' : `:${integrated.serverPort}`}}`), 100)
-          }
-          host = result.host
-          weSpawnedIntegrated = result.spawnedByUs
-        } catch (err) {
-          const msg = err instanceof BootstrapError
-            ? `${err.message} (${err.code})`
-            : err instanceof Error ? err.message : String(err)
-          throw new Error(`Failed to bootstrap host for in-process daemon: ${msg}`)
+        const connectSink = prepareConnectSink(opts.path)
+        const resolved = await resolveHostAndConfig({
+          projectRoot: opts.path,
+          cliHostType: opts.hostType,
+          sink: connectSink,
+        })
+        if (resolved.hostType === 'integrated') {
+          daemonLog('Integrated connect host starting up...')
         }
-        skipNextReload = weSpawnedIntegrated && host.type === 'integrated'
-
-        daemonHandle = await Daemon.connect({ host, projectRoot: opts.path, port: 0 })
-        return daemonHandle
+        const { host, handle, spawnedByUs } = await startInProcessDaemon({
+          projectRoot: opts.path,
+          hostType: resolved.hostType,
+          hostConfig: resolved.config,
+          userProvidedHostSettings: resolved.userProvidedHostSettings,
+          sink: connectSink,
+          onHostReady: (h, spawnedByUs) => {
+            weSpawnedIntegrated = spawnedByUs
+            if (h.type === 'integrated') {
+              const integrated = h as IntegratedHost
+              setTimeout(() => daemonLog(chalk`Integrated connect host online! Join in-game at {yellow localhost${integrated.serverPort === 25565 ? '' : `:${integrated.serverPort}`}}`), 100)
+            }
+          },
+        })
+        skipNextReload = spawnedByUs && host.type === 'integrated'
+        return handle
       })()
     }
     return bootstrapInFlight
@@ -865,7 +849,7 @@ export async function watchCommand(opts: WatchOptions) {
         const endpoint = await readEndpoint(opts.path)
         if (endpoint) {
           try {
-            daemonClient = await openDaemonClient({ endpoint })
+            daemonClient = await DaemonClient.open({ endpoint })
             daemonLog('Connected to host daemon')
             await wireSurface(daemonClient)
             clearInterval(daemonPoll)
@@ -891,7 +875,7 @@ export async function watchCommand(opts: WatchOptions) {
         daemonPoll = undefined
         return
       } catch (err) {
-        const hostType: HostType = opts.hostType ?? 'integrated'
+        const hostType: HostType = opts.hostType ?? connectHost?.type ?? 'integrated'
         const isIntegrated = hostType === 'integrated'
         logWarn(`[watch] failed to start in-process daemon: ${err instanceof Error ? err.message : String(err)}`)
         if (isIntegrated) {
@@ -937,7 +921,7 @@ export async function watchCommand(opts: WatchOptions) {
       ignore: ignorePatterns,
     }
   )
-  sigintHandler = async () => await exit(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
+  sigintHandler = async () => await exit(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, log, unmountInk, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
   process.on('SIGINT', sigintHandler)
 }
 
@@ -946,8 +930,8 @@ async function cleanup(
   buildWorker: Worker | null | undefined,
   shuttingDown: { flag: boolean },
   weStartedIntegrated: boolean,
+  log: LoggerSink['log'],
   unmountInk?: () => void,
-  closeLogger?: () => Promise<void>,
   sigintHandler?: () => Promise<void>,
   linkVersionWatchers?: { file: string }[],
   daemonPoll?: ReturnType<typeof setInterval>,
@@ -973,7 +957,7 @@ async function cleanup(
   }
   daemonClient?.close()
   log('Watch stopped.')
-  await closeLogger?.()
+  await logger.closeAll()
   // Allow TUI to render last log entries
   await new Promise<void>((res) => setTimeout(() => res(), 50))
   unmountInk?.()
@@ -984,8 +968,8 @@ async function exit(
   buildWorker: Worker | null | undefined,
   shuttingDown: { flag: boolean },
   weSpawnedIntegrated: boolean,
+  log: LoggerSink['log'],
   unmountInk?: () => void,
-  closeLogger?: () => Promise<void>,
   sigintHandler?: () => Promise<void>,
   linkVersionWatchers?: { file: string }[],
   daemonPoll?: ReturnType<typeof setInterval>,
@@ -993,7 +977,7 @@ async function exit(
   daemonHandle?: DaemonHandle,
 ) {
   log('Watch stopping...')
-  await cleanup(subscription, buildWorker, shuttingDown, weSpawnedIntegrated, unmountInk, closeLogger, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient, daemonHandle)
+  await cleanup(subscription, buildWorker, shuttingDown, weSpawnedIntegrated, log, unmountInk, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient, daemonHandle)
   process.exit(0)
 }
 

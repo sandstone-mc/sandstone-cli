@@ -4,12 +4,20 @@ import chalk from 'chalk'
 import { split } from 'obliterator'
 
 import type { BuildResult, ResourceCounts } from '../../ui/types.js'
-import { log, logDebug, logError, logInfo, logWarn, initLoggerNoFile, initBuildLogger, setSilent } from '../../ui/logger.js'
+import { logger, type LoggerSink } from '../../utils/logger.js'
 import { add, hash } from '../../utils/index.js'
 import * as fs from '../../utils/fs.js'
 import { resolveStackTrace } from '../../utils/source-map.js'
 import { syncLinkedLibraries } from '../link.js'
 import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../../utils/updateCheck.js'
+
+let activeSink: LoggerSink = logger.sinks.console
+const log = (...a: unknown[]) => activeSink.log(...a)
+const logInfo = (...a: unknown[]) => activeSink.logInfo(...a)
+const logDebug = (...a: unknown[]) => activeSink.logDebug(...a)
+const logWarn = (...a: unknown[]) => activeSink.logWarn(...a)
+const logError = (e: unknown) => activeSink.logError(e)
+const setSilent = (v: boolean) => activeSink.setSilent(v)
 
 import {
   type SandstoneCache,
@@ -239,7 +247,9 @@ async function _buildProject(
   existingContext?: BuildContext,
   watching = false
 ): Promise<BuildProjectResult | undefined> {
-  await syncLinkedLibraries(folder)
+  await syncLinkedLibraries(folder, activeSink)
+  const syncLinkedLibrariesForLocal: (projectPath: string) => Promise<number> =
+    (projectPath) => syncLinkedLibraries(projectPath, activeSink)
 
   const packageJsonPath = path.join(folder, 'package.json')
   const packageJson = JSON.parse(await fs.readText(packageJsonPath))
@@ -300,10 +310,10 @@ async function _buildProject(
 
     // Functions available in every script
     hash,
-    syncLinkedLibraries,
-    getClientPath,
-    getClientWorldPath,
-    checkSymlinksAvailable,
+    syncLinkedLibraries: syncLinkedLibrariesForLocal,
+    getClientPath: () => getClientPath(activeSink),
+    getClientWorldPath: (worldName: string, minecraftPath?: string) => getClientWorldPath(worldName, minecraftPath, activeSink),
+    checkSymlinksAvailable: (local: sandstone.BeforeSaveLocal) => checkSymlinksAvailable(local, activeSink),
     fs,
 
     // Function fields populated with their real imports. Their signatures
@@ -312,7 +322,7 @@ async function _buildProject(
     processExternalResources,
     processPackTypeOutput,
     createArchive,
-    exportPack,
+    exportPack: (local: sandstone.AfterAllLocal, destPath: string, packType: PackType, archivedOutput: boolean, target: 'client' | 'server') => exportPack(local, destPath, activeSink, packType, archivedOutput, target),
     getExportPath,
     runExportHandler,
     cleanupOldArchives,
@@ -333,12 +343,12 @@ async function _buildProject(
 
   // Auto-detect client path if a world or root export is requested.
   if (local.worldName && !cliOptions.production) {
-    local.clientPath ??= await getClientPath()
+    local.clientPath ??= await local.getClientPath()
     if (local.clientPath) {
-      await getClientWorldPath(local.worldName, local.clientPath)
+      await local.getClientWorldPath(local.worldName, local.clientPath)
     }
   } else if (local.root && !cliOptions.production) {
-    local.clientPath ??= await getClientPath()
+    local.clientPath ??= await local.getClientPath()
   }
 
   if (local.worldName && local.root) {
@@ -704,13 +714,14 @@ export async function buildCommand(opts: BuildOptions, _folder: string | undefin
 export async function buildCommand(opts: BuildOptions, _folder?: string, silent = false): Promise<BuildResult | void> {
   const folder = (typeof _folder === 'string') ? _folder : opts.path
 
-  initLoggerNoFile()
+  activeSink = logger.sinks.console
   setSilent(silent)
 
   let closeDebugLog: (() => Promise<void>) | undefined
   let restoreConsole: (() => void) | undefined
   if (opts.debug) {
-    closeDebugLog = initBuildLogger(folder)
+    closeDebugLog = logger.registerSink('build', path.join(folder, '.sandstone', 'build-debug.log'), 'Build debug')
+    activeSink = logger.sinks.build
     restoreConsole = captureConsoleToFile()
   }
 

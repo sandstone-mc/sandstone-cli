@@ -279,3 +279,54 @@ export class LogMatcher {
     }
   }
 }
+
+export class WaitLogSubscriptionRegistry {
+  private nextId = 1
+  private readonly byId = new Map<string, { socketKey: string, handle: { interrupt(): Promise<void> } }>()
+  private readonly byWs = new Map<string, Set<string>>()
+
+  generateId(): string {
+    let id: string
+    do {
+      id = `waitlog-${this.nextId++}`
+    } while (this.byId.has(id))
+    return id
+  }
+
+  register(subscriptionId: string, socketKey: string, handle: { interrupt(): Promise<void> }): void {
+    this.byId.set(subscriptionId, { socketKey, handle })
+    let set = this.byWs.get(socketKey)
+    if (!set) {
+      set = new Set()
+      this.byWs.set(socketKey, set)
+    }
+    set.add(subscriptionId)
+  }
+
+  drop(subscriptionId: string): { interrupt(): Promise<void> } | null {
+    const entry = this.byId.get(subscriptionId)
+    if (!entry) return null
+    this.byId.delete(subscriptionId)
+    this.byWs.get(entry.socketKey)?.delete(subscriptionId)
+    return entry.handle
+  }
+
+  async dropAllForWs(socketKey: string): Promise<void> {
+    const set = this.byWs.get(socketKey)
+    if (!set) return
+    const ids = Array.from(set)
+    this.byWs.delete(socketKey)
+    for (const id of ids) {
+      const entry = this.byId.get(id)
+      if (!entry) continue
+      this.byId.delete(id)
+      try {
+        await entry.handle.interrupt()
+      } catch {}
+    }
+  }
+
+  size(): number {
+    return this.byId.size
+  }
+}

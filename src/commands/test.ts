@@ -1,8 +1,8 @@
 import path, { join, resolve } from 'path'
-import { initTestLogger, logInfo } from '../ui/logger.js'
+import { logger } from '../utils/logger.js'
 import { readdir, unlink } from 'fs/promises'
 import { subscribe } from '@parcel/watcher'
-import { connect as openClient, type Client } from './connect/client.js'
+import { Client as DaemonClient } from './connect/client.js'
 import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
 import { BootstrapError, bootstrapHost } from './connect/bootstrap.js'
 import { KNOWN_HOST_TYPES } from '../hosts/types.js'
@@ -317,7 +317,7 @@ export async function runTests(
   opts: TestCommandOptions,
   signal?: AbortSignal,
   onEvent?: TestEventSink,
-  existingClient?: Client,
+  existingClient?: DaemonClient,
 ): Promise<number> {
   const projectRoot = resolve(opts.path)
   const sink: TestEventSink = onEvent ?? ((e) => console.log(JSON.stringify(e)))
@@ -392,14 +392,15 @@ export async function runTests(
 export async function testCommand(opts: TestCommandOptions): Promise<void> {
   const json = opts.json === true
   if (!json) printSplash()
-  const closeFileLogger = initTestLogger(opts.path)
+  const closeTestLog = logger.registerSink('test', join(opts.path, '.sandstone', 'test.log'), 'Test')
+  const logInfo = logger.sinks.test.logInfo
   const sink: TestEventSink = json
     ? (e) => { logInfo(JSON.stringify(e)) }
     : (e) => { for (const line of renderTestEvent(e)) logInfo(line) }
   try {
     process.exit(await runTests(opts, undefined, sink))
   } finally {
-    await closeFileLogger()
+    await closeTestLog()
   }
 }
 
@@ -485,10 +486,10 @@ async function runDaemon(
   onEvent: TestEventSink,
   projectRoot: string,
   signal?: AbortSignal,
-  existingClient?: Client,
+  existingClient?: DaemonClient,
 ): Promise<number> {
   const ownsClient = !existingClient
-  const client = existingClient ?? (await openClient({ endpoint: endpoint! }))
+  const client = existingClient ?? (await DaemonClient.open({ endpoint: endpoint! }))
   if (!client.welcome.capabilities.executeRawCommand) {
     emitError('Host does not support executeRawCommand', onEvent)
     if (ownsClient) client.close()

@@ -1,8 +1,8 @@
 import { resolve, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { connect as openClient, type Client } from './connect/client.js'
+import { Client } from './connect/client.js'
 import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
-import { BootstrapError, bootstrapHost } from './connect/bootstrap.js'
+import { bootstrapWithShimLogger, prepareConnectSink, resolveHostAndConfig } from './connect/daemon-setup.js'
 import { Daemon } from './connect/daemon.js'
 import type { HostConfigInput, HostProvider, HostType } from '../hosts/types.js'
 import { DEFAULT_HOST_TYPE } from './connect/index.js'
@@ -65,27 +65,12 @@ export async function runCommand(
   const daemonAlive = !!(endpoint && (await pidAlive(endpoint.pid)))
 
   // 5. Direct-mode host type resolution.
-  let hostType: HostType | undefined
-  if (opts.hostType) {
-    hostType = opts.hostType as HostType
-  }
-  if (!daemonAlive) {
-    if (!hostType) hostType = DEFAULT_HOST_TYPE
-    if (!KNOWN_HOST_TYPES.has(hostType as HostType)) {
-      console.error(chalk`{red Error:} Unknown --host-type '${hostType}'`)
-      process.exit(2)
-    }
-    if (opts.hostConfig && opts.hostConfigFile) {
-      console.error(chalk`{red Error:} Pass either --host-config or --host-config-file, not both`)
-      process.exit(2)
-    }
-  }
-  const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
+  const { hostType, userProvidedHostSettings } = resolveDirectHostType(opts)
 
   // 6. Daemon-mode fast path.
   if (daemonAlive && endpoint) {
     try {
-      const client = await openClient({ endpoint })
+      const client = await Client.open({ endpoint })
 
       if (!client.welcome.capabilities.executeRawCommand) {
         console.error(chalk`{red Error:} Host does not support executeRawCommand`)
@@ -144,49 +129,71 @@ export async function runCommand(
   const directHostType = hostType ?? DEFAULT_HOST_TYPE
   const hostConfig = await loadHostConfig(opts)
   if (hostConfig.projectRoot === undefined) hostConfig.projectRoot = projectRoot
-  let host: HostProvider
-  let weStarted = false
-  try {
-    const result = await bootstrapHost({
-      hostType: directHostType,
-      config: hostConfig,
-      silent: true,
-      userProvidedHostSettings,
-    })
-    host = result.host
-    weStarted = result.spawnedByUs
-  } catch (err) {
-    const msg =
-      err instanceof BootstrapError
-        ? `${err.message} (${err.code})`
-        : err instanceof Error
-          ? err.message
-          : String(err)
-    console.error(chalk`{red Error:} ${msg}`)
-    process.exit(1)
-  }
+  await runDirectCommands({
+    hostType: directHostType,
+    hostConfig,
+    userProvidedHostSettings,
+    commands: [command],
+    expectRegex,
+    timeoutMs,
+    projectRoot,
+  })
+}
+
+async function runDirectCommands(opts: {
+  hostType: HostType,
+  hostConfig: HostConfigInput,
+  userProvidedHostSettings: boolean,
+  commands: string[],
+  expectRegex: RegExp | null,
+  timeoutMs: number,
+  projectRoot: string,
+}): Promise<void> {
+  const runSink = prepareConnectSink(opts.projectRoot, {
+    headerText: 'Run',
+    liveCallback: () => {},
+  })
+  const resolved = await resolveHostAndConfig({
+    projectRoot: opts.projectRoot,
+    cliHostType: undefined,
+    cliHostConfig: undefined,
+    cliHostConfigFile: undefined,
+    sink: runSink,
+  })
+  const { host, spawnedByUs: weStarted } = await bootstrapWithShimLogger({
+    projectRoot: opts.projectRoot,
+    hostType: resolved.hostType,
+    hostConfig: resolved.config,
+    userProvidedHostSettings: resolved.userProvidedHostSettings,
+    sink: runSink,
+  })
 
   if (!host.capabilities.has('executeRawCommand')) {
-    console.error(chalk`{red Error:} Host '${directHostType}' does not support executeRawCommand`)
+    console.error(chalk`{red Error:} Host '${resolved.hostType}' does not support executeRawCommand`)
     await safeDisconnect(host)
-    process.exit(1)
+    process.exit(2)
   }
 
   const daemon = Daemon.forDirect(host)
   try {
-    await runOneDirect(daemon, command, expectRegex, timeoutMs)
+    const expectIdx = opts.expectRegex ? opts.commands.length - 1 : -1
+    for (let i = 0; i < opts.commands.length; i++) {
+      const cmd = opts.commands[i]!
+      const isLast = i === expectIdx
+      await runOneDirect(daemon, cmd, isLast ? opts.expectRegex : null, opts.timeoutMs)
+    }
   } catch (err) {
     console.error(chalk`{red Error:} ${err instanceof Error ? err.message : String(err)}`)
     await safeDisconnect(host)
     process.exit(1)
+  } finally {
+    if (weStarted && host.stopServer && host.capabilities.has('stopServer')) {
+      try {
+        await host.stopServer()
+      } catch {}
+    }
+    await safeDisconnect(host)
   }
-
-  if (weStarted && host.stopServer && host.capabilities.has('stopServer')) {
-    try {
-      await host.stopServer()
-    } catch {}
-  }
-  await safeDisconnect(host)
 }
 
 function compileRegex(pattern: string): RegExp {
@@ -266,6 +273,31 @@ async function safeDisconnect(host: HostProvider): Promise<void> {
   } catch {}
 }
 
+// TODO: Shouldn't this be replaced with one of the helpers in daemon-setup.ts
+function resolveDirectHostType(opts: RunCommandOptions): {
+  hostType: HostType,
+  userProvidedHostSettings: boolean,
+} {
+  if (opts.hostType?.includes(',')) {
+    console.error(
+      chalk`{red Error:} Only one --host-type is supported, got '${opts.hostType}'. Composite daemons were removed.`,
+    )
+    process.exit(2)
+  }
+  const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
+  const hostType: HostType = (opts.hostType as HostType | undefined) ?? DEFAULT_HOST_TYPE
+  if (!KNOWN_HOST_TYPES.has(hostType)) {
+    console.error(chalk`{red Error:} Unknown --host-type '${hostType}'`)
+    process.exit(2)
+  }
+  if (opts.hostConfig && opts.hostConfigFile) {
+    console.error(chalk`{red Error:} Pass either --host-config or --host-config-file, not both`)
+    process.exit(2)
+  }
+  return { hostType, userProvidedHostSettings }
+}
+
+/**
 /**
  * Trim, drop blanks, drop `#`-prefixed comments. Mirrors Minecraft's
  * own mcfunction loader so the on-disk file and the wire command are
@@ -428,35 +460,10 @@ async function runCommands(
   const endpoint = await readEndpoint(projectRoot)
   const daemonAlive = !!(endpoint && (await pidAlive(endpoint.pid)))
 
-  let hostType: HostType | undefined
-  if (opts.hostType) {
-    if (opts.hostType.includes(',')) {
-      console.error(
-        chalk`{red Error:} Only one --host-type is supported, got '${opts.hostType}'. Composite daemons were removed.`,
-      )
-      process.exit(2)
-    }
-    hostType = opts.hostType as HostType
-  }
-  const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
-  if (!daemonAlive) {
-    if (!hostType) hostType = DEFAULT_HOST_TYPE
-    if (!KNOWN_HOST_TYPES.has(hostType as HostType)) {
-      console.error(chalk`{red Error:} Unknown --host-type '${hostType}'`)
-      process.exit(2)
-    }
-    if (opts.hostConfig && opts.hostConfigFile) {
-      console.error(chalk`{red Error:} Pass either --host-config or --host-config-file, not both`)
-      process.exit(2)
-    }
-    if (!opts.hostConfig && !opts.hostConfigFile) {
-      opts.hostConfig = JSON.stringify({})
-    }
-  }
-  const resolvedHostType: HostType = hostType ?? DEFAULT_HOST_TYPE
+  const { hostType: resolvedHostType, userProvidedHostSettings } = resolveDirectHostType(opts)
 
   if (daemonAlive && endpoint) {
-    const client = await openClient({ endpoint })
+    const client = await Client.open({ endpoint })
     if (!client.welcome.capabilities.executeRawCommand) {
       console.error(chalk`{red Error:} Host does not support executeRawCommand`)
       client.close()
@@ -478,48 +485,15 @@ async function runCommands(
   // Direct mode.
   const hostConfig = await loadHostConfig(opts)
   if (hostConfig.projectRoot === undefined) hostConfig.projectRoot = projectRoot
-  let host: HostProvider
-  let weStarted = false
-  try {
-    const result = await bootstrapHost({
-      hostType: resolvedHostType,
-      config: hostConfig,
-      silent: true,
-      userProvidedHostSettings,
-    })
-    host = result.host
-    weStarted = result.spawnedByUs
-  } catch (err) {
-    const msg =
-      err instanceof BootstrapError
-        ? `${err.message} (${err.code})`
-        : err instanceof Error
-          ? err.message
-          : String(err)
-    console.error(chalk`{red Error:} ${msg}`)
-    process.exit(1)
-  }
-  if (!host.capabilities.has('executeRawCommand')) {
-    console.error(chalk`{red Error:} Host '${resolvedHostType}' does not support executeRawCommand`)
-    await safeDisconnect(host)
-    process.exit(1)
-  }
-
-  const daemon = Daemon.forDirect(host)
-  try {
-    for (let i = 0; i < commands.length; i++) {
-      const cmd = commands[i]!
-      const isLast = i === expectIdx
-      await runOneDirect(daemon, cmd, isLast ? expectRegex : null, timeoutMs)
-    }
-  } finally {
-    if (weStarted && host.stopServer && host.capabilities.has('stopServer')) {
-      try {
-        await host.stopServer()
-      } catch {}
-    }
-    await safeDisconnect(host)
-  }
+  await runDirectCommands({
+    hostType: resolvedHostType,
+    hostConfig,
+    userProvidedHostSettings,
+    commands,
+    expectRegex,
+    timeoutMs,
+    projectRoot,
+  })
 }
 
 async function runOneDaemon(

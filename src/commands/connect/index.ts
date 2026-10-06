@@ -1,12 +1,11 @@
 import { resolve } from 'node:path'
-import { connect as openClient } from './client.js'
-import { bootstrapHost, BootstrapError } from './bootstrap.js'
-import { Daemon, type DaemonHandle } from './daemon.js'
-import { CONSOLE_LOGGER } from './logger.js'
+import { Client } from './client.js'
+import { prepareConnectSink, resolveHostAndConfig, startInProcessDaemon } from './daemon-setup.js'
 import { readEndpoint, pidAlive } from './endpoint-file.js'
 import { isObject } from '../../utils/guards.js'
-import { HostConfigCliError, parseHostConfig } from './host-config.js'
-import { Capability, KNOWN_HOST_TYPES, capabilitiesToRecord, type HostConfigInput, type HostType } from '../../hosts/types.js'
+import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
+import { Capability, capabilitiesToRecord, type HostConfigInput, type HostType } from '../../hosts/types.js'
+import type { LoggerSink } from '../../utils/logger.js'
 import { printSplash } from '../../utils/index.js'
 import { deployDatapack } from '../deploy.js'
 import { restartServer, checkRestartCapabilities } from '../restart-server.js'
@@ -31,78 +30,70 @@ export interface ConnectCommandOptions {
 export async function connectCommand(opts: ConnectCommandOptions): Promise<void> {
   const projectRoot = resolve(opts.path)
 
+  const connectSink = prepareConnectSink(projectRoot, {
+    liveCallback: (sink) => {
+      sink.setLiveCallback((level, args) => {
+        const text = args.map((a) =>
+          typeof a === 'string' ? a
+          : Array.isArray(a) ? a.join('')
+          : String(a)
+        ).join(' ')
+        if (level === 'ERROR' || level === 'WARN') process.stderr.write(`${text}\n`)
+        else process.stdout.write(`${text}\n`)
+      })
+    },
+  })
+  const logInfo = connectSink.logInfo
+  const logError = connectSink.logError
+
   if (opts.shutdown) {
-    await runShutdown(projectRoot)
+    await runShutdown(projectRoot, connectSink)
     return
   }
 
   if (opts.reload) {
-    await runReloadResources(projectRoot)
+    await runReloadResources(projectRoot, connectSink)
     return
   }
 
   printSplash()
 
-  const hostType = parseHostType(opts.hostType)
-  if (!KNOWN_HOST_TYPES.has(hostType)) {
-    console.error(
-      chalk`{red Error:} Unknown --host-type '${hostType}' (one of: ssh, ftp, integrated, mcsmanager-login)`,
-    )
-    process.exit(2)
-  }
-
-  if (opts.deploy && hostType === 'integrated') {
-    console.error(
-      chalk`{red Error:} --deploy is not supported with --host-type integrated. The integrated host exposes build output via symlink; there is nothing to push.`,
-    )
-    process.exit(2)
-  }
-
-  const userProvidedHostSettings = !!opts.hostType || !!opts.hostConfig || !!opts.hostConfigFile
-
-  let parsedConfig
-  try {
-    parsedConfig = await parseHostConfig(opts.hostConfig, opts.hostConfigFile)
-  } catch (err) {
-    if (err instanceof HostConfigCliError) {
-      console.error(chalk`{red Error:} ${err.message}`)
-    } else {
-      throw err
-    }
-    process.exit(2)
-  }
-  for (const w of parsedConfig.warnings) {
-    console.error(chalk`{yellow Warning:} ${w}`)
-  }
-  const config = normalizeConfig(parsedConfig.config, projectRoot)
-
-  const port = opts.port !== undefined ? Number(opts.port) : 0
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    console.error(chalk`{red Error:} --port must be an integer in [0, 65535]`)
-    process.exit(2)
-  }
-
-  const handle = await bootstrapAndConnect({
-    hostType,
-    config,
+  const resolved = await resolveHostAndConfig({
     projectRoot,
+    cliHostType: opts.hostType,
+    cliHostConfig: opts.hostConfig,
+    cliHostConfigFile: opts.hostConfigFile,
+    cliPort: opts.port,
+    sink: connectSink,
+  })
+
+  if (opts.deploy && resolved.hostType === 'integrated') {
+    logError(chalk`{red Error:} --deploy is not supported with --host-type integrated. The integrated host exposes build output via symlink; there is nothing to push.`)
+    process.exit(2)
+  }
+
+  const { handle } = await startInProcessDaemon({
+    projectRoot,
+    hostType: resolved.hostType,
+    hostConfig: resolved.config,
+    userProvidedHostSettings: resolved.userProvidedHostSettings,
     bind: opts.bind,
-    port,
-    userProvidedHostSettings,
+    port: resolved.port,
+    sink: connectSink,
   })
 
   if (opts.deploy) {
     if (!handle.daemon.host.capabilities.has(Capability.WriteFileStream) || !handle.daemon.host.writeFileStream) {
       await handle.shutdown()
-      console.error(
-        chalk`{red Error:} --deploy needs a host that supports writeFileStream. '${hostType}' does not (capabilities: ${JSON.stringify([...handle.daemon.host.capabilities])}).`,
+      logError(
+        chalk`{red Error:} --deploy needs a host that supports writeFileStream. '${resolved.hostType}' does not (capabilities: ${JSON.stringify([...handle.daemon.host.capabilities])}).`,
       )
       process.exit(2)
     }
 
     let deployErr: unknown
     try {
-      const client = await openClient({ endpoint: handle.endpoint })
+      const client = await Client.open({ endpoint: handle.endpoint })
       try {
         const result = await deployDatapack({
           daemon: client,
@@ -111,34 +102,24 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
         const uploaded = [result, ...result.dependencies].filter((r) => !r.unchanged)
         const skipped = [result, ...result.dependencies].filter((r) => r.unchanged)
         if (uploaded.length === 0) {
-          console.log(
-            chalk`{cyan [connect]} nothing to deploy — ${skipped.length} archive(s) already match the server`,
-          )
+          logInfo(chalk`{cyan [connect]} nothing to deploy — ${skipped.length} archive(s) already match the server`)
         } else {
-          console.log(
-            chalk`{cyan [connect]} deployed ${uploaded.length} archive(s):`,
-          )
+          logInfo(chalk`{cyan [connect]} deployed ${uploaded.length} archive(s):`)
           if (!result.unchanged) {
-            console.log(
-              chalk`{cyan [connect]}   ${result.archiveName} -> ${result.remotePath} (${result.bytesWritten} bytes)`,
-            )
+            logInfo(chalk`{cyan [connect]}   ${result.archiveName} -> ${result.remotePath} (${result.bytesWritten} bytes)`)
           }
           for (const dep of result.dependencies) {
             if (dep.unchanged) continue
-            console.log(
-              chalk`{cyan [connect]}   ${dep.name} -> ${dep.remotePath} (${dep.bytesWritten} bytes)`,
-            )
+            logInfo(chalk`{cyan [connect]}   ${dep.name} -> ${result.remotePath} (${dep.bytesWritten} bytes)`)
           }
           if (skipped.length > 0) {
-            console.log(
-              chalk`{cyan [connect]}   skipped (unchanged): ${skipped.length} archive(s)`,
-            )
+            logInfo(chalk`{cyan [connect]}   skipped (unchanged): ${skipped.length} archive(s)`)
           }
         }
         if (result.reloaded) {
-          console.log(chalk`{cyan [connect]} reload: ok`)
+          logInfo(chalk`{cyan [connect]} reload: ok`)
         } else if (uploaded.length > 0) {
-          console.log(chalk`{cyan [connect]} reload: skipped (daemon has no executeRawCommand — run /reload manually)`)
+          logInfo(chalk`{cyan [connect]} reload: skipped (daemon has no executeRawCommand — run /reload manually)`)
         }
       } finally {
         client.close()
@@ -150,11 +131,11 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
       await handle.shutdown()
       const message = deployErr instanceof Error ? deployErr.message : String(deployErr)
       if (message.startsWith('deployed but reload failed')) {
-        console.error(
+        logError(
           chalk`{red Error:} ${message}\n\nThe deploy itself succeeded; the server didn't reload. Run \`/reload\` manually.`,
         )
       } else {
-        console.error(chalk`{red Error:} deploy failed: ${message}`)
+        logError(chalk`{red Error:} deploy failed: ${message}`)
       }
       process.exit(1)
     }
@@ -167,20 +148,18 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     })
     if (capabilityError) {
       await handle.shutdown()
-      console.error(chalk`{red Error:} ${capabilityError}`)
+      logError(chalk`{red Error:} ${capabilityError}`)
       process.exit(2)
     }
 
     let restartErr: unknown
     try {
-      const client = await openClient({ endpoint: handle.endpoint })
+      const client = await Client.open({ endpoint: handle.endpoint })
       try {
         const result = await restartServer(client, {
-          log: (line) => console.log(chalk`{cyan [connect]} ${line}`),
+          log: (line) => logInfo(chalk`{cyan [connect]} ${line}`),
         })
-        console.log(
-          chalk`{cyan [connect]} server restarted on \`${result.hostType}\` in ${result.elapsedMs}ms`,
-        )
+        logInfo(chalk`{cyan [connect]} server restarted on \`${result.hostType}\` in ${result.elapsedMs}ms`)
       } finally {
         client.close()
       }
@@ -190,132 +169,60 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
     if (restartErr !== undefined) {
       await handle.shutdown()
       const message = restartErr instanceof Error ? restartErr.message : String(restartErr)
-      console.error(chalk`{red Error:} ${message}`)
+      logError(chalk`{red Error:} ${message}`)
       process.exit(1)
     }
   }
-  console.log(
-    chalk`{cyan [connect]} listening on {bold ${handle.url}} (pid ${handle.endpoint.pid})`,
-  )
-  console.log(chalk`{cyan [connect]} endpoint file: ${projectRoot + '/.sandstone/connect.url'}`)
-
-  // Keep the process alive until shutdown completes, then exit. The
-  // signal handlers and the `shutdown` RPC both call
-  // `handle.shutdown()` which resolves `handle.done` — at which point
-  // we exit cleanly. process.exit is necessary because Bun otherwise
-  // keeps the process alive on lingering handles (subprocess stdio,
-  // etc.).
   await handle.done
   process.exit(0)
 }
 
-async function bootstrapAndConnect(opts: {
-  hostType: HostType
-  config: HostConfigInput
-  projectRoot: string
-  bind?: string
-  port: number
-  userProvidedHostSettings: boolean
-}): Promise<DaemonHandle> {
-  let bootstrapResult: Awaited<ReturnType<typeof bootstrapHost>>
-  try {
-    bootstrapResult = await bootstrapHost({
-      hostType: opts.hostType,
-      config: opts.config,
-      silent: true,
-      userProvidedHostSettings: opts.userProvidedHostSettings,
-    })
-  } catch (err) {
-    if (err instanceof BootstrapError) {
-      console.error(chalk`{red Error:} ${err.message} (${err.code})`)
-    } else {
-      console.error(chalk`{red Error:} ${err instanceof Error ? err.message : String(err)}`)
-    }
-    process.exit(1)
-  }
-  const handle = await Daemon.connect({
-    host: bootstrapResult.host,
-    projectRoot: opts.projectRoot,
-    bind: opts.bind,
-    port: opts.port,
-    logger: CONSOLE_LOGGER,
-  })
-  return handle
-}
-
 export const DEFAULT_HOST_TYPE: HostType = 'integrated'
-
-function parseHostType(raw: string | undefined): HostType {
-  // No flag → default to the local-dev daemon.
-  if (!raw) return DEFAULT_HOST_TYPE
-  return raw as HostType
-}
-
-/**
- * Wrap the flat host config and inject `projectRoot` + `verbose` so
- * the daemon doesn't have to re-inject these per provider.
- */
-function normalizeConfig(
-  raw: HostConfigInput,
-  projectRoot: string,
-): HostConfigInput {
-  if (raw === undefined || raw === null) {
-    return {}
-  }
-  if (!isObject(raw)) {
-    console.error(chalk`{red Error:} --host-config must be a JSON object`)
-    process.exit(2)
-  }
-  const cfg = { ...raw, verbose: true } as HostConfigInput
-  if (cfg.projectRoot === undefined) cfg.projectRoot = projectRoot
-  return cfg
-}
-
-async function runShutdown(projectRoot: string): Promise<void> {
+async function runShutdown(projectRoot: string, sink: LoggerSink): Promise<void> {
   const endpoint = await readEndpoint(projectRoot)
   if (!endpoint) {
-    console.error(chalk`{red Error:} No endpoint file at ${projectRoot}/.sandstone/connect.url — no daemon to shut down`)
+    sink.logError(chalk`{red Error:} No endpoint file at ${projectRoot}/.sandstone/connect.url — no daemon to shut down`)
     process.exit(1)
   }
   if (!(await pidAlive(endpoint.pid))) {
-    console.error(chalk`{red Error:} Endpoint file references pid ${endpoint.pid} which is not alive`)
+    sink.logError(chalk`{red Error:} Endpoint file references pid ${endpoint.pid} which is not alive`)
     process.exit(1)
   }
   try {
-    const client = await openClient({ endpoint })
+    const client = await Client.open({ endpoint })
     await client.shutdown()
     client.close()
-    console.log(chalk`{cyan [connect]} shutdown sent to daemon (pid ${endpoint.pid})`)
+    sink.logInfo(chalk`{cyan [connect]} shutdown sent to daemon (pid ${endpoint.pid})`)
   } catch (err) {
-    console.error(chalk`{red Error:} Failed to reach daemon: ${err instanceof Error ? err.message : String(err)}`)
+    sink.logError(chalk`{red Error:} Failed to reach daemon: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
 }
 
-async function runReloadResources(projectRoot: string): Promise<void> {
+async function runReloadResources(projectRoot: string, sink: LoggerSink): Promise<void> {
   const endpoint = await readEndpoint(projectRoot)
   if (!endpoint) {
-    console.error(chalk`{red Error:} No endpoint file at ${projectRoot}/.sandstone/connect.url — no daemon to shut down`)
+    sink.logError(chalk`{red Error:} No endpoint file at ${projectRoot}/.sandstone/connect.url — no daemon to shut down`)
     process.exit(1)
   }
   if (!(await pidAlive(endpoint.pid))) {
-    console.error(chalk`{red Error:} Endpoint file references pid ${endpoint.pid} which is not alive`)
+    sink.logError(chalk`{red Error:} Endpoint file references pid ${endpoint.pid} which is not alive`)
     process.exit(1)
   }
   try {
-    console.log(chalk`{cyan [connect]} Connecting to daemon...`)
-    const client = await openClient({ endpoint })
-    console.log(chalk`{cyan [connect]} Connected! Reloading resources...`)
+    sink.logInfo(chalk`{cyan [connect]} Connecting to daemon...`)
+    const client = await Client.open({ endpoint })
+    sink.logInfo(chalk`{cyan [connect]} Connected! Reloading resources...`)
     try {
       await client.reloadResources()
       client.close()
-      console.log(chalk`{cyan [connect]} Reloaded resources on the host!`)
+      sink.logInfo(chalk`{cyan [connect]} Reloaded resources on the host!`)
     } catch (err) {
-      console.error(chalk`{red Error:} Failed to reload resources: ${err instanceof Error ? err.message : String(err)}`)
+      sink.logError(chalk`{red Error:} Failed to reload resources: ${err instanceof Error ? err.message : String(err)}`)
       process.exit(1)
     }
   } catch (err) {
-    console.error(chalk`{red Error:} Failed to reach daemon: ${err instanceof Error ? err.message : String(err)}`)
+    sink.logError(chalk`{red Error:} Failed to reach daemon: ${err instanceof Error ? err.message : String(err)}`)
     process.exit(1)
   }
 }

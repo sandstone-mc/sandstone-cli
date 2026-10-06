@@ -54,7 +54,7 @@ export class FtpHost extends HostProvider {
       this.config.rcon,
       this.config.host,
       'ftp',
-      (msg) => console.error(msg),
+      (msg) => this.logger.error(msg),
       { setRcon: (r) => { this.rcon = r }, addCapability: (c) => this.capabilities.add(c) },
     )
   }

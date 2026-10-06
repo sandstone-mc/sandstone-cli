@@ -34,7 +34,7 @@ export interface WatchUIAPI {
   setDeployAvailable: (available: boolean) => void
   setDeployHasChanges: (hasChanges: boolean) => void
   setCanCancelBuild: (canCancel: boolean) => void
-  setCanToggleTests: (canToggle: boolean, hasTests: boolean) => void
+  setCanToggleTests: (canToggle: boolean) => void
   setTestingMode: (on: boolean) => void
   setCanCancelTest: (canCancel: boolean) => void
   exit: (() => void) | undefined

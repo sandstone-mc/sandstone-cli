@@ -4,8 +4,6 @@ import type { HostLogLine } from '../../hosts/types.js'
 import { decodeRpc } from './codec.js'
 import type { WaitForLogSettlement, LogPattern } from './wait-log.js'
 
-// TODO: This whole file should get audited for useless types if the dispatch.ts is yeeted
-
 export const PROTOCOL_VERSION = 1
 
 export const SUBPROTOCOL_PREFIX = 'sandstone-connect-v1.'

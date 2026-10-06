@@ -41,7 +41,7 @@ export class BootstrapError extends Error {
 export async function bootstrapHost(opts: BootstrapOptions): Promise<BootstrapResult> {
   const hostType = opts.hostType
   const logger = opts.logger ?? CONSOLE_LOGGER
-  let config = await resolveDefaults(hostType, opts.config, opts.silent ?? false, logger)
+  let config = await resolveDefaults(hostType, opts.config, logger)
 
   const autocfg = await loadSandstoneConfig(process.cwd())
   const activeSaveConfig = await loadActiveConfigFromDisk(process.cwd())
@@ -104,11 +104,9 @@ export async function bootstrapHost(opts: BootstrapOptions): Promise<BootstrapRe
 async function resolveDefaults(
   hostType: HostType,
   input: Partial<HostConfigInput>,
-  silent: boolean,
   logger: DaemonLogger,
 ): Promise<Partial<HostConfigInput>> {
   let out: Partial<HostConfigInput> = JSON.parse(JSON.stringify(input))
-  const log = silent ? () => {} : logger.info.bind(logger)
 
   if (hostType === 'integrated') {
     const integratedCfg = { ...(out as Record<string, unknown>) }
@@ -119,7 +117,7 @@ async function resolveDefaults(
         )
         if (pkg.version) {
           integratedCfg.sandstoneVersion = pkg.version
-          log(chalk`{cyan [bootstrap]} using mc version for sandstone version ${pkg.version}`)
+          logger.info(chalk`{cyan [bootstrap]} using mc version for sandstone version ${pkg.version}`)
         }
       } catch {
         try {
@@ -128,7 +126,7 @@ async function resolveDefaults(
           if (top) {
             const tag = `${top.major}.${top.minor}.0`
             integratedCfg.sandstoneVersion = tag
-            log(chalk`{cyan [bootstrap]} using mc version for sandstone version ${tag}`)
+            logger.info(chalk`{cyan [bootstrap]} using mc version for sandstone version ${tag}`)
           }
         } catch (err) {
           logger.error(
@@ -142,12 +140,12 @@ async function resolveDefaults(
     let resolvedPort = existing.port as number | undefined
     if (!resolvedPort || (resolvedPort as number) <= 0) {
       resolvedPort = await findOpenPort()
-      log(chalk`{cyan [bootstrap]} rcon port not set -- picked ${resolvedPort}`)
+      logger.info(chalk`{cyan [bootstrap]} rcon port not set -- picked ${resolvedPort}`)
     }
     let resolvedPassword = existing.password as string | undefined
     if (!resolvedPassword) {
       resolvedPassword = randomBytes(16).toString('hex')
-      log(chalk`{cyan [bootstrap]} rcon password not set -- generated random`)
+      logger.info(chalk`{cyan [bootstrap]} rcon password not set -- generated random`)
     }
     integratedCfg.rcon = {
       ...existing,

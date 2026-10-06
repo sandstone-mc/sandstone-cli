@@ -1,27 +1,5 @@
-/**
- * `runServerCommand` tool — send a Minecraft console command.
- *
- * Mirrors `sand run <command>`:
- *   1. If `sand connect` daemon is alive for this project, forward the
- *      command over its WebSocket (`executeRawCommand` RPC).
- *   2. Otherwise, bootstrap a direct host connection (same path
- *      `sand run` direct mode takes) and send the command through that.
- *
- * Bootstrap behaviour was a hard lock-in from the user — this tool
- * always tries to do the work, never errors with "daemon unavailable".
- * That's distinct from `getSaveConfig`/`readClientLog`/etc., which are
- * read-only observers and DO fail cleanly when the daemon is down.
- *
- * Returns:
- *   - `{content: [{type:'text', text: <output>}]}` on success.
- *   - `{isError: true, content: [{type:'text', text: <error>}]}` when
- *     the command itself failed (recoverable — agent can retry).
- *   - Throws `DaemonUnavailableError`/`BootstrapError` only when
- *     bootstrap itself failed (user-action error).
- */
-
 import { bootstrapHost, BootstrapError } from '../../commands/connect/bootstrap.js'
-import { connect as openClient } from '../../commands/connect/client.js'
+import { Client as DaemonClient } from '../../commands/connect/client.js'
 import { endpointStatus, readEndpoint } from '../../commands/connect/endpoint-file.js'
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
 import type { McpBridge } from '../bridge.js'
@@ -57,21 +35,10 @@ export async function call(
   if (status === 'live') {
     const endpoint = await readEndpoint(bridge.ctx.projectRoot)
     if (endpoint) {
-      // Two distinct failure modes must NOT be conflated:
-      //   - `openClient` throws  → daemon is unreachable, fall through
-      //     to direct-path bootstrap (mirrors `sand run` semantics).
-      //   - `client.executeRawCommand` throws → daemon is up but the
-      //     command failed (e.g. `rcon host is not connected` while
-      //     the daemon is mid-restart). DO NOT fall through — that
-      //     would spawn a second JVM in the MCP process which then
-      //     collides on the world directory lock held by the daemon's
-      //     JVM. Return the error verbatim.
       let client
       try {
-        client = await openClient({ endpoint })
-      } catch {
-        // Daemon unreachable — fall through to direct.
-      }
+        client = await DaemonClient.open({ endpoint })
+      } catch {}
       if (client) {
         try {
           if (!client.welcome.capabilities.executeRawCommand) {
@@ -91,16 +58,10 @@ export async function call(
             ...(args.waitFor ? { waitFor: args.waitFor } : {}),
           }, signal)
 
-          // waitFor: fire a follow-up notification once the log
-          // pattern settles. Tool resolves immediately — the agent
-          // receives the notification out-of-band.
           if (result.logResult) {
             const patternUUID = result.patternUUID?.slice(0, 8)
             const logResult = result.logResult
             const cancel = result.cancel
-            // If the agent cancels the tool call before the matcher
-            // settles, cancel the underlying daemon matcher so we don't
-            // keep watching the log stream for a result nobody will read.
             if (signal) {
               const onAbort = () => { void cancel?.() }
               signal.addEventListener('abort', onAbort, { once: true })
@@ -131,7 +92,6 @@ export async function call(
             }],
           }
         } catch (err) {
-          // Daemon is alive but the command failed — surface the error.
           return {
             isError: true,
             content: [{

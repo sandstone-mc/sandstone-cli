@@ -5,7 +5,7 @@
  * etc.) as a subprocess. The server speaks JSON-RPC over stdio per
  * the Model Context Protocol spec.
  *
- *   `claude mcp add sandstone-cli sand mcp -- --path /path/to/project`
+ *   `claude mcp add sandstone-cli -- sand mcp`
  *
  * Flags:
  *   `--path <dir>` — project root (defaults to cwd). Same flag every

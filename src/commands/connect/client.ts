@@ -615,11 +615,6 @@ export class Client {
   }
 }
 
-/** Backwards-compatible factory. Prefer `Client.open()`. */
-export async function connect(opts: ClientOptions): Promise<Client> {
-  return Client.open(opts)
-}
-
 /** Assert WS frame data is a Uint8Array (Bun's WS contract). */
 function Bytes(data: unknown): Uint8Array {
   if (!(data instanceof Uint8Array)) {

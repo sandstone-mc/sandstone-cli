@@ -494,12 +494,12 @@ export class McsManagerLoginHost extends HostProvider {
       if (this.stdoutState !== null && this.stdoutState.socket === sock) {
         this.stdoutState = null
       }
-      console.error(`[mcsmanager] daemon disconnected: ${reason}`)
+      this.logger.error(`[mcsmanager] daemon disconnected: ${reason}`)
       this.armDisconnectGrace()
       this.scheduleReconnect()
     })
     sock.on('connect_error', (err: Error) => {
-      console.error(`[mcsmanager] daemon connect_error: ${err.message}`)
+      this.logger.error(`[mcsmanager] daemon connect_error: ${err.message}`)
       this.armDisconnectGrace()
       this.scheduleReconnect()
     })
@@ -532,7 +532,7 @@ export class McsManagerLoginHost extends HostProvider {
       if (!this.connected) return
       this.openDaemonSocket().then(() => this.clearDisconnectGrace()).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err)
-        console.error(`[mcsmanager] daemon reconnect failed: ${msg}`)
+        this.logger.error(`[mcsmanager] daemon reconnect failed: ${msg}`)
         this.scheduleReconnect()
       })
     }, McsManagerLoginHost.RECONNECT_INTERVAL_MS)
@@ -551,7 +551,7 @@ export class McsManagerLoginHost extends HostProvider {
     this.disconnectGraceTimer = setTimeout(() => {
       this.disconnectGraceTimer = null
       // Grace expired — give up and let `sand connect` shut down.
-      console.error(`[mcsmanager] daemon unreachable for ${McsManagerLoginHost.DISCONNECT_GRACE_MS / 1000}s, reporting host lost`)
+      this.logger.error(`[mcsmanager] daemon unreachable for ${McsManagerLoginHost.DISCONNECT_GRACE_MS / 1000}s, reporting host lost`)
       for (const h of this.disconnectHandlers) h('MCSManager daemon unreachable')
     }, McsManagerLoginHost.DISCONNECT_GRACE_MS)
   }

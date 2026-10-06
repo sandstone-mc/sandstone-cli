@@ -3,7 +3,7 @@ import { Box, Text, useInput } from 'ink'
 import Spinner from 'ink-spinner'
 import { format } from 'util'
 import type { WatchStatus, TrackedChange, BuildResult, WatchUIAPI, ChangeCategory } from './types.js'
-import { drainLiveLogBuffer } from './logger.js'
+import { logger } from '../utils/logger.js'
 import { UpdateCheckIndicator, type IndicatorState } from './UpdateCheckIndicator.jsx'
 import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../utils/updateCheck.js'
 
@@ -168,8 +168,6 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDe
   const [updateCheckState, setUpdateCheckState] = useState<IndicatorState>({ kind: 'silent' })
   const [canCancelBuild, setCanCancelBuild] = useState(false)
   const [canToggleTests, setCanToggleTests] = useState(false)
-  // TODO: Investigate why hasTests is unused and whether canToggleTests actually gates on whether the project really has tests
-  const [hasTests, setHasTests] = useState(false)
   const [testingMode, setTestingMode] = useState(false)
   const [canCancelTest, setCanCancelTest] = useState(false)
 
@@ -317,16 +315,16 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDe
       setDeployAvailable,
       setDeployHasChanges,
       setCanCancelBuild,
-      setCanToggleTests: (canToggle: boolean, has: boolean) => {
+      setCanToggleTests: (canToggle: boolean) => {
         setCanToggleTests(canToggle)
-        setHasTests(has)
       },
       setTestingMode,
       setCanCancelTest,
       exit: () => exit!(),
     }
+    // TODO: Investigate fixing this garbage
     ;(globalThis as Record<string, unknown>).__watchUIAPI = api
-    drainLiveLogBuffer()
+    logger.sinks.watch.drainBuffer()
     return () => {
       delete (globalThis as Record<string, unknown>).__watchUIAPI
     }

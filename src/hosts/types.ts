@@ -1,13 +1,26 @@
-import type { SandstoneConfig } from 'sandstone'
 import type { DaemonLogger } from '../commands/connect/logger.js'
 export type { DaemonLogger } from '../commands/connect/logger.js'
 
-export type HostType = (
-  | 'ssh'
-  | 'ftp'
-  | 'integrated'
-  | 'mcsmanager-login'
-)
+import type { SandstoneConnect } from 'sandstone'
+
+export type HostType = SandstoneConnect['HostType']
+
+export type SshHostConfig = SandstoneConnect['SshHostConfig']
+
+export type FtpHostConfig = SandstoneConnect['FtpHostConfig']
+
+export type IntegratedHostConfig = SandstoneConnect['IntegratedHostConfig']
+
+export type IntegratedHostModsConfig = SandstoneConnect['IntegratedHostModsConfig']
+
+export type McsManagerHostConfig = SandstoneConnect['McsManagerHostConfig']
+
+export type HostConfigInput = Partial<
+  | SshHostConfig
+  | FtpHostConfig
+  | IntegratedHostConfig
+  | McsManagerHostConfig
+>
 
 export abstract class HostProvider {
   abstract readonly type: HostType
@@ -72,115 +85,6 @@ export interface HostLogLine {
 
 export type HostLogHandler = (lines: HostLogLine[]) => void
 
-export interface BaseHostConfig {
-  projectRoot?: string
-  verbose?: boolean
-  sandstoneConfig?: SandstoneConfig
-}
-
-export interface RconConfig {
-  enabled?: boolean
-  password?: string
-  /** Defaults to 25575 (Minecraft's standard RCON port). */
-  port?: number
-}
-
-export interface SshHostConfig extends BaseHostConfig {
-  host: string
-  port?: number
-  username: string
-  password?: string
-  privateKey?: string | Buffer
-  serverDir: string
-  /** Shell command to launch the server (e.g. `systemctl start minecraft@main`, `screen -dmS mc ./start.sh`). */
-  startCommand: string
-  /** Shell command to force-kill if graceful stop times out. */
-  stopCommand: string
-  /** Seconds to wait for graceful `stop` to exit before falling back. Default 30. */
-  gracefulStopTimeoutSeconds?: number
-  /** screen/tmux session name. Drives `stop` internally during graceful stop. */
-  consoleSession?: string
-  /** Path to the log file. Default: `${serverDir}/logs/latest.log`. */
-  logPath?: string
-  rcon?: RconConfig
-}
-
-export interface FtpHostConfig extends BaseHostConfig {
-  host: string
-  port?: number
-  user: string
-  password: string
-  serverPath: string
-  /** Path to the log file relative to serverPath. Default: 'logs/latest.log'. */
-  logPath?: string
-  /** How often to poll the log file for new bytes. Default 500ms. */
-  pollIntervalMs?: number
-  rcon?: RconConfig
-}
-
-export interface IntegratedHostConfig extends BaseHostConfig {
-  /** Absolute path to the directory the CLI should manage the Fabric server inside. Default: `${projectRoot}/.sandstone/mc-server/`. */
-  serverDir?: string
-  verbose?: boolean
-  serverPort?: number
-  rcon?: {
-    enabled?: boolean
-    password?: string
-    /** Defaults to 25575 (Minecraft's standard RCON port). */
-    port?: number
-  }
-  /**
-   * Sandstone version (e.g. "1.2.5"). The MC version + Java major are
-   * derived from this via `sandstoneToMcVersion` + `requiredJavaMajor`.
-   */
-  sandstoneVersion?: string
-  /**
-   * Override MC version detection.
-   */
-  minecraftVersion?: string
-  /** Fabric loader version. Default: latest stable. */
-  fabricLoaderVersion?: string
-  /** Path to sandstone project root (where sandstone.config.ts lives). */
-  projectRoot: string
-  /** Seconds to wait for graceful `stop` to exit before SIGTERM/SIGKILL. Default 30. */
-  gracefulStopTimeoutSeconds?: number
-  javaDir?: string
-  preferSnapshot?: boolean
-  mods?: IntegratedHostModsConfig
-  world?:
-    | 'void'
-    | 'overworld'
-    | { layers: Array<{ block: string; height: number }>; biome?: string }
-}
-
-export interface IntegratedHostModsConfig {
-  fabricApi?: boolean
-  packtest?: boolean
-  commandcrafter?: boolean
-  worldgenDevtools?: boolean
-  quickPack?: boolean
-  lithium?: boolean
-  krypton?: boolean
-  ferriteCore?: boolean
-  lazyDfu?: boolean
-  scalablelux?: boolean
-  additionalMods?: Array<{
-    modrinthId?: string
-    url?: string
-    filename?: string
-  }>
-}
-
-export interface McsManagerHostConfig extends BaseHostConfig {
-  endpoint: string
-  daemonId: string
-  uuid: string
-  /** Defaults to env-derived value. */
-  username?: string
-  /** base64-encoded, defaults to env-derived value. */
-  password?: string
-}
-
 /** Capability-method shapes for compile-time introspection. */
 export interface CapabilityMethods {
   startServer(): Promise<void>
@@ -190,13 +94,6 @@ export interface CapabilityMethods {
   attachLog(onChunk: HostLogHandler): Promise<LogSubscription>
   executeRawCommand(command: string): Promise<string | undefined>
 }
-
-export type HostConfigInput = Partial<
-  | SshHostConfig
-  | FtpHostConfig
-  | IntegratedHostConfig
-  | McsManagerHostConfig
->
 
 export const ALL_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   Capability.StartServer,

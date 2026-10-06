@@ -1,13 +1,24 @@
 import path from 'path'
+import { format } from 'util'
 import { loadSandstoneConfig } from '../utils/sandstoneConfig.js'
 import chalk from 'chalk'
 
-import { log, initLoggerNoFile } from '../ui/logger.js'
+import { logger, type LoggerSink } from '../utils/logger.js'
 import { getClientPath, type SandstoneCache } from './build/export.js'
 import * as fs from '../utils/fs.js'
 import type * as sandstone from 'sandstone'
 
-// Mirror of the default `PackType` paths from `sandstone/src/pack/pack.ts`.
+function setupConsoleSink(): LoggerSink {
+  logger.registerSink('console')
+  const sink = logger.sinks.console
+  sink.setLiveCallback((level, args) => {
+    const text = args.map((a) => (typeof a === 'string' ? a : format(a))).join(' ')
+    if (level) process.stdout.write(`[${level}] ${text}\n`)
+    else process.stdout.write(text + '\n')
+  })
+  return sink
+}
+
 // `clean` doesn't import sandstone's pack class instances (it never runs a
 // build), so the standard layouts are duplicated here.
 const PACK_TYPE_PATHS = {
@@ -31,8 +42,8 @@ export type CleanOptions = {
 }
 
 export async function cleanCommand(opts: CleanOptions) {
-  initLoggerNoFile()
-
+  const sink = setupConsoleSink()
+  const log = (...args: unknown[]) => sink.log(...args)
   const folder = opts.path
 
   // Load the user's sandstone config to discover packName + saveOptions.
@@ -48,10 +59,6 @@ export async function cleanCommand(opts: CleanOptions) {
     throw new Error(`sandstone.config.ts is missing a "name" field required by clean.`)
   }
 
-  // Read the build cache to pick up any symlinks tracked from prior builds.
-  // Per-child symlinks (e.g. when exporting into a world's existing
-  // `datapacks/` folder) are recorded here too, so the cache is the
-  // authoritative source for symlink paths.
   const cacheFile = path.join(folder, '.sandstone', 'cache.json')
   let cache: SandstoneCache = { files: {} }
   try {
@@ -66,7 +73,7 @@ export async function cleanCommand(opts: CleanOptions) {
 
   const worldName = opts.world || saveOptions.world
   const root = saveOptions.root
-  const clientPath = opts.clientPath || saveOptions.clientPath || (await getClientPath().catch(() => undefined))
+  const clientPath = opts.clientPath || saveOptions.clientPath || (await getClientPath(sink).catch(() => undefined))
   const serverPath = opts.serverPath || saveOptions.serverPath
 
   if (worldName && root) {
@@ -84,9 +91,6 @@ export async function cleanCommand(opts: CleanOptions) {
   for (const [type, paths] of Object.entries(PACK_TYPE_PATHS)) {
     if (clientPath) {
       let clientDest: string
-      // Read the resolved `exportZips` value that the build wrote for this
-      // pack type. The build resolves `saveOptions.exportZips ?? packType.archiveOutput`
-      // and persists it, so clean never has to re-derive the default.
       const shouldArchive = cache.packTypeExportZips?.[type] ?? false
       const useWorldPath = !!worldName && (type !== 'resourcepack' || shouldArchive)
       if (useWorldPath) {
@@ -98,8 +102,6 @@ export async function cleanCommand(opts: CleanOptions) {
         clientDest = path.join(clientPath, paths.rootPath).replace('$packName$', packName)
       }
       pathsToDelete.add(clientDest)
-      // Archived resourcepacks (and any future archived pack types) write
-      // a `.zip` sibling to the destination rather than the directory.
       pathsToDelete.add(`${clientDest}.zip`)
     }
 
@@ -129,8 +131,6 @@ export async function cleanCommand(opts: CleanOptions) {
     }
   }
 
-  // Trim removed paths from the cache so the next `build` recreates them
-  // from scratch instead of preserving stale entries.
   let cacheDirty = false
   if (cache.symlinks) {
     const newSymlinks = cache.symlinks.filter((s) => !pathsToDelete.has(s))
@@ -139,11 +139,6 @@ export async function cleanCommand(opts: CleanOptions) {
       cacheDirty = true
     }
   }
-
-  // Wipe the file-hash cache so the next `build` treats every generated
-  // file as changed. The build's `changedPackTypes` set is derived from
-  // this hash cache; without this, a clean followed by an unchanged build
-  // would skip re-export and leave the symlinks (now deleted) unrestored.
   if (cache.files && Object.keys(cache.files).length > 0) {
     cache.files = {}
     cacheDirty = true

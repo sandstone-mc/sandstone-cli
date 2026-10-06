@@ -2,7 +2,7 @@ import path from 'path'
 import os from 'os'
 import AdmZip from 'adm-zip'
 
-import { log } from '../../ui/logger.js'
+import type { LoggerSink } from '../../utils/logger.js'
 import { canUseSymlinks } from '../../utils/index.js'
 import * as fs from '../../utils/fs.js'
 import type * as sandstone from 'sandstone'
@@ -13,27 +13,14 @@ export type SandstoneCache = {
   archives?: string[]
   canUseSymlinks?: boolean
   symlinks?: string[]
-  // For destinations that are themselves existing directories (e.g. the
-  // world's pre-existing `datapacks/` folder into which vanilla dependency
-  // zips are symlinked individually): per destination path, the names of
-  // the children currently generated for that destination by this build.
-  // Used by `preserveSymlink` to know which old per-child symlinks are still
-  // backed by a current entry, and by `fs.createSymlink` to know which children
-  // to (re-)symlink. Keys are absolute/resolved destination paths; values
-  // are child basenames. Populated only for destinations that are themselves
-  // existing directories, so the field is absent for folder-symlink cases.
   perChildEntries?: Record<string, string[]>
-  // The resolved `exportZips` value used for each pack type at build time
-  // (`saveOptions.exportZips ?? packType.archiveOutput`). Persisted so that
-  // `sand clean` can read the same value back instead of re-deriving it from
-  // the pack type's default — which is only known to the core library.
   packTypeExportZips?: Record<string, boolean>
 }
 
 // Module-level symlink availability cache
 let symlinksAvailable: boolean | undefined
 
-export async function checkSymlinksAvailable(local: sandstone.BeforeSaveLocal): Promise<boolean> {
+export async function checkSymlinksAvailable(local: sandstone.BeforeSaveLocal, sink: LoggerSink): Promise<boolean> {
   if (symlinksAvailable === undefined) {
     const cached = local.oldCache?.canUseSymlinks
     if (cached !== undefined) {
@@ -63,21 +50,21 @@ function getMCPath(): string {
   }
 }
 
-export async function getClientPath(): Promise<string | undefined> {
+export async function getClientPath(sink: LoggerSink): Promise<string | undefined> {
   const mcPath = getMCPath()
 
   try {
     await fs.fileLstat(mcPath)
   } catch {
-    log('Unable to locate the .minecraft folder. Will not be able to export to client.')
+    sink.log('Unable to locate the .minecraft folder. Will not be able to export to client.')
     return undefined
   }
 
   return mcPath
 }
 
-export async function getClientWorldPath(worldName: string, minecraftPath?: string): Promise<string> {
-  const mcPath = minecraftPath ?? (await getClientPath())!
+export async function getClientWorldPath(worldName: string, minecraftPath: string | undefined, sink: LoggerSink): Promise<string> {
+  const mcPath = minecraftPath ?? (await getClientPath(sink))!
   const savesPath = path.join(mcPath, 'saves')
   const worldPath = path.join(savesPath, worldName)
 
@@ -110,20 +97,14 @@ export async function createSymlink(
   folder: string,
   packName: string,
   newCache: SandstoneCache,
-  /** Root directory holding `allowed_symlinks.txt` — the `.minecraft` folder
-   *  for client exports, the server working directory for server exports. */
   minecraftPath: string,
   targetPath: string,
+  sink: LoggerSink,
   linkPath: string
 ) {
-  // Update allowed_symlinks.txt for Minecraft. Both the client launcher and
-  // the dedicated server read this file from their working directory to
-  // permit symlinked datapacks/resourcepacks.
   let rawPath = path.resolve(path.join(folder))
   let sep: string = path.sep
   if (process.platform === 'win32') {
-    // Minecraft's glob syntax uses `\` as the escape character, so each
-    // separator in the workspace path must be doubled.
     sep = `${path.sep}${path.sep}`
     rawPath = rawPath.replaceAll(path.sep, sep)
   }
@@ -135,15 +116,11 @@ export async function createSymlink(
   try {
     const currentlyAllowed = (await fs.readText(allowedList)).replace(/\r/g, '')
 
-    // Do not build a RegExp from Minecraft's glob syntax: `**` is invalid
-    // regex syntax and would make the catch block overwrite the allowlist.
     if (currentlyAllowed.split('\n').includes(allowPath)) {
-      log('[symlink] Workspace already in allowed_symlinks.txt, skipping...')
+      sink.log('[symlink] Workspace already in allowed_symlinks.txt, skipping...')
     } else {
-      log('[symlink] Adding workspace to allowed_symlinks.txt. If the game is running please restart it.')
-      // Append: Bun.write has no append mode, so concat existing + new entry.
-      // Preserve prior comments + glob entries; only add a `#` separator line
-      // between them so the new block is visually distinct.
+      sink.log('[symlink] Adding workspace to allowed_symlinks.txt. If the game is running please restart it.')
+
       const separator = currentlyAllowed.length > 0
         ? (currentlyAllowed.endsWith('\n') ? '' : '\n') + '#\n'
         : ''
@@ -152,7 +129,7 @@ export async function createSymlink(
   } catch (e: any) {
     if (e.code !== 'ENOENT') throw e
 
-    log('[symlink] Creating allowed_symlinks.txt. If the game is running please restart it.')
+    sink.log('[symlink] Creating allowed_symlinks.txt. If the game is running please restart it.')
     await fs.writeText(allowedList, `${comment}${allowPath}`)
   }
 
@@ -163,7 +140,7 @@ export async function createSymlink(
   try {
     const stats = await fs.fileLstat(linkPath)
     if (stats.isSymbolicLink() && await fs.readSymlink(linkPath) === path.resolve(targetPath)) {
-      log('[symlink] Symlink already created, skipping...')
+      sink.log('[symlink] Symlink already created, skipping...')
       skip = true
     } else if (stats.isDirectory()) {
       isExistingDirectory = true
@@ -180,16 +157,11 @@ export async function createSymlink(
   // (per `newCache.perChildEntries[packTypeName]`) into it individually,
   // instead of replacing the directory with a symlink to targetPath.
   if (isExistingDirectory) {
-    log(`[symlink] ${linkPath} already exists as a directory; symlinking its children individually.`)
-    // Iterate `newCache.perChildEntries[linkPath]` (populated by the build
-    // loop from `newCache.files`) rather than readdir(targetPath). The output
-    // folder on disk can still hold stale files from previous installs that
-    // haven't been garbage-collected yet; perChildEntries is the authoritative
-    // list of children the current build wants to expose.
+    sink.log(`[symlink] ${linkPath} already exists as a directory; symlinking its children individually.`)
     const perChildEntries = newCache.perChildEntries?.[linkPath]
 
     if (!perChildEntries || perChildEntries.length === 0) {
-      log(`[symlink] No active per-child entries for ${linkPath}; leaving existing directory untouched.`)
+      sink.log(`[symlink] No active per-child entries for ${linkPath}; leaving existing directory untouched.`)
       return
     }
 
@@ -206,7 +178,7 @@ export async function createSymlink(
         } else {
           // Existing entry (e.g. real file from a previous non-symlink copy)
           // blocks the per-child symlink. Remove it before symlinking.
-          log(`[symlink] Removing existing entry at ${childLink} before symlinking.`)
+          sink.log(`[symlink] Removing existing entry at ${childLink} before symlinking.`)
           await fs.remove(childLink)
         }
       } catch {}
@@ -225,7 +197,7 @@ export async function createSymlink(
 
   // Create symlink
   if (!skip) {
-    log(`[symlink] Creating symlink for ${targetPath.replace(`${path.dirname(targetPath)}${path.sep}`, '')}`)
+    sink.log(`[symlink] Creating symlink for ${targetPath.replace(`${path.dirname(targetPath)}${path.sep}`, '')}`)
     await fs.createSymlink(path.resolve(targetPath), linkPath)
   }
 
@@ -297,16 +269,6 @@ export async function preserveSymlink(
   if (!getSymlinksAvailable() || !symlinkPath) return
   if (!oldCache.symlinks) return
 
-  // Per-child case: symlinkPath is an existing directory in the destination
-  // (e.g. the world's `datapacks/` folder) and previous builds placed
-  // individual child symlinks inside it (e.g. `datapacks/player_motion.zip`).
-  // Preserve the children that are still active in this build; orphaned
-  // entries (uninstalled deps whose output files are about to be cleaned
-  // up) are left for `cleanupOldSymlinks` to unlink.
-  //
-  // Use lstatSync (not statSync) so a symlink-to-a-directory at symlinkPath
-  // is not misidentified as a directory itself; the fallback branch below
-  // handles that case (the symlink itself is in oldCache.symlinks).
   const perChildEntries = newCache.perChildEntries?.[symlinkPath]
   if (perChildEntries && (await fs.pathExists(symlinkPath)) && (await fs.fileLstat(symlinkPath)).isDirectory()) {
     const sep = path.sep
@@ -334,31 +296,22 @@ export async function preserveSymlink(
 export async function exportPack(
   local: sandstone.AfterAllLocal,
   destPath: string,
+  sink: LoggerSink,
   packType: PackType,
   archivedOutput: boolean,
   target: 'client' | 'server',
 ) {
-  // Ensure the destination's parent directory exists. Fresh or lightly-used
-  // .minecraft installs may not yet have a global `datapacks/` or
-  // `resourcepacks/` folder, which would otherwise cause the copy/symlink
-  // below to fail with ENOENT.
   await local.fs.ensureDir(path.dirname(destPath))
 
   if (archivedOutput && (local.saveOptions.exportZips ?? packType.archiveOutput)) {
-    // Copy archive
     const archivePath = path.join(local.outputFolder, 'archives', `${local.packName}_${packType.type}.zip`)
     await local.fs.copyFile(archivePath, `${destPath}.zip`)
   } else if (getSymlinksAvailable()) {
-    // Create symlink (only if it doesn't already exist). For server exports
-    // the allowlist lives in the server's working directory (same convention
-    // as the client launcher's `.minecraft/` folder); pass the matching root
-    // so `allowed_symlinks.txt` is updated there too.
     if (!local.oldCache?.symlinks?.includes(destPath)) {
       const allowListRoot = target === 'server' ? local.serverPath! : local.clientPath!
-      await createSymlink(local.folder, local.packName, local.newCache!, allowListRoot, path.join(local.outputFolder, packType.type), destPath)
+      await createSymlink(local.folder, local.packName, local.newCache!, allowListRoot, path.join(local.outputFolder, packType.type), sink, destPath)
     }
   } else {
-    // Copy files
     await local.fs.remove(destPath)
     await local.fs.copyDir(path.join(local.outputFolder, packType.type), destPath)
   }
@@ -372,18 +325,13 @@ export function getExportPath(
   if (target === 'server') {
     return path.join(local.serverPath!, packType.serverPath).replace('$packName$', local.packName)
   }
-
-  // Client path: use world path or root path
-  const useWorldPath = local.worldName && (packType.type !== 'resourcepack' || (local.saveOptions.exportZips ?? packType.archiveOutput))
-  if (useWorldPath) {
+  if (local.worldName && (packType.type !== 'resourcepack' || (local.saveOptions.exportZips ?? packType.archiveOutput))) {
     return path.join(local.clientPath!, packType.clientPath)
       .replace('$packName$', local.packName)
       .replace('$worldName$', local.worldName!)
   }
   return path.join(local.clientPath!, packType.rootPath).replace('$packName$', local.packName)
 }
-
-// Cleanup
 
 export async function cleanupOldSymlinks(local: sandstone.AfterAllLocal) {
   if (!local.oldCache?.symlinks) return

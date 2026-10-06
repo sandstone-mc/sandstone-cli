@@ -41,6 +41,7 @@ interface SandstoneManifest {
   installedAt?: string
   lastModUpdateCheck?: string
   installedMods?: Record<string, InstalledModInfo>
+  modsConfigHash?: string
 }
 
 const UnwhitelistedAttempt = new RegExp(`${MINECRAFT_LOG_PREFIX}${String.raw`(\w+) \(/([\w\.]+):`}`)
@@ -93,9 +94,6 @@ export class IntegratedHost extends HostProvider {
     this.javaDir = config.javaDir ?? pathJoin(this.serverDir, '.java')
   }
 
-  private logVerbose(...args: unknown[]): void {
-    if (this.config.verbose) this.logger.info(args.map(String).join(' '))
-  }
 
   async connect(): Promise<void> {
     if (this.connected) return
@@ -116,22 +114,28 @@ export class IntegratedHost extends HostProvider {
     const manifestPath = pathJoin(this.serverDir, 'sandstone_manifest.json')
     let installedLoader: string | null = null
     let manifestMcVersion: string | null = null
+    let manifestModsConfigHash: string | undefined
     try {
       const raw = await fs.readText(manifestPath)
       const manifest = JSON.parse(raw) as {
         installedFabricLoader?: string
         minecraftVersion?: string
+        modsConfigHash?: string
       }
       installedLoader = manifest.installedFabricLoader ?? null
       manifestMcVersion = manifest.minecraftVersion ?? null
+      manifestModsConfigHash = manifest.modsConfigHash
     } catch {}
     const mcChanged = manifestMcVersion !== null && manifestMcVersion !== mcVersion
     const loaderStale = installedLoader !== null && compareSemver(installedLoader, latestLoader) < 0
     const noManifest = installedLoader === null
-    const stale = noManifest || mcChanged || loaderStale
-    if (stale) {
+    const currentModsConfigHash = hashModsConfig(this.config.mods)
+    const modsConfigChanged = manifestModsConfigHash === undefined
+      || manifestModsConfigHash !== currentModsConfigHash
+    const stale = noManifest || mcChanged || loaderStale || modsConfigChanged
+    if (loaderStale || mcChanged || noManifest) {
       if (loaderStale) {
-        this.logVerbose(
+        this.logger.info(
           `test: installed Fabric Loader ${installedLoader} is older than latest ${latestLoader}, re-installing`,
         )
         await this.clearFabricInstall()
@@ -139,12 +143,15 @@ export class IntegratedHost extends HostProvider {
       await this.installFabricServer(latestLoader)
 
       if (mcChanged || noManifest) {
-        this.logVerbose(
+        this.logger.info(
           `[integrated] MC version changed (${manifestMcVersion ?? 'none'} → ${mcVersion}) — re-resolving mods`,
         )
         await this.clearMods()
         await this.installMods(mcVersion)
       }
+    } else if (modsConfigChanged) {
+      this.logger.info(`[integrated] mods config changed, reconciling...`)
+      await this.installMods(mcVersion)
     }
     await this.ensureModsTracked(mcVersion)
     await this.checkModUpdates(mcVersion)
@@ -346,7 +353,7 @@ export class IntegratedHost extends HostProvider {
         for (const { line } of lines) {
           if (line.includes('Done (')) {
             this.doneDetected = true
-            this.logVerbose(
+            this.logger.info(
               `[integrated#startServer] detected "Done (" — server is ready`,
             )
             for (const r of this.resolveReady) r()
@@ -364,7 +371,7 @@ export class IntegratedHost extends HostProvider {
             line.includes(`RCON running on 0.0.0.0:${expectedPort}`)
           ) {
             this.rconReadyDetected = true
-            this.logVerbose(
+            this.logger.info(
               `[integrated#startServer] detected "RCON running on 0.0.0.0:${expectedPort}" — rcon listener ready`,
             )
             const m = this.pendingLineMatcher
@@ -506,7 +513,7 @@ export class IntegratedHost extends HostProvider {
   }
 
   private detectLogLine(pattern: RegExp): Promise<string> {
-    this.logVerbose(`[integrated] detectLogLine registered: ${pattern}`)
+    this.logger.info(`[integrated] detectLogLine registered: ${pattern}`)
     for (const line of this.logBuffer) {
       if (pattern.test(line)) {
         this.logger.info(`[integrated] detectLogLine matched in buffer: ${JSON.stringify(line)}`)
@@ -634,7 +641,7 @@ export class IntegratedHost extends HostProvider {
       )
       modrinthHashes = new Set(latest.keys())
     } catch (err) {
-      console.warn(`mod tracking bootstrap failed: ${err}`)
+      this.logger.warn(`mod tracking bootstrap failed: ${err}`)
     }
 
     for (const { filename, sha512 } of entries) {
@@ -675,7 +682,7 @@ export class IntegratedHost extends HostProvider {
         mcVersion,
       )
     } catch (err) {
-      console.warn(`mod update check failed: ${err}`)
+      this.logger.warn(`mod update check failed: ${err}`)
       return
     }
 
@@ -687,7 +694,7 @@ export class IntegratedHost extends HostProvider {
       if (!entry) continue
       const newFile = primaryFile(version)
       if (newFile.hashes.sha512 === sha) continue
-      this.logVerbose(
+      this.logger.info(
         `[integrated] mod update: ${entry.filename} ${entry.info.versionNumber ?? '?'} → ${version.version_number}`,
       )
       await downloadMod(version, pathJoin(modsDir, newFile.filename))
@@ -712,7 +719,7 @@ export class IntegratedHost extends HostProvider {
     manifest.lastModUpdateCheck = new Date().toISOString()
     await this.writeManifest(manifest)
     if (changed) {
-      this.logVerbose(`[integrated] mod updates applied`)
+      this.logger.info(`[integrated] mod updates applied`)
     }
   }
 
@@ -868,7 +875,7 @@ export class IntegratedHost extends HostProvider {
       if (isSnapshot) args.push('-snapshot')
 
       await new Promise<void>((resolve, reject) => {
-        console.log('[integrated] running fabric server installer...')
+        this.logger.info('[integrated] running fabric server installer...')
         const proc = shellSpawn([this.java!.path, ...args], {
           cwd: this.serverDir,
           stdio: ['ignore', 'pipe', 'inherit'],
@@ -942,6 +949,9 @@ export class IntegratedHost extends HostProvider {
     const installedMods: Record<string, InstalledModInfo> = {
       ...(manifest.installedMods ?? {}),
     }
+    const isTracked = (filename: string, sha512: string): boolean => {
+      return installedMods[filename]?.sha512 === sha512
+    }
     const trackModrinth = (version: ModrinthVersion, filename?: string): void => {
       const file = primaryFile(version)
       const name = filename ?? file.filename
@@ -970,7 +980,11 @@ export class IntegratedHost extends HostProvider {
           `fabric-api has no version matching MC ${mcVersion} on Modrinth — cannot start the server without it`,
         )
       }
-      await downloadMod(version, pathJoin(modsDir, primaryFileName(version)))
+      const file = primaryFile(version)
+      const filename = primaryFileName(version)
+      if (!isTracked(filename, file.hashes.sha512)) {
+        await downloadMod(version, pathJoin(modsDir, filename))
+      }
       trackModrinth(version)
     }
 
@@ -1008,21 +1022,27 @@ export class IntegratedHost extends HostProvider {
         unavailable.push(slug)
         continue
       }
+      const file = primaryFile(version)
       const filename = primaryFileName(version)
-      await downloadMod(version, pathJoin(modsDir, filename)).catch((err) => {
-        console.error(`[integrated] mod ${slug} download failed: ${err}`)
-      })
+      if (!isTracked(filename, file.hashes.sha512)) {
+        await downloadMod(version, pathJoin(modsDir, filename)).catch((err) => {
+          this.logger.error(`[integrated] mod ${slug} download failed: ${err}`)
+        })
+      }
       trackModrinth(version)
       if (key === 'commandcrafter') commandcrafterInstalled = true
     }
     if (unavailable.length > 0) {
-      console.error(`[integrated] mods with no version for MC ${mcVersion}: ${unavailable.join(', ')}`)
+      this.logger.error(`[integrated] mods with no version for MC ${mcVersion}: ${unavailable.join(', ')}`)
     }
     if (commandcrafterInstalled) {
       const kotlin = await findModVersion('fabric-language-kotlin')
       if (kotlin) {
+        const file = primaryFile(kotlin)
         const filename = primaryFileName(kotlin)
-        await downloadMod(kotlin, pathJoin(modsDir, filename))
+        if (!isTracked(filename, file.hashes.sha512)) {
+          await downloadMod(kotlin, pathJoin(modsDir, filename))
+        }
         trackModrinth(kotlin)
       }
     }
@@ -1030,21 +1050,29 @@ export class IntegratedHost extends HostProvider {
       if (extra.modrinthId) {
         const v = await findModVersion(extra.modrinthId, mcVersion)
         if (v) {
-          const filename = extra.filename ?? primaryFileName(v)
-          await downloadMod(v, pathJoin(modsDir, filename))
+          const file = primaryFile(v)
+          const filename = extra.filename ?? file.filename
+          if (!isTracked(filename, file.hashes.sha512)) {
+            await downloadMod(v, pathJoin(modsDir, filename))
+          }
           trackModrinth(v, filename)
         }
       } else if (extra.url) {
         const name = extra.filename ?? basenameFromUrl(extra.url)
-        await downloadUrl(extra.url, pathJoin(modsDir, name))
-        try {
-          const sha512 = await this.sha512OfFile(pathJoin(modsDir, name))
-          trackUrl(name, sha512)
-        } catch {}
+        const filePath = pathJoin(modsDir, name)
+        const existingSha = installedMods[name]?.sha512
+        if (existingSha === undefined || !(await fs.fileExists(filePath))) {
+          await downloadUrl(extra.url, filePath)
+          try {
+            const sha512 = await this.sha512OfFile(filePath)
+            trackUrl(name, sha512)
+          } catch {}
+        }
       }
     }
 
     manifest.installedMods = installedMods
+    manifest.modsConfigHash = hashModsConfig(this.config.mods)
     manifest.lastModUpdateCheck = new Date().toISOString()
     await this.writeManifest(manifest)
   }
@@ -1078,6 +1106,18 @@ function compareSemver(a: string, b: string): number {
   if (aMaj !== bMaj) return aMaj - bMaj
   if (aMin !== bMin) return aMin - bMin
   return (aPatch ?? 0) - (bPatch ?? 0)
+}
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return '[' + value.map(stableStringify).join(',') + ']'
+  const obj = value as Record<string, unknown>
+  const keys = Object.keys(obj).sort()
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}'
+}
+
+function hashModsConfig(mods: IntegratedHostModsConfig | undefined): string {
+  return createHash('sha256').update(stableStringify(mods ?? {})).digest('hex')
 }
 
 function primaryFileName(version: ModrinthVersion): string {

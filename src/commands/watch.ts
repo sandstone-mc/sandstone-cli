@@ -24,7 +24,7 @@ import { Daemon, type DaemonHandle } from './connect/daemon.js'
 import { deployDatapack, checkDeployState } from './deploy.js'
 import { stripCliFrames } from '../utils/strip-cli-frames.js'
 import chalk from 'chalk-template'
-import { runTests, renderTestEvent, type TestEvent, type TestEventSink } from './test.js'
+import { runTests, renderTestEvent, type TestEvent, type TestEventSink } from './test/index.js'
 import type { WorkerResponse, WorkerRequest } from './build/worker-types.js'
 import type { SandstoneConfig } from 'sandstone'
 import { Capability, type HostType } from '../hosts/types.js'
@@ -68,7 +68,6 @@ export async function watchCommand(opts: WatchOptions) {
   let daemonClient: DaemonClient | undefined
   let daemonHandle: DaemonHandle | undefined = undefined
   let bootstrapInFlight: Promise<DaemonHandle> | undefined = undefined
-  let skipNextReload = false
   let surface: DaemonSurface | undefined
   let daemonPoll: ReturnType<typeof setInterval> | undefined
   let linkVersionWatchers: { file: string }[] = []
@@ -273,8 +272,8 @@ export async function watchCommand(opts: WatchOptions) {
 
   const runTestSession = async () => {
     if (alreadyTesting) return
-    if (!daemonClient) return
-    const dc = daemonClient
+    if (!surface) return
+    const sf = surface
     alreadyTesting = true
     suppressHostLog = true
     testEvents.length = 0
@@ -285,7 +284,7 @@ export async function watchCommand(opts: WatchOptions) {
     getWatchUIAPI()?.setStatus('building')
 
     const sessionStartedAt = Date.now()
-    dc.publishTestComplete({
+    sf.publishTestComplete({
       state: 'started',
       pass: 0,
       fail: 0,
@@ -325,21 +324,19 @@ export async function watchCommand(opts: WatchOptions) {
           }
           const lines = renderTestEvent(e)
           for (const line of lines) log(line)
-          // Mirror to .sandstone/test.log and daemon test buffer.
           if (lines.length > 0) {
-            for (const line of lines) log(line)
-            void dc.publishLog({
+            void sf.publishLog({
               target: 'test',
               entries: lines.map((line) => ({ line, ts: Date.now(), stream: 'stdout' })),
             }).catch(() => {})
           }
         }) satisfies TestEventSink,
-        dc,
+        sf,
       )
       const durationSec = Math.max(0, Math.round((Date.now() - sessionStartedAt) / 1000))
       daemonLog(exitCode === 0 ? chalk`{green Tests finished (exit ${exitCode})}` : chalk`{red Tests finished (exit ${exitCode})}`)
       const state = exitCode === 0 ? 'complete' : exitCode === 130 ? 'cancelled' : 'failed'
-      dc.publishTestComplete({
+      sf.publishTestComplete({
         state,
         pass: testPassCount,
         fail: testFailCount,
@@ -528,19 +525,14 @@ export async function watchCommand(opts: WatchOptions) {
         currentHasTests = result.hasTests === true
         syncTestsBindings()
         if (surface) {
-          if (skipNextReload) {
-            skipNextReload = false
-            if (testingMode) void runTestSession()
-          } else {
-            daemonLog('Sent /reload to host daemon')
-            surface.reloadResources()
-              .then(() => {
-                if (testingMode) void runTestSession()
-              })
-              .catch((err) => {
-                logWarn(`[watch] daemon reload failed: ${err instanceof Error ? err.message : String(err)}`)
-              })
-          }
+          daemonLog('Sent /reload to host daemon')
+          surface.reloadResources()
+            .then(() => {
+              if (testingMode) void runTestSession()
+            })
+            .catch((err) => {
+              logWarn(`[watch] daemon reload failed: ${err instanceof Error ? err.message : String(err)}`)
+            })
         }
       } else {
         logError(displayResult.error || '')
@@ -560,44 +552,14 @@ export async function watchCommand(opts: WatchOptions) {
     }
   }
 
-  let restartTimeout: ReturnType<typeof setTimeout> | null = null
   let debouncedChanges: TrackedChange[] = []
   let debounceScheduled = false
 
-  function restart() {
-    daemonLog('Restarting watch process...')
-    getWatchUIAPI()?.setStatus('restarting')
-
-    const [runtime, ...args] = process.argv
-    const child = spawn([runtime, ...args], {
-      stdio: ['inherit', 'inherit', 'inherit'],
-      detached: true,
-    })
-    child.unref()
-
-    unmountInk?.()
-    process.exit(0)
-  }
-
   const handleEvents = (events: Event[]) => {
-    let needsRestart = false
     const trackedChanges: TrackedChange[] = []
 
     for (const e of events) {
       const eventPath = normalizePath(e.path)
-
-      const lockFile =
-        eventPath.endsWith('.lock') ||
-        eventPath.endsWith('-lock.yml') ||
-        eventPath.endsWith('-lock.json')
-
-      if (
-        lockFile ||
-        eventPath.includes('node_modules/') ||
-        eventPath.endsWith('sandstone.config.ts')
-      ) {
-        needsRestart = true
-      }
 
       const inSrc = eventPath.includes('src/')
       const inResources = eventPath.includes('resources/')
@@ -613,15 +575,7 @@ export async function watchCommand(opts: WatchOptions) {
       }
     }
 
-    if (trackedChanges.length === 0 && !needsRestart) {
-      return
-    }
-
-    if (needsRestart) {
-      if (restartTimeout) {
-        clearTimeout(restartTimeout)
-      }
-      restartTimeout = setTimeout(restart, 500)
+    if (trackedChanges.length === 0) {
       return
     }
 
@@ -821,11 +775,13 @@ export async function watchCommand(opts: WatchOptions) {
           projectRoot: opts.path,
           cliHostType: opts.hostType,
           sink: connectSink,
+          onHostTypeDetermined: async (hostType) => {
+            if (hostType === 'integrated') {
+              daemonLog('Integrated connect host starting up...')
+            }
+          }
         })
-        if (resolved.hostType === 'integrated') {
-          daemonLog('Integrated connect host starting up...')
-        }
-        const { host, handle, spawnedByUs } = await startInProcessDaemon({
+        const { handle } = await startInProcessDaemon({
           projectRoot: opts.path,
           hostType: resolved.hostType,
           hostConfig: resolved.config,
@@ -839,7 +795,7 @@ export async function watchCommand(opts: WatchOptions) {
             }
           },
         })
-        skipNextReload = spawnedByUs && host.type === 'integrated'
+        daemonHandle = handle
         return handle
       })()
     }
@@ -925,7 +881,7 @@ export async function watchCommand(opts: WatchOptions) {
       ignore: ignorePatterns,
     }
   )
-  sigintHandler = async () => await exit(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, log, unmountInk, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient)
+  sigintHandler = async () => await exit(subscription, currentBuildWorker, shuttingDown, weSpawnedIntegrated, log, unmountInk, sigintHandler, linkVersionWatchers, daemonPoll, daemonClient, daemonHandle)
   process.on('SIGINT', sigintHandler)
 }
 
@@ -957,6 +913,7 @@ async function cleanup(
       log('Integrated connect host shutting down...')
     }
     await daemonHandle.shutdown().catch(() => {})
+    await daemonHandle.done.catch(() => {})
     log('Integrated shutdown.')
   }
   daemonClient?.close()

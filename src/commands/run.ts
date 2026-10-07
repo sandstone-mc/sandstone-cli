@@ -1,5 +1,9 @@
-import { resolve, dirname } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { resolve, dirname } from 'path'
+import { randomUUID } from 'crypto'
+import { pathToFileURL } from 'url'
+import chalk from 'chalk-template'
+import type { SandstoneContext } from 'sandstone'
+
 import { Client } from './connect/client.js'
 import { NULL_LOGGER } from './connect/logger.js'
 import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
@@ -7,9 +11,6 @@ import { bootstrapWithShimLogger, prepareConnectSink, resolveHostAndConfig } fro
 import { Daemon } from './connect/daemon.js'
 import type { HostConfigInput, HostProvider, HostType } from '../hosts/types.js'
 import { DEFAULT_HOST_TYPE } from './connect/index.js'
-import type { SandstoneContext } from 'sandstone'
-import { randomUUID as nodeRandomUUID } from 'node:crypto'
-import chalk from 'chalk-template'
 import { parseHostConfig } from './connect/host-config.js'
 
 export interface RunCommandOptions {
@@ -376,7 +377,7 @@ async function compileTypescriptFile(filePath: string): Promise<string[]> {
   const context: SandstoneContext = {
     workingDir: dirname(abs),
     namespace: 'sand_run',
-    packUid: nodeRandomUUID(),
+    packUid: randomUUID(),
     packOptions: {
       datapack: { packFormat: 112, description: 'sand run scratch' },
     },

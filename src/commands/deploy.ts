@@ -1,5 +1,5 @@
-import path from 'node:path'
-import { createHash } from 'node:crypto'
+import path from 'path'
+import { createHash } from 'crypto'
 import AdmZip from 'adm-zip'
 
 import * as fs from '../utils/fs.js'

@@ -15,7 +15,7 @@
  * — returns a binary stream (tar.gz on linux, zip on windows, etc).
  */
 
-import { join as pathJoin } from 'node:path'
+import { join as pathJoin } from 'path'
 
 import { ghFetchText } from '../utils/github.js'
 import * as fs from '../utils/fs.js'

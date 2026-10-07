@@ -1,7 +1,8 @@
-import { dirname, resolve } from 'node:path'
+import { dirname, resolve } from 'path'
+import type { SandstoneConfig } from 'sandstone'
+
 import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
 import { fileExists } from '../../utils/fs.js'
-import type { SandstoneConfig } from 'sandstone'
 
 export type ActiveMode = 'pack' | 'library'
 

@@ -1,16 +1,16 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes } from 'crypto'
 import path from 'path'
 import chalk from 'chalk-template'
 
+import * as fs from '../../utils/fs.js'
 import { getAvailableSandstoneVersions } from '../versionDiscovery.js'
 import { getProvider } from '../../hosts/registry.js'
-import * as fs from '../../utils/fs.js'
 import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
 import { CONSOLE_LOGGER, type DaemonLogger } from './logger.js'
 import type { HostConfigInput, HostProvider, HostType } from '../../hosts/types.js'
+import { loadActiveConfigFromDisk } from './active-config.js'
 
 import '../../hosts/index.js'
-import { loadActiveConfigFromDisk } from './active-config.js';
 
 export interface BootstrapOptions {
   hostType: HostType

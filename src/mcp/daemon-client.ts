@@ -1,4 +1,4 @@
-import { resolve } from 'node:path'
+import { resolve } from 'path'
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import type { Client } from '../commands/connect/client.js'

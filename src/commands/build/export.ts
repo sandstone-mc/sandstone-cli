@@ -93,6 +93,41 @@ export async function getClientWorldPath(worldName: string, minecraftPath: strin
 
 // Symlink handling
 
+const sep: string = process.platform === 'win32' ? `${path.sep}${path.sep}` : path.sep
+
+export async function ensureAllowedSymlinksEntry(
+  folder: string,
+  packName: string,
+  minecraftPath: string,
+  sink: { log: (msg: string) => void },
+): Promise<void> {
+  let rawPath = path.resolve(folder)
+  if (process.platform === 'win32') {
+    rawPath = rawPath.replaceAll(path.sep, sep)
+  }
+  const allowPath = `[glob]${rawPath}${sep}**${sep}*`
+
+  const allowedList = path.join(minecraftPath, 'allowed_symlinks.txt')
+  const comment = `# Sandstone Pack: ${packName}\n`
+
+  try {
+    const currentlyAllowed = (await fs.readText(allowedList)).replace(/\r/g, '')
+    if (currentlyAllowed.split('\n').includes(allowPath)) {
+      sink.log('[symlink] Workspace already in allowed_symlinks.txt, skipping...')
+      return
+    }
+    sink.log('[symlink] Adding workspace to allowed_symlinks.txt. If the game is running please restart it.')
+    const separator = currentlyAllowed.length > 0
+      ? (currentlyAllowed.endsWith('\n') ? '' : '\n') + '#\n'
+      : ''
+    await fs.writeText(allowedList, currentlyAllowed + separator + comment + allowPath)
+  } catch (e: any) {
+    if (e.code !== 'ENOENT') throw e
+    sink.log('[symlink] Creating allowed_symlinks.txt. If the game is running please restart it.')
+    await fs.writeText(allowedList, `${comment}${allowPath}`)
+  }
+}
+
 export async function createSymlink(
   folder: string,
   packName: string,
@@ -102,36 +137,7 @@ export async function createSymlink(
   sink: LoggerSink,
   linkPath: string
 ) {
-  let rawPath = path.resolve(path.join(folder))
-  let sep: string = path.sep
-  if (process.platform === 'win32') {
-    sep = `${path.sep}${path.sep}`
-    rawPath = rawPath.replaceAll(path.sep, sep)
-  }
-  const allowPath = `[glob]${rawPath}${sep}**${sep}*`
-
-  const allowedList = path.join(minecraftPath, 'allowed_symlinks.txt')
-
-  const comment = `# Sandstone Pack: ${packName}\n`
-  try {
-    const currentlyAllowed = (await fs.readText(allowedList)).replace(/\r/g, '')
-
-    if (currentlyAllowed.split('\n').includes(allowPath)) {
-      sink.log('[symlink] Workspace already in allowed_symlinks.txt, skipping...')
-    } else {
-      sink.log('[symlink] Adding workspace to allowed_symlinks.txt. If the game is running please restart it.')
-
-      const separator = currentlyAllowed.length > 0
-        ? (currentlyAllowed.endsWith('\n') ? '' : '\n') + '#\n'
-        : ''
-      await fs.writeText(allowedList, currentlyAllowed + separator + comment + allowPath)
-    }
-  } catch (e: any) {
-    if (e.code !== 'ENOENT') throw e
-
-    sink.log('[symlink] Creating allowed_symlinks.txt. If the game is running please restart it.')
-    await fs.writeText(allowedList, `${comment}${allowPath}`)
-  }
+  await ensureAllowedSymlinksEntry(folder, packName, minecraftPath, sink)
 
   // Inspect what (if anything) exists at linkPath
   let isExistingDirectory = false
@@ -275,7 +281,7 @@ export async function preserveSymlink(
     for (const oldSymlink of oldCache.symlinks) {
       if (!oldSymlink.startsWith(symlinkPath + sep)) continue
       const childName = oldSymlink.slice(symlinkPath.length + 1)
-      if (childName.includes(sep)) continue
+      if (childName.includes(path.sep)) continue
       if (!perChildEntries.includes(childName)) continue
       newCache.symlinks ??= []
       if (!newCache.symlinks.includes(oldSymlink)) {

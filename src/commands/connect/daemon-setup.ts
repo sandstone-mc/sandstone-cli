@@ -1,4 +1,4 @@
-import { join } from 'node:path'
+import { join } from 'path'
 import { BootstrapError, bootstrapHost } from './bootstrap.js'
 import { createDaemonLogger } from './logger.js'
 import { Daemon, type DaemonHandle } from './daemon.js'
@@ -97,6 +97,9 @@ export interface ResolveHostAndConfigOptions {
   /** `--port` CLI flag. Validated; `0` means "pick a free port". */
   cliPort?: string
   sink: LoggerSink
+  /** Async hook fired after the host type has been determined and
+   *  validated, but before any config parsing or setup proceeds. */
+  onHostTypeDetermined?: (hostType: HostType) => Promise<void>
 }
 
 export interface ResolvedHostAndConfig {
@@ -118,6 +121,9 @@ export async function resolveHostAndConfig(
   if (!KNOWN_HOST_TYPES.has(hostType)) {
     opts.sink.logError(chalk`{red Error:} Unknown --host-type '${hostType}' (one of: ssh, ftp, integrated, mcsmanager-login)`)
     process.exit(2)
+  }
+  if (opts.onHostTypeDetermined) {
+    await opts.onHostTypeDetermined(hostType)
   }
 
   const userProvidedHostSettings = !!opts.cliHostType

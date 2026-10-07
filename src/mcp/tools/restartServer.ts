@@ -1,6 +1,6 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
 import { type McpBridge } from '../bridge.js'
-import { restartServer as runRestart, checkRestartCapabilities } from '../../commands/restart-server.js'
+import { restartServer as runRestart, checkRestartCapabilities } from '../../commands/connect/restart-server.js'
 import { raceAbort } from './_raceAbort.js'
 
 export const NAME = 'restartServer'

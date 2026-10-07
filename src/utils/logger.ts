@@ -1,5 +1,5 @@
-import path from 'node:path'
-import { format, stripVTControlCharacters } from 'node:util'
+import path from 'path'
+import { format, stripVTControlCharacters } from 'util'
 
 import * as fs from './fs.js'
 

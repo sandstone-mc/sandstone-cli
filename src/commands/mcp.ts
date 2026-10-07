@@ -17,7 +17,7 @@
  * process will see garbage.
  */
 
-import { resolve } from 'node:path'
+import { resolve } from 'path'
 import { runMcpServer } from '../mcp/server.js'
 import { CLI_VERSION } from '../version.js'
 

@@ -16,7 +16,7 @@
 
 import { ghFetch } from '../utils/github.js'
 import * as fs from '../utils/fs.js'
-import { join as pathJoin } from 'node:path'
+import { join as pathJoin } from 'path'
 
 const API = 'https://api.modrinth.com/v2'
 

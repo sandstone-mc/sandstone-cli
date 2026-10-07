@@ -1,4 +1,4 @@
-import { join as pathJoin } from 'path'
+import * as path from 'path'
 import { createHash } from 'crypto'
 import { Readable, Writable } from 'stream'
 import { ChildProcessWithoutNullStreams, ChildProcess } from 'child_process'
@@ -19,6 +19,8 @@ import { ghFetchText } from '../../utils/github.js'
 import { spawn as shellSpawn } from '../../utils/shell.js'
 import { Capability, HostProvider } from '../types.js'
 import { MINECRAFT_LOG_PREFIX } from '../../commands/run.js'
+import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
+import { ensureAllowedSymlinksEntry } from '../../commands/build/export.js'
 
 import type { ModrinthVersion } from '../modrinth.js'
 import type { DaemonLogger, HostCapabilities, HostLogLine, HostLogHandler, LogSubscription, IntegratedHostConfig, IntegratedHostModsConfig } from '../types.js'
@@ -88,16 +90,15 @@ export class IntegratedHost extends HostProvider {
 
   constructor(config: IntegratedHostConfig, logger: DaemonLogger) {
     super(logger)
-    this.config = { ...config, world: config.world ?? 'void' }
-    this.serverDir =
-      config.serverDir ?? pathJoin(config.projectRoot, '.sandstone', 'mc-server')
-    this.javaDir = config.javaDir ?? pathJoin(this.serverDir, '.java')
+    this.config = { ...config, projectRoot: path.resolve(config.projectRoot), world: config.world ?? 'void' }
+    this.serverDir = path.resolve(this.config.projectRoot, '.sandstone', 'mc-server')
+    this.javaDir = config.javaDir ?? path.join(this.serverDir, '.java')
   }
 
 
   async connect(): Promise<void> {
     if (this.connected) return
-    await fs.ensureDir(pathJoin(this.serverDir, 'debug'))
+    await fs.ensureDir(path.join(this.serverDir, 'debug'))
     // Yeah yeah whatever
     await this.ensureEulaAccepted()
     this.serverPort = await this.resolveServerPort()
@@ -111,7 +112,7 @@ export class IntegratedHost extends HostProvider {
     this.java = await ensureJava(major, this.javaDir)
 
     const latestLoader = await fetchLatestFabricLoader()
-    const manifestPath = pathJoin(this.serverDir, 'sandstone_manifest.json')
+    const manifestPath = path.join(this.serverDir, 'sandstone_manifest.json')
     let installedLoader: string | null = null
     let manifestMcVersion: string | null = null
     let manifestModsConfigHash: string | undefined
@@ -156,9 +157,29 @@ export class IntegratedHost extends HostProvider {
     await this.ensureModsTracked(mcVersion)
     await this.checkModUpdates(mcVersion)
 
+    if (noManifest) {
+      await fs.deleteFile(path.join(this.config.projectRoot, '.sandstone', 'cache.json')).catch(() => {})
+      const sandstoneCfg = await loadSandstoneConfig(this.config.projectRoot)
+      if (sandstoneCfg?.name) {
+        await ensureAllowedSymlinksEntry(this.config.projectRoot, sandstoneCfg.name, this.serverDir, { log: (msg) => this.logger.info(msg) })
+      }
+    }
+
+    if (this.config.worldTemplate === true) {
+      const worldDir = path.join(this.serverDir, 'world')
+      if (!(await fs.fileExists(path.join(worldDir, 'level.dat')))) {
+        const templateDir = path.join(this.config.projectRoot, 'resources', 'world')
+        if (await fs.fileExists(path.join(templateDir, 'level.dat'))) {
+          this.logger.info(`[integrated#connect] copying world template from ${templateDir} to ${worldDir}`)
+          await fs.ensureDir(worldDir)
+          await fs.copyDir(templateDir, worldDir)
+        }
+      }
+    }
+
     this.needsInitialWorldSetup = (
       (this.config.world ?? 'void') === 'void'
-      && !(await fs.fileExists(pathJoin(this.serverDir, 'world', 'level.dat')))
+      && !(await fs.fileExists(path.join(this.serverDir, 'world', 'level.dat')))
     )
     this.connected = true
   }
@@ -262,7 +283,7 @@ export class IntegratedHost extends HostProvider {
     }
     if (!this.java) throw new Error('Java not resolved — connect() failed?')
 
-    const jar = pathJoin(this.serverDir, 'fabric-server-launch.jar')
+    const jar = path.join(this.serverDir, 'fabric-server-launch.jar')
     if (!(await fs.fileExists(jar))) {
       throw new Error(
         `Fabric server jar not found at ${jar} — run the Fabric installer first`,
@@ -476,15 +497,15 @@ export class IntegratedHost extends HostProvider {
     this.child = null
   }
 
-  async readFile(path: string): Promise<Buffer> {
+  async readFile(filePath: string): Promise<Buffer> {
     this.requireConnected('integrated')
-    const full = pathJoin(this.serverDir, path)
+    const full = path.join(this.serverDir, filePath)
     return await fs.readBytes(full)
   }
 
-  async readFileStream(path: string): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }> {
+  async readFileStream(filePath: string): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }> {
     this.requireConnected('integrated')
-    const full = pathJoin(this.serverDir, path)
+    const full = path.join(this.serverDir, filePath)
     const { createReadStream, statSync } = await import('node:fs')
     let size: number | undefined
     try {
@@ -494,19 +515,19 @@ export class IntegratedHost extends HostProvider {
     return { stream: Readable.toWeb(node) as ReadableStream<Uint8Array>, size }
   }
 
-  async writeFile(path: string, data: Buffer | string): Promise<void> {
+  async writeFile(filePath: string, data: Buffer | string): Promise<void> {
     this.requireConnected('integrated')
-    const full = pathJoin(this.serverDir, path)
-    await fs.ensureDir(pathJoin(full, '..'))
+    const full = path.join(this.serverDir, filePath)
+    await fs.ensureDir(path.join(full, '..'))
     await (typeof data === 'string'
       ? fs.writeText(full, data)
       : fs.writeBytes(full, data))
   }
 
-  async writeFileStream(path: string, _opts?: { size?: number }): Promise<WritableStream<Uint8Array>> {
+  async writeFileStream(filePath: string, _opts?: { size?: number }): Promise<WritableStream<Uint8Array>> {
     this.requireConnected('integrated')
-    const full = pathJoin(this.serverDir, path)
-    await fs.ensureDir(pathJoin(full, '..'))
+    const full = path.join(this.serverDir, filePath)
+    await fs.ensureDir(path.join(full, '..'))
     const { createWriteStream } = await import('node:fs')
     const node = createWriteStream(full)
     return Writable.toWeb(node) as WritableStream<Uint8Array>
@@ -592,7 +613,7 @@ export class IntegratedHost extends HostProvider {
   }
 
   private async readManifest() {
-    const manifestPath = pathJoin(this.serverDir, 'sandstone_manifest.json')
+    const manifestPath = path.join(this.serverDir, 'sandstone_manifest.json')
     try {
       const raw = await fs.readText(manifestPath)
       return JSON.parse(raw) as SandstoneManifest
@@ -603,7 +624,7 @@ export class IntegratedHost extends HostProvider {
 
   private async writeManifest(manifest: SandstoneManifest) {
     await fs.writeText(
-      pathJoin(this.serverDir, 'sandstone_manifest.json'),
+      path.join(this.serverDir, 'sandstone_manifest.json'),
       JSON.stringify(manifest, null, 2),
     )
   }
@@ -618,13 +639,13 @@ export class IntegratedHost extends HostProvider {
     if (manifest.installedMods && Object.keys(manifest.installedMods).length > 0) {
       return
     }
-    const modsDir = pathJoin(this.serverDir, 'mods')
+    const modsDir = path.join(this.serverDir, 'mods')
     if (!(await fs.pathExists(modsDir))) return
 
     const entries: Array<{ filename: string; sha512: string }> = []
     for (const entry of await fs.readDirNames(modsDir)) {
       if (!entry.endsWith('.jar')) continue
-      const full = pathJoin(modsDir, entry)
+      const full = path.join(modsDir, entry)
       try {
         const sha512 = await this.sha512OfFile(full)
         entries.push({ filename: entry, sha512 })
@@ -686,7 +707,7 @@ export class IntegratedHost extends HostProvider {
       return
     }
 
-    const modsDir = pathJoin(this.serverDir, 'mods')
+    const modsDir = path.join(this.serverDir, 'mods')
     let changed = false
     const next: Record<string, InstalledModInfo> = { ...installedMods }
     for (const [sha, version] of updates) {
@@ -697,10 +718,10 @@ export class IntegratedHost extends HostProvider {
       this.logger.info(
         `[integrated] mod update: ${entry.filename} ${entry.info.versionNumber ?? '?'} → ${version.version_number}`,
       )
-      await downloadMod(version, pathJoin(modsDir, newFile.filename))
+      await downloadMod(version, path.join(modsDir, newFile.filename))
       if (newFile.filename !== entry.filename) {
         try {
-          await fs.remove(pathJoin(modsDir, entry.filename))
+          await fs.remove(path.join(modsDir, entry.filename))
         } catch {}
       }
       delete next[entry.filename]
@@ -724,7 +745,7 @@ export class IntegratedHost extends HostProvider {
   }
 
   private async ensureEulaAccepted(): Promise<void> {
-    const eulaPath = pathJoin(this.serverDir, 'eula.txt')
+    const eulaPath = path.join(this.serverDir, 'eula.txt')
     let content: string
     try {
       content = await fs.readText(eulaPath)
@@ -769,7 +790,7 @@ export class IntegratedHost extends HostProvider {
       return
     }
 
-    const propsPath = pathJoin(this.serverDir, 'server.properties')
+    const propsPath = path.join(this.serverDir, 'server.properties')
     const isFlat = this.config.world !== 'overworld'
     const owned = new Set([
       // World generator
@@ -857,7 +878,7 @@ export class IntegratedHost extends HostProvider {
     const installerUrl = 
       `https://maven.fabricmc.net/net/fabricmc/fabric-installer/${installerVersion}/fabric-installer-${installerVersion}.jar`
 
-    const installerPath = pathJoin(this.serverDir, `.fabric-installer-${installerVersion}.jar`)
+    const installerPath = path.join(this.serverDir, `.fabric-installer-${installerVersion}.jar`)
     await downloadToFile(installerUrl, installerPath)
 
     let installedLoader: string | null = null
@@ -878,26 +899,26 @@ export class IntegratedHost extends HostProvider {
         this.logger.info('[integrated] running fabric server installer...')
         const proc = shellSpawn([this.java!.path, ...args], {
           cwd: this.serverDir,
-          stdio: ['ignore', 'pipe', 'inherit'],
+          stdio: ['ignore', 'pipe', 'pipe'],
         })
         let stdoutBuf = ''
         const decoder = new TextDecoder('utf-8')
-        ;(async () => {
+        const consume = async (stream: ReadableStream<Uint8Array> | NodeJS.ReadableStream | null) => {
+          if (!stream) return
           try {
-            const stream = proc.stdout as ReadableStream<Uint8Array<ArrayBufferLike>>
-            for await (const chunk of stream) {
-              const text = decoder.decode(chunk, { stream: true })
-              stdoutBuf += text
-              process.stdout.write(text)
+            for await (const chunk of stream as AsyncIterable<Uint8Array>) {
+              stdoutBuf += decoder.decode(chunk, { stream: true })
             }
           } catch (err) {
             reject(err)
           }
-        })()
+        }
+        void consume(proc.stdout as ReadableStream<Uint8Array>)
+        void consume(proc.stderr as ReadableStream<Uint8Array>)
         proc.exited.then(
           (code) => {
             if (code !== 0) {
-              reject(new Error(`Fabric installer exited with code ${code}`))
+              reject(new Error(`Fabric installer exited with code ${code}\n${stdoutBuf}`))
               return
             }
             const match = stdoutBuf.match(
@@ -932,7 +953,7 @@ export class IntegratedHost extends HostProvider {
       'fabric-server-launcher.properties',
     ]
     for (const target of targets) {
-      await fs.remove(pathJoin(this.serverDir, target), {
+      await fs.remove(path.join(this.serverDir, target), {
         recursive: true,
         force: true,
       })
@@ -940,7 +961,7 @@ export class IntegratedHost extends HostProvider {
   }
 
   private async installMods(mcVersion: string): Promise<void> {
-    const modsDir = pathJoin(this.serverDir, 'mods')
+    const modsDir = path.join(this.serverDir, 'mods')
     await fs.ensureDir(modsDir)
     const cfg = this.config.mods ?? {}
     const enabled = (v: boolean | undefined) => v !== false
@@ -983,7 +1004,7 @@ export class IntegratedHost extends HostProvider {
       const file = primaryFile(version)
       const filename = primaryFileName(version)
       if (!isTracked(filename, file.hashes.sha512)) {
-        await downloadMod(version, pathJoin(modsDir, filename))
+        await downloadMod(version, path.join(modsDir, filename))
       }
       trackModrinth(version)
     }
@@ -1025,7 +1046,7 @@ export class IntegratedHost extends HostProvider {
       const file = primaryFile(version)
       const filename = primaryFileName(version)
       if (!isTracked(filename, file.hashes.sha512)) {
-        await downloadMod(version, pathJoin(modsDir, filename)).catch((err) => {
+        await downloadMod(version, path.join(modsDir, filename)).catch((err) => {
           this.logger.error(`[integrated] mod ${slug} download failed: ${err}`)
         })
       }
@@ -1041,7 +1062,7 @@ export class IntegratedHost extends HostProvider {
         const file = primaryFile(kotlin)
         const filename = primaryFileName(kotlin)
         if (!isTracked(filename, file.hashes.sha512)) {
-          await downloadMod(kotlin, pathJoin(modsDir, filename))
+          await downloadMod(kotlin, path.join(modsDir, filename))
         }
         trackModrinth(kotlin)
       }
@@ -1053,13 +1074,13 @@ export class IntegratedHost extends HostProvider {
           const file = primaryFile(v)
           const filename = extra.filename ?? file.filename
           if (!isTracked(filename, file.hashes.sha512)) {
-            await downloadMod(v, pathJoin(modsDir, filename))
+            await downloadMod(v, path.join(modsDir, filename))
           }
           trackModrinth(v, filename)
         }
       } else if (extra.url) {
         const name = extra.filename ?? basenameFromUrl(extra.url)
-        const filePath = pathJoin(modsDir, name)
+        const filePath = path.join(modsDir, name)
         const existingSha = installedMods[name]?.sha512
         if (existingSha === undefined || !(await fs.fileExists(filePath))) {
           await downloadUrl(extra.url, filePath)
@@ -1078,7 +1099,7 @@ export class IntegratedHost extends HostProvider {
   }
 
   private async clearMods(): Promise<void> {
-    await fs.remove(pathJoin(this.serverDir, 'mods'), {
+    await fs.remove(path.join(this.serverDir, 'mods'), {
       recursive: true,
       force: true,
     })

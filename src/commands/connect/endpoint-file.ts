@@ -1,28 +1,9 @@
-/**
- * Endpoint file: `<projectRoot>/.sandstone/connect.url`
- *
- * The daemon writes this on startup and removes it on shutdown. Consumer
- * commands read it to discover the WS URL + secret. Format is JSON:
- *
- *   {
- *     "version": 1,
- *     "url": "ws://127.0.0.1:54321",
- *     "secret": "<64 hex chars>",
- *     "hostType": "integrated",
- *     "displayName": "Integrated Fabric Server",
- *     "capabilities": { ... },
- *     "pid": 12345,
- *     "startedAt": "2026-09-15T...",
- *     "projectRoot": "/abs/path",
- *     "bind": "127.0.0.1",
- *     "port": 54321
- *   }
- */
+import { join } from 'path'
+import { lstat } from 'node:fs/promises'
+import { randomBytes } from 'crypto'
 
-import { randomBytes } from 'node:crypto'
-import { mkdir, stat as fsStat, unlink, lstat } from 'node:fs/promises'
-import { join } from 'node:path'
-import { writeTextAtomic } from '../../utils/fs.js'
+
+import * as fs from '../../utils/fs.js'
 
 export const ENDPOINT_VERSION = 1
 
@@ -67,7 +48,7 @@ export function endpointPath(projectRoot: string): string {
 export async function writeEndpoint(projectRoot: string, data: EndpointFile): Promise<void> {
   const path = endpointPath(projectRoot)
   const dir = join(projectRoot, '.sandstone')
-  await mkdir(dir, { recursive: true })
+  await fs.ensureDir(dir)
   try {
     const st = await lstat(path)
     if (st.isSymbolicLink()) {
@@ -77,7 +58,7 @@ export async function writeEndpoint(projectRoot: string, data: EndpointFile): Pr
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
   }
 
-  await writeTextAtomic(path, JSON.stringify(data, null, 2), { mode: 0o600 })
+  await fs.writeTextAtomic(path, JSON.stringify(data, null, 2), { mode: 0o600 })
 }
 
 export async function readEndpoint(projectRoot: string): Promise<EndpointFile | null> {
@@ -115,7 +96,7 @@ export async function endpointStatus(projectRoot: string): Promise<EndpointStatu
   if (alive) return 'live'
   let ageMs: number
   try {
-    const st = await fsStat(endpointPath(projectRoot))
+    const st = await fs.fileStat(endpointPath(projectRoot))
     ageMs = Date.now() - st.mtimeMs
   } catch {
     return 'live-recent'
@@ -138,7 +119,7 @@ export async function deleteEndpoint(projectRoot: string, ourPid?: number): Prom
     } catch {}
   }
   try {
-    await unlink(path)
+    await fs.unlinkPath(path)
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
   }

@@ -1,6 +1,7 @@
 import { resolve, dirname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { Client } from './connect/client.js'
+import { NULL_LOGGER } from './connect/logger.js'
 import { pidAlive, readEndpoint } from './connect/endpoint-file.js'
 import { bootstrapWithShimLogger, prepareConnectSink, resolveHostAndConfig } from './connect/daemon-setup.js'
 import { Daemon } from './connect/daemon.js'
@@ -70,7 +71,7 @@ export async function runCommand(
   // 6. Daemon-mode fast path.
   if (daemonAlive && endpoint) {
     try {
-      const client = await Client.open({ endpoint })
+      const client = await Client.open({ endpoint, logger: NULL_LOGGER })
 
       if (!client.welcome.capabilities.executeRawCommand) {
         console.error(chalk`{red Error:} Host does not support executeRawCommand`)
@@ -463,7 +464,7 @@ async function runCommands(
   const { hostType: resolvedHostType, userProvidedHostSettings } = resolveDirectHostType(opts)
 
   if (daemonAlive && endpoint) {
-    const client = await Client.open({ endpoint })
+    const client = await Client.open({ endpoint, logger: NULL_LOGGER })
     if (!client.welcome.capabilities.executeRawCommand) {
       console.error(chalk`{red Error:} Host does not support executeRawCommand`)
       client.close()

@@ -13,6 +13,7 @@ import type { BuildResult } from '../ui/types.js'
 import { repackIfLinked } from './link.js'
 import { WatchUI, getWatchUIAPI } from '../ui/WatchUI.js'
 import { logger, type LoggerSink } from '../utils/logger.js'
+import { createDaemonLogger } from './connect/logger.js'
 import type { TrackedChange, ChangeCategory } from '../ui/types.js'
 import * as fs from '../utils/fs.js'
 import { run, spawn } from '../utils/shell.js'
@@ -89,7 +90,8 @@ export async function watchCommand(opts: WatchOptions) {
 
   function ensureBuildWorker() {
     if (currentBuildWorker) return currentBuildWorker
-    const url = pathToFileURL(path.join(folder, 'node_modules', 'sandstone-cli', 'lib', 'build-worker.js'))
+    const entryDir = path.dirname(process.argv[1]!)
+    const url = pathToFileURL(path.join(entryDir, 'build-worker.js'))
     const worker = new Worker(url, { env: { ...process.env, SAND_WORKER: '1' } })
     currentBuildWorker = worker
     worker.addEventListener('message', (event: MessageEvent) => {
@@ -132,6 +134,8 @@ export async function watchCommand(opts: WatchOptions) {
       const text = err.message || 'worker error (no message)'
       const m = text.match(/^error:\\s*(.+)$/m)
       const reason = m ? m[1].trim() : text.trim()
+      logError(`[build-worker] crashed: ${reason}`)
+      if (currentBuildWorker === worker) currentBuildWorker = null
       const err2 = new Error('build worker crashed: ' + reason)
       for (const [, slot] of workerInflight) {
         workerInflight.delete(slot as unknown as number)
@@ -849,7 +853,7 @@ export async function watchCommand(opts: WatchOptions) {
         const endpoint = await readEndpoint(opts.path)
         if (endpoint) {
           try {
-            daemonClient = await DaemonClient.open({ endpoint })
+            daemonClient = await DaemonClient.open({ endpoint, logger: createDaemonLogger(logger.sinks.watch) })
             daemonLog('Connected to host daemon')
             await wireSurface(daemonClient)
             clearInterval(daemonPoll)

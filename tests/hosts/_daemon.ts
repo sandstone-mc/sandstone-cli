@@ -8,7 +8,7 @@
  * imports of the host providers themselves — everything goes
  * through the bundled CLI as a subprocess.
  */
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync } from 'node:fs'
 import { mkdir, rm } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -17,7 +17,10 @@ import { fileURLToPath } from 'node:url'
 // bundled `lib/index.js` (no .d.ts emitted by `bun bundle`). Bun
 // runs the same TypeScript directly, so this exercises the same
 // client code the daemon uses internally.
-import { connect as openClient, type Client } from '../../src/commands/connect/client.ts'
+import { Client } from '../../src/commands/connect/client.ts'
+import { readEndpoint } from '../../src/commands/connect/endpoint-file.ts'
+import { logger } from '../../src/utils/logger.ts'
+import { createDaemonLogger } from '../../src/commands/connect/logger.ts'
 import type { HarnessConfig } from './_harness.ts'
 
 export type { HarnessConfig }
@@ -33,6 +36,17 @@ const BUN_BIN = (typeof Bun !== 'undefined' && typeof Bun.which === 'function' ?
 const __dirname = join(fileURLToPath(import.meta.url), '..', '..', '..')
 export const CLI_ROOT = __dirname
 const SANDBIN = join(CLI_ROOT, 'lib', 'index.js')
+
+// Wire the `connect-client` sink so the client's `[debug-ssh-hang]`
+// traces land somewhere visible. The bare-proxy default buffers into
+// memory and never flushes; bun:test captures process stderr until
+// the test resolves, so a hung test swallows everything written there.
+// Registering with an explicit filePath gives us a `Bun.FileSink`
+// writer that flushes on every write — debug output is persisted to
+// `.temp/test-hosts/connect-client.log` for the user to inspect
+// after a freeze.
+const CLIENT_LOG_FILE = join(CLI_ROOT, '.temp', 'test-hosts', 'connect-client.log')
+logger.registerSink('connect-client', CLIENT_LOG_FILE, 'Connect client debug logs')
 
 export interface DaemonOptions {
   /** Temp project root. The daemon writes `.sandstone/connect.url`
@@ -131,11 +145,12 @@ const cmd: string[] = [
     throw new Error(`daemon did not write endpoint file within 30s.\nstderr:\n${stderr}`)
   }
 
-  const endpointRaw = readFileSync(endpointPath, 'utf8').trim()
-  // The endpoint file is JSON: `{ "url": "ws://127.0.0.1:<port>", ... }`
-  const endpoint = JSON.parse(endpointRaw) as { url?: string; port?: number }
-  const url = endpoint.url ?? ''
-  const boundPort = endpoint.port ?? -1
+  const endpointData = await readEndpoint(projectRoot)
+  if (!endpointData) {
+    throw new Error(`endpoint file was written but readEndpoint could not load it: ${endpointPath}`)
+  }
+  const url = endpointData.url
+  const boundPort = endpointData.port
 
   const shutdown = async () => {
     const r = Bun.spawn({
@@ -198,9 +213,15 @@ export async function runSand(
  * `executeRawCommand`, so `sand run` can't drive it.
  */
 export async function openDaemonClient(daemon: RunningDaemon): Promise<Client> {
-  const endpointRaw = readFileSync(daemon.endpointPath, 'utf8').trim()
-  const endpoint = JSON.parse(endpointRaw) as Parameters<typeof openClient>[0]['endpoint']
-  return await openClient({ endpoint })
+  // `endpointPath` is `<projectRoot>/.sandstone/connect.url`; walk up
+  // two directories to recover the project root and load the typed
+  // `EndpointFile` via the production reader.
+  const projectRoot = dirname(dirname(daemon.endpointPath))
+  const endpoint = await readEndpoint(projectRoot)
+  if (!endpoint) {
+    throw new Error(`endpoint file at ${daemon.endpointPath} could not be parsed`)
+  }
+  return await Client.open({ endpoint, logger: createDaemonLogger(logger.sinks['connect-client']) })
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +316,11 @@ export function setHarnessBroughtUp(value: boolean): void {
  * - `TEST_SKIP_HARNESS=1` → assume up, don't touch anything. Used for
  *   fast local iteration against a harness the user is managing
  *   manually.
- * - Already healthy → leave alone, don't tear down later.
+ * - Already healthy → leave alone, don't tear down later. Still
+ *   re-extract the SSH key — `docker compose cp` is idempotent and the
+ *   test runner reads the key from `.temp/test-harness/ssh-key`, so if
+ *   that file is missing or stale (e.g. after a manual rebuild via
+ *   `bun test:docker:up`) the connection setup fails with ENOENT.
  * - Anything else (missing / stopped / starting) → bring it up from
  *   scratch + set `harnessBroughtUp = true` so `teardownHarness`
  *   cleans up.
@@ -309,7 +334,8 @@ export async function ensureHarnessUp(): Promise<void> {
   }
   const state = await probeHarnessState()
   if (state === 'healthy') {
-    log('harness', `already ${state} — leaving alone`)
+    log('harness', `already ${state} — leaving alone (still refreshing SSH key)`)
+    await copySshKey()
     return
   }
   log('harness', `state=${state}, bringing up`)

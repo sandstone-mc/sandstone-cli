@@ -4,6 +4,7 @@ import type { HostLogLine } from '../../hosts/types.js'
 import { TimeoutError, InterruptedError } from './wait-log.js'
 import { SUBPROTOCOL_PREFIX } from './rpc.js'
 import type { EndpointFile } from './endpoint-file.js'
+import type { DaemonLogger } from './logger.js'
 import {
   decodeRpc,
   decodeStreamChunk,
@@ -32,6 +33,7 @@ export interface ClientOptions {
   endpoint: EndpointFile
   /** Defaults to 30s. */
   requestTimeoutMs?: number
+  logger: DaemonLogger
 }
 export interface ReadFileStreamResult {
   streamId: string,
@@ -67,6 +69,7 @@ export class Client {
   readonly welcome: rpc.WelcomeEvent
   private readonly ws: WebSocket
   private readonly timeoutMs: number
+  private readonly logger: DaemonLogger
   private readonly pending = new Map<string | number, PendingEntry>()
   private readonly listenersBySub = new Map<string, Set<InternalListener>>()
   private readonly waitForLogBySub = new Map<string, Map<string, {
@@ -81,14 +84,14 @@ export class Client {
   private nextId = 1
   private closed = false
 
-  private constructor(ws: WebSocket, welcome: rpc.WelcomeEvent, timeoutMs: number) {
+  private constructor(ws: WebSocket, welcome: rpc.WelcomeEvent, timeoutMs: number, logger: DaemonLogger) {
     this.ws = ws
     this.welcome = welcome
     this.timeoutMs = timeoutMs
+    this.logger = logger
   }
 
-  /** Open WS, await welcome, return ready Client. */
-  static async open(opts: ClientOptions): Promise<Client> {
+  static async open(opts: ClientOptions) {
     const ws = new WebSocket(opts.endpoint.url, [SUBPROTOCOL_PREFIX + opts.endpoint.secret])
     const timeoutMs = opts.requestTimeoutMs ?? 30_000
 
@@ -108,20 +111,20 @@ export class Client {
       ws.addEventListener('message', onWelcomeMessage)
     })
 
-    const client = new Client(ws, welcome, timeoutMs)
+    const client = new Client(ws, welcome, timeoutMs, opts.logger)
     ws.addEventListener('message', (ev) => client.handleMessage(ev))
     ws.addEventListener('close', () => client.handleClose())
     return client
   }
 
-  private handleMessage(ev: MessageEvent): void {
+  private handleMessage(ev: MessageEvent) {
     const buf = Bytes(ev.data)
     if (typeof ev.data !== 'string' && buf.byteLength >= 17 && buf[0] === STREAM_MAGIC) {
       const { streamId, chunk } = decodeStreamChunk(buf)
       const id = hexFromBytes(streamId)
       const record = this.streamsById.get(id)
       if (!record?.controller) {
-        console.error(
+        this.logger.error(
           `[ws] orphan stream chunk for id=${id} (known streams: ${this.streamsById.size}) — dropping ${chunk.byteLength} bytes`,
         )
         return
@@ -150,11 +153,6 @@ export class Client {
             if (subs) for (const fn of subs) fn(logData.lines)
             return
           }
-          // NOTE: `waitForLog` is sent by the daemon as a JSON-RPC
-          // notification (not an event envelope), so it lands in the
-          // `'notification'` branch below. The `waitForLogBySub` dispatch
-          // there is currently unreachable — `waitForLog` subscriptions
-          // resolve via the fallback handler, not the typed switch.
           case 'daemonShutdown': {
             const reason = (msg.data as { reason?: string } | undefined)?.reason ?? 'unknown'
             for (const { reject, timer } of this.pending.values()) {
@@ -227,7 +225,7 @@ export class Client {
           const entry = this.waitForLogBySub.get(data.subscriptionId)
           const slot = entry?.get(data.patternUUID)
           if (!slot) {
-            console.warn(`[ws] unexpected waitForLog notification for unknown pattern (subscriptionId=${data.subscriptionId}, patternUUID=${data.patternUUID}, status=${data.status}) — dropping`)
+            this.logger.warn(`[ws] unexpected waitForLog notification for unknown pattern (subscriptionId=${data.subscriptionId}, patternUUID=${data.patternUUID}, status=${data.status}) — dropping`)
             return
           }
           if (data.status === 'matched') {
@@ -249,7 +247,7 @@ export class Client {
     }
   }
 
-  private handleClose(): void {
+  private handleClose() {
     if (this.closed) return
     this.closed = true
     for (const { reject, timer } of this.pending.values()) {
@@ -266,12 +264,12 @@ export class Client {
     }
   }
 
-  private call<M extends rpc.RpcMethod, T>(method: M, params?: rpc.RpcMethodParams[M], signal?: AbortSignal): Promise<T> {
+  private call<M extends rpc.RpcMethod>(method: M, params?: rpc.RpcMethodParams[M], signal?: AbortSignal) {
     if (this.closed) return Promise.reject(new Error('connection closed'))
     if (signal?.aborted) return Promise.reject(new Error(`rpc '${method}' aborted`))
     const id = this.nextId++
     const req: rpc.RpcRequest<M> = { id, method, params }
-    return new Promise<T>((resolve, reject) => {
+    return new Promise<rpc.RpcMethodResults[M]>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         signal?.removeEventListener('abort', onAbort)
@@ -284,7 +282,7 @@ export class Client {
       }
       signal?.addEventListener('abort', onAbort, { once: true })
       this.pending.set(id, {
-        resolve: (v) => { signal?.removeEventListener('abort', onAbort); resolve(v as T) },
+        resolve: (v) => { signal?.removeEventListener('abort', onAbort); resolve(v as rpc.RpcMethodResults[M]) },
         reject: (e) => { signal?.removeEventListener('abort', onAbort); reject(e) },
         timer,
       })
@@ -307,7 +305,7 @@ export class Client {
         detached = true
         self.listenersBySub.delete(subscriptionId)
         try {
-          await self.call<'unattach', void>('unattach', { subscriptionId })
+          await self.call('unattach', { subscriptionId })
         } catch {}
       },
     }
@@ -328,10 +326,12 @@ export class Client {
     })
     const stream = new ReadableStream<Uint8Array>({
       start(controller) {
+        self.logger.info(`openInboundStream start streamId=${streamId}`)
         const record: StreamRecord = {
           streamId,
           controller,
           resolve(bytes: number) {
+            self.logger.info(`inbound stream resolve streamId=${streamId} bytes=${bytes}`)
             args.rpcResolve(undefined)
             // `streamEnd` is handled by the dispatcher and will also
             // call resolveDone. Defer the done resolution here to a
@@ -339,6 +339,7 @@ export class Client {
             queueMicrotask(() => resolveDone({ bytesRead: bytes }))
           },
           reject(err: Error) {
+            self.logger.info(`inbound stream reject streamId=${streamId} err=${err.message}`)
             args.rpcReject(err)
             rejectDone(err)
           },
@@ -349,7 +350,7 @@ export class Client {
         const record = self.streamsById.get(streamId)
         if (record) {
           if (record.controller) {
-            try { record.controller.close() } catch { /* ignore */ }
+            try { record.controller.close() } catch {}
           }
           self.streamsById.delete(streamId)
         }
@@ -406,7 +407,7 @@ export class Client {
     return { streamId, done }
   }
 
-  private writeFileStreamImpl(params: { path: string; stream: ReadableStream<Uint8Array>; size?: number }): Promise<WriteFileStreamResult> {
+  writeFileStream(params: { path: string; stream: ReadableStream<Uint8Array>; size?: number }) {
     return new Promise<WriteFileStreamResult>((resolve, reject) => {
       const id = this.nextId++
       const req: rpc.RpcRequest = {
@@ -442,7 +443,7 @@ export class Client {
     })
   }
 
-  private async readFileStreamImpl(params: { path: string }): Promise<ReadFileStreamResult> {
+  async readFileStream(params: { path: string }) {
     return new Promise<ReadFileStreamResult>((resolve, reject) => {
       const id = this.nextId++
       const req: rpc.RpcRequest = { id, method: 'readFile', params }
@@ -453,6 +454,7 @@ export class Client {
       this.pending.set(id, {
         resolve: (r) => {
           const result = r as rpc.RpcReadFileStream
+          this.logger.info(`readFile response id=${id} streamId=${result.streamId} totalSize=${result.totalSize}`)
           if (!result.streamId) {
             reject(new Error('Daemon returned no streamId for streaming readFile'))
             return
@@ -466,18 +468,20 @@ export class Client {
         reject,
         timer,
       })
+      this.logger.info(`readFile send id=${id} path=${params.path}`)
       this.ws.send(encodeRpc(req))
+      this.logger.info(`readFile sent id=${id}`)
     })
   }
 
-  ping(): Promise<rpc.PingResult> { return this.call<'ping', rpc.PingResult>('ping') }
-  startServer(): Promise<void> { return this.call<'startServer', void>('startServer') }
-  stopServer(): Promise<void> { return this.call<'stopServer', void>('stopServer') }
+  ping() { return this.call('ping') }
+  startServer() { return this.call('startServer') }
+  stopServer() { return this.call('stopServer') }
 
   async readFile(params: { path: string }): Promise<Uint8Array>
   async readFile(params: { path: string; encode: 'utf-8' }): Promise<string>
   async readFile(params: { path: string; encode?: 'utf-8' }): Promise<string | Uint8Array> {
-    const stream = await this.readFileStreamImpl({ path: params.path })
+    const stream = await this.readFileStream({ path: params.path })
     const chunks: Uint8Array[] = []
     let bytes = 0
     const doneDrained = stream.done.catch(() => {})
@@ -501,7 +505,7 @@ export class Client {
     return params.encode === 'utf-8' ? new TextDecoder('utf-8').decode(merged) : merged
   }
 
-  async writeFile(params: { path: string; data: Uint8Array | string }): Promise<{ bytesWritten: number }> {
+  async writeFile(params: { path: string; data: Uint8Array | string }) {
     const bytes = typeof params.data === 'string'
       ? new TextEncoder().encode(params.data)
       : params.data
@@ -514,18 +518,15 @@ export class Client {
         controller.close()
       },
     })
-    const result = await this.writeFileStreamImpl({ path: params.path, stream, size: bytes.byteLength })
+    const result = await this.writeFileStream({ path: params.path, stream, size: bytes.byteLength })
     return { bytesWritten: (await result.done).bytesWritten }
   }
 
-  readFileStream(params: { path: string }): Promise<ReadFileStreamResult> { return this.readFileStreamImpl(params) }
-  writeFileStream(params: { path: string; stream: ReadableStream<Uint8Array>; size?: number }): Promise<WriteFileStreamResult> { return this.writeFileStreamImpl(params) }
-
-  executeRawCommand(params: rpc.ExecuteRawCommandParams, signal?: AbortSignal): Promise<rpc.ExecuteRawCommandResult> { return this.call<'executeRawCommand', rpc.ExecuteRawCommandResult>('executeRawCommand', params, signal) }
-  reloadResources(signal?: AbortSignal): Promise<void> { return this.call<'reloadResources', void>('reloadResources', undefined, signal) }
-  waitForLog(params: rpc.WaitForLogParams, signal?: AbortSignal): Promise<WaitForLogSubscription> {
+  executeRawCommand(params: rpc.ExecuteRawCommandParams, signal?: AbortSignal) { return this.call('executeRawCommand', params, signal) }
+  reloadResources(signal?: AbortSignal) { return this.call('reloadResources', undefined, signal) }
+  waitForLog(params: rpc.WaitForLogParams, signal?: AbortSignal) {
     const client = this
-    return this.call<'waitForLog', rpc.WaitForLogResult>('waitForLog', params, signal).then((res) => {
+    return this.call('waitForLog', params, signal).then((res) => {
       const perUuid = new Map<string, { resolve: (lines: string[]) => void; reject: (err: Error) => void }>()
       client.waitForLogBySub.set(res.subscriptionId, perUuid)
       const promises = res.patternUUIDs.map((uuid) => new Promise<string[]>((resolve, reject) => {
@@ -541,7 +542,7 @@ export class Client {
             slot.reject(new InterruptedError())
             perUuid.delete(uuid)
           }
-          await client.call<'unwaitForLog', void>('unwaitForLog', { subscriptionId: res.subscriptionId })
+          await client.call('unwaitForLog', { subscriptionId: res.subscriptionId })
           client.waitForLogBySub.delete(res.subscriptionId)
         },
       }
@@ -549,39 +550,39 @@ export class Client {
     })
   }
 
-  async attachLog(params?: { regex?: string }): Promise<AttachLogSubscription> {
-    const res = await this.call<'attachLog', { subscriptionId: string }>('attachLog', params)
+  async attachLog(params?: { regex?: string }) {
+    const res = await this.call('attachLog', params)
     return this.buildSingle(res.subscriptionId)
   }
 
-  getActiveConfig() { return this.call<'getActiveConfig', rpc.GetActiveConfigResult>('getActiveConfig') }
-  getBuildOutputTree(params?: { path?: string; limit?: number }) { return this.call<'getBuildOutputTree', rpc.GetBuildOutputTreeResult>('getBuildOutputTree', params) }
-  readBuildLog(params?: rpc.ReadBuildLogParams) { return this.call<'readBuildLog', rpc.ReadBuildLogResult>('readBuildLog', params) }
-  readTestLog(params?: rpc.ReadBuildLogParams) { return this.call<'readTestLog', rpc.ReadBuildLogResult>('readTestLog', params) }
-  readServerLog(params?: rpc.ReadServerLogParams) { return this.call<'readServerLog', rpc.ReadBuildLogResult>('readServerLog', params) }
-  readClientLog(params?: rpc.ReadClientLogParams) { return this.call<'readClientLog', rpc.ReadClientLogResult>('readClientLog', params) }
-  getRebuildState() { return this.call<'getRebuildState', rpc.GetRebuildStateResult>('getRebuildState') }
-  getWatcherStatus() { return this.call<'getWatcherStatus', rpc.GetWatcherStatusResult>('getWatcherStatus') }
-  publishConfig(params: rpc.PublishConfigParams) { return this.call<'publishConfig', void>('publishConfig', params) }
-  publishLog(params: rpc.PublishLogParams) { return this.call<'publishLog', void>('publishLog', params) }
-  publishRebuild(params: rpc.PublishRebuildParams) { return this.call<'publishRebuild', void>('publishRebuild', params) }
-  publishWatcherStatus(params: rpc.PublishWatcherStatusParams) { return this.call<'publishWatcherStatus', void>('publishWatcherStatus', params) }
+  getActiveConfig() { return this.call('getActiveConfig') }
+  getBuildOutputTree(params?: { path?: string; limit?: number }) { return this.call('getBuildOutputTree', params) }
+  readBuildLog(params?: rpc.ReadBuildLogParams) { return this.call('readBuildLog', params) }
+  readTestLog(params?: rpc.ReadBuildLogParams) { return this.call('readTestLog', params) }
+  readServerLog(params?: rpc.ReadServerLogParams) { return this.call('readServerLog', params) }
+  readClientLog(params?: rpc.ReadClientLogParams) { return this.call('readClientLog', params) }
+  getRebuildState() { return this.call('getRebuildState') }
+  getWatcherStatus() { return this.call('getWatcherStatus') }
+  publishConfig(params: rpc.PublishConfigParams) { return this.call('publishConfig', params) }
+  publishLog(params: rpc.PublishLogParams) { return this.call('publishLog', params) }
+  publishRebuild(params: rpc.PublishRebuildParams) { return this.call('publishRebuild', params) }
+  publishWatcherStatus(params: rpc.PublishWatcherStatusParams) { return this.call('publishWatcherStatus', params) }
   publishTriggerBuild(signal?: AbortSignal) {
     if (!signal) {
-      return this.call<'publishTriggerBuild', rpc.PublishTriggerBuildResult>('publishTriggerBuild', undefined)
+      return this.call('publishTriggerBuild', undefined)
     }
     // When the caller aborts, fire-and-forget a cancel so the watcher
     // can SIGINT the build child the trigger started.
     signal.addEventListener('abort', () => {
       void this.call('cancelTriggerBuild', undefined).catch(() => {})
     }, { once: true })
-    return this.call<'publishTriggerBuild', rpc.PublishTriggerBuildResult>('publishTriggerBuild', undefined, signal)
+    return this.call('publishTriggerBuild', undefined, signal)
   }
   cancelTriggerBuild() { return this.call('cancelTriggerBuild', undefined) }
-  setBuildMode(params: rpc.SetBuildModeParams) { return this.call<'setBuildMode', rpc.SetBuildModeResult>('setBuildMode', params) }
-  publishTestComplete(params: rpc.TestState) { return this.call<'publishTestComplete', void>('publishTestComplete', params) }
-  getTestState() { return this.call<'getTestState', rpc.GetTestStateResult>('getTestState') }
-  shutdown() { return this.call<'shutdown', void>('shutdown') }
+  setBuildMode(params: rpc.SetBuildModeParams) { return this.call('setBuildMode', params) }
+  publishTestComplete(params: rpc.TestState) { return this.call('publishTestComplete', params) }
+  getTestState() { return this.call('getTestState') }
+  shutdown() { return this.call('shutdown') }
 
   onShutdown(handler: (reason: string) => void): () => void {
     this.shutdownHandlers.add(handler)
@@ -615,7 +616,6 @@ export class Client {
   }
 }
 
-/** Assert WS frame data is a Uint8Array (Bun's WS contract). */
 function Bytes(data: unknown): Uint8Array {
   if (!(data instanceof Uint8Array)) {
     throw new Error(`expected Uint8Array frame, got ${typeof data}${data instanceof Blob ? ' (Blob)' : ''}`)

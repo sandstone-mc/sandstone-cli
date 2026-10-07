@@ -1,5 +1,6 @@
 import { bootstrapHost, BootstrapError } from '../../commands/connect/bootstrap.js'
 import { Client as DaemonClient } from '../../commands/connect/client.js'
+import { NULL_LOGGER } from '../../commands/connect/logger.js'
 import { endpointStatus, readEndpoint } from '../../commands/connect/endpoint-file.js'
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js'
 import type { McpBridge } from '../bridge.js'
@@ -37,7 +38,7 @@ export async function call(
     if (endpoint) {
       let client
       try {
-        client = await DaemonClient.open({ endpoint })
+        client = await DaemonClient.open({ endpoint, logger: NULL_LOGGER })
       } catch {}
       if (client) {
         try {

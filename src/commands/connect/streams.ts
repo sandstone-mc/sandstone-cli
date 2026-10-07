@@ -119,13 +119,13 @@ export interface StreamEndBridge {
 }
 
 export function makeStreamEndBridge(
-  ws: { send(data: Uint8Array): void } | undefined,
+  ws: { send(data: Uint8Array): void },
   streamId: string,
 ): StreamEndBridge {
   return ((bytes: number, err?: Error) => {
     try {
       if (err) {
-        ws?.send(
+        ws.send(
           encodeRpc(
             event('streamError', {
               streamId,
@@ -135,7 +135,7 @@ export function makeStreamEndBridge(
           ),
         )
       } else {
-        ws?.send(encodeRpc(event('streamEnd', { streamId, bytes })))
+        ws.send(encodeRpc(event('streamEnd', { streamId, bytes })))
       }
     } catch {}
   }) as StreamEndBridge

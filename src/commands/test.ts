@@ -1,5 +1,6 @@
 import path, { join, resolve } from 'path'
 import { logger } from '../utils/logger.js'
+import { createDaemonLogger } from './connect/logger.js'
 import { readdir, unlink } from 'fs/promises'
 import { subscribe } from '@parcel/watcher'
 import { Client as DaemonClient } from './connect/client.js'
@@ -489,7 +490,7 @@ async function runDaemon(
   existingClient?: DaemonClient,
 ): Promise<number> {
   const ownsClient = !existingClient
-  const client = existingClient ?? (await DaemonClient.open({ endpoint: endpoint! }))
+  const client = existingClient ?? (await DaemonClient.open({ endpoint: endpoint!, logger: createDaemonLogger(logger.sinks.test) }))
   if (!client.welcome.capabilities.executeRawCommand) {
     emitError('Host does not support executeRawCommand', onEvent)
     if (ownsClient) client.close()

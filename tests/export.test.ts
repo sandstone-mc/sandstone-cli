@@ -1,20 +1,20 @@
 import { afterAll, beforeEach, describe, expect, test } from 'bun:test'
-import fs from 'fs-extra'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 
 import { CLI } from './helpers.ts'
-import { checkSymlinksAvailable, createSymlink } from '../src/commands/build/export.ts'
+import { createSymlink } from '../src/commands/build/export.ts'
+import { logger } from '../src/utils/logger.ts'
 
 const root = path.join(CLI, '.temp', `export-allowlist-${process.pid}`)
 
 beforeEach(async () => {
-  await fs.remove(root)
-  await fs.ensureDir(root)
-  await checkSymlinksAvailable(true)
+  await rm(root, { recursive: true, force: true })
+  await mkdir(root, { recursive: true })
 })
 
 afterAll(async () => {
-  await fs.remove(root)
+  await rm(root, { recursive: true, force: true })
 })
 
 describe('allowed_symlinks.txt', () => {
@@ -26,24 +26,30 @@ describe('allowed_symlinks.txt', () => {
     const linkPath = path.join(root, 'world', 'datapacks', 'sandstone-test')
     const oldAllowPath = `[glob]${path.resolve(oldFolder)}${path.sep}**${path.sep}*`
 
-    await fs.ensureDir(targetPath)
-    await fs.ensureDir(path.dirname(linkPath))
-    await fs.ensureDir(minecraftPath)
-    await fs.writeFile(
+    await mkdir(targetPath, { recursive: true })
+    await mkdir(path.dirname(linkPath), { recursive: true })
+    await mkdir(minecraftPath, { recursive: true })
+    await writeFile(
       path.join(minecraftPath, 'allowed_symlinks.txt'),
       `# Sandstone Pack: styd\n${oldAllowPath}`,
     )
 
+    // `logger.sinks[name]` proxies to a fresh `LoggerSink` handle on
+    // first access — same plumbing the CLI uses, so `createSymlink`'s
+    // `sink.log(...)` calls land on the real logger. Avoids a hand-
+    // rolled stub that would drift from the interface.
+    const sink = logger.sinks['test-export']
     await createSymlink(
       folder,
       'sandstone-test-testing',
       { files: {} },
       minecraftPath,
       targetPath,
+      sink,
       linkPath,
     )
 
-    const allowlist = await fs.readFile(
+    const allowlist = await readFile(
       path.join(minecraftPath, 'allowed_symlinks.txt'),
       'utf8',
     )

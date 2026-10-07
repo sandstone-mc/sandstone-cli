@@ -6,6 +6,7 @@ import { isObject } from '../../utils/guards.js'
 import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
 import { Capability, capabilitiesToRecord, type HostConfigInput, type HostType } from '../../hosts/types.js'
 import type { LoggerSink } from '../../utils/logger.js'
+import { createDaemonLogger, NULL_LOGGER } from './logger.js'
 import { printSplash } from '../../utils/index.js'
 import { deployDatapack } from '../deploy.js'
 import { restartServer, checkRestartCapabilities } from '../restart-server.js'
@@ -93,7 +94,7 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
 
     let deployErr: unknown
     try {
-      const client = await Client.open({ endpoint: handle.endpoint })
+      const client = await Client.open({ endpoint: handle.endpoint, logger: handle.daemon.logger })
       try {
         const result = await deployDatapack({
           daemon: client,
@@ -154,7 +155,7 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
 
     let restartErr: unknown
     try {
-      const client = await Client.open({ endpoint: handle.endpoint })
+      const client = await Client.open({ endpoint: handle.endpoint, logger: handle.daemon.logger })
       try {
         const result = await restartServer(client, {
           log: (line) => logInfo(chalk`{cyan [connect]} ${line}`),
@@ -189,7 +190,7 @@ async function runShutdown(projectRoot: string, sink: LoggerSink): Promise<void>
     process.exit(1)
   }
   try {
-    const client = await Client.open({ endpoint })
+    const client = await Client.open({ endpoint, logger: createDaemonLogger(sink) })
     await client.shutdown()
     client.close()
     sink.logInfo(chalk`{cyan [connect]} shutdown sent to daemon (pid ${endpoint.pid})`)
@@ -211,7 +212,7 @@ async function runReloadResources(projectRoot: string, sink: LoggerSink): Promis
   }
   try {
     sink.logInfo(chalk`{cyan [connect]} Connecting to daemon...`)
-    const client = await Client.open({ endpoint })
+    const client = await Client.open({ endpoint, logger: createDaemonLogger(sink) })
     sink.logInfo(chalk`{cyan [connect]} Connected! Reloading resources...`)
     try {
       await client.reloadResources()

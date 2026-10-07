@@ -47,6 +47,50 @@ export interface RpcMethodParams {
   streamEnd: StreamEndParams
 }
 
+/**
+ * Per-method RPC response payload — the value the server returns on
+ * the wire for a given method. Mirrors `RpcMethodParams` so callers
+ * (e.g. `Client.call<M>`) can index both sides off the same `M`
+ * without re-stating the result type at every call site.
+ *
+ * Methods that don't return a payload (just signal "ok") are mapped
+ * to `void`. `attachLog` returns the bare `{ subscriptionId }` over
+ * the wire; the rich `AttachLogSubscription` wrapper is built on the
+ * client side from that.
+ */
+export interface RpcMethodResults {
+  ping: PingResult
+  startServer: void
+  stopServer: void
+  readFile: RpcReadFileStream
+  writeFile: WriteFileResult
+  executeRawCommand: ExecuteRawCommandResult
+  reloadResources: void
+  waitForLog: WaitForLogResult
+  unwaitForLog: void
+  publishTriggerBuild: PublishTriggerBuildResult
+  cancelTriggerBuild: CancelTriggerBuildResult
+  setBuildMode: SetBuildModeResult
+  publishTestComplete: void
+  getTestState: GetTestStateResult
+  attachLog: { subscriptionId: string }
+  unattach: void
+  shutdown: void
+  getActiveConfig: GetActiveConfigResult
+  getBuildOutputTree: GetBuildOutputTreeResult
+  readBuildLog: ReadBuildLogResult
+  readTestLog: ReadBuildLogResult
+  readServerLog: ReadBuildLogResult
+  readClientLog: ReadClientLogResult
+  publishConfig: void
+  publishLog: void
+  publishRebuild: void
+  getRebuildState: GetRebuildStateResult
+  publishWatcherStatus: void
+  getWatcherStatus: GetWatcherStatusResult
+  streamEnd: void
+}
+
 export interface RpcRequest<M extends RpcMethod = RpcMethod> {
   id: string | number
   method: M

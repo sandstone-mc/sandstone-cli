@@ -80,7 +80,7 @@ export interface DaemonHandle {
 
 export class Daemon {
   readonly host: HostProvider
-  protected readonly logger: DaemonLogger
+  readonly logger: DaemonLogger
   private readonly waitLogSubs = new WaitLogSubscriptionRegistry()
   private readonly streams = new StreamRegistry()
   private readonly logMatcher: LogMatcher
@@ -202,7 +202,6 @@ export class Daemon {
       streamId,
       direction: 'incoming',
       kind: 'readFile',
-      onClose: makeStreamEndBridge(undefined, streamId),
     })
     this.pumpReadStream(info.stream, streamId, record).catch(() => {})
     return {
@@ -250,7 +249,6 @@ export class Daemon {
       streamId,
       direction: 'incoming',
       kind: 'writeFile',
-      onClose: makeStreamEndBridge(undefined, streamId),
     })
     this.streams.attachWriter(streamId, sink.getWriter())
     return {
@@ -1049,7 +1047,7 @@ export class Daemon {
     )
 
     try {
-      const result = await this.dispatchRequest(typedMethod, parsed.params as RpcMethodParams[typeof typedMethod], session)
+      const result = await this.dispatchRequest(typedMethod, parsed.params as RpcMethodParams[typeof typedMethod], session, ws)
       const response: rpc.RpcResponse = { id: parsed.id, result: result as RpcResult }
       ws.send(encodeRpc(response))
        this.logger.error(
@@ -1097,6 +1095,7 @@ export class Daemon {
     method: M,
     params: RpcMethodParams[M],
     session: SessionContext,
+    ws: SessionWebSocket,
   ): Promise<unknown> {
     if (method === 'readFile') {
       if (!this.host.readFileStream) throw unsupportedCap('readFileStream')
@@ -1106,9 +1105,11 @@ export class Daemon {
         streamId,
         direction: 'incoming',
         kind: 'readFile',
-        onClose: makeStreamEndBridge(undefined, streamId),
+        onClose: makeStreamEndBridge(ws, streamId),
       })
-      this.pumpReadStream(info.stream, streamId, record).catch(() => {})
+      this.pumpReadStream(info.stream, streamId, record).catch((err) => {
+        this.logger.error(`pumpReadStream error streamId=${streamId} err=${err instanceof Error ? err.message : String(err)}`)
+      })
       return { streamId, totalSize: info.size }
     }
     if (method === 'writeFile') {
@@ -1123,7 +1124,7 @@ export class Daemon {
         streamId,
         direction: 'incoming',
         kind: 'writeFile',
-        onClose: makeStreamEndBridge(undefined, streamId),
+        onClose: makeStreamEndBridge(ws, streamId),
       })
       this.streams.attachWriter(streamId, sink.getWriter())
       return { streamId }

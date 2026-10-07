@@ -26,13 +26,16 @@ export function registerFtpTests(
       port: cfg.ftp.port,
       user: cfg.ftp.user,
       password: cfg.ftp.password,
-      // logPath MUST be absolute. FtpHost's default
-      // `'logs/latest.log'` is relative; with no basePath it stays
-      // relative, and basic-ftp resolves it against the FTP user's
-      // CWD (`/home/mctest`) — so the default would look for
-      // `/home/mctest/logs/latest.log`, which doesn't exist. Pin to
-      // the absolute MC log path.
-      logPath: `${cfg.serverDir}/logs/latest.log`,
+      // FtpHost resolves every relative path against `serverPath`
+      // (see `resolvePath` in `providers/ftp.ts`), so without it
+      // every `readFile`/`attachLog` throws
+      // `undefined is not an object (evaluating '...serverPath.replace')`.
+      serverPath: cfg.serverDir,
+      // logPath is resolved against serverPath by FtpHost —
+      // passing it absolute would double-prefix (`resolvePath`
+      // prepends serverPath to every path, including absolute
+      // ones) and the FTP poller would `SIZE` a non-existent file.
+      logPath: 'logs/latest.log',
     })
 
   // FTP+RCON — exposes `executeRawCommand`. `rcon` config is a flat
@@ -44,7 +47,8 @@ export function registerFtpTests(
       port: cfg.ftp.port,
       user: cfg.ftp.user,
       password: cfg.ftp.password,
-      logPath: `${cfg.serverDir}/logs/latest.log`,
+      serverPath: cfg.serverDir,
+      logPath: 'logs/latest.log',
       rcon: {
         host: cfg.rcon.host,
         port: cfg.rcon.port,
@@ -82,7 +86,7 @@ export function registerFtpTests(
       })
       const client = await openDaemonClient(daemon)
       try {
-        const path = `${cfg.serverDir}/.ftp-rpc-roundtrip-${Date.now()}.txt`
+        const path = `.ftp-rpc-roundtrip-${Date.now()}.txt`
         const payload = `ftp round-trip ${Date.now()}\n`
         // `writeFile` accepts a string directly — it's UTF-8 encoded
         // before streaming to the daemon.
@@ -107,7 +111,7 @@ export function registerFtpTests(
       })
       const client = await openDaemonClient(daemon)
       try {
-        const path = `${cfg.serverDir}/server.properties`
+        const path = `server.properties`
         const back = await client.readFile({ path, encode: 'utf-8' })
         expect(back).toContain('enable-rcon=true')
         expect(back).toContain('rcon.port=25575')
@@ -127,7 +131,7 @@ export function registerFtpTests(
       })
       const client = await openDaemonClient(daemon)
       try {
-        const path = `${cfg.serverDir}/.ftp-rpc-missing-${Date.now()}.txt`
+        const path = `.ftp-rpc-missing-${Date.now()}.txt`
         await expect(client.readFile({ path })).rejects.toThrow()
       } finally {
         client.close()
@@ -145,7 +149,7 @@ export function registerFtpTests(
       })
       const client = await openDaemonClient(daemon)
       try {
-        const path = `${cfg.serverDir}/.ftp-stream-roundtrip-${Date.now()}.txt`
+        const path = `.ftp-stream-roundtrip-${Date.now()}.txt`
         const payload = `ftp stream round-trip ${Date.now()}\n`
         const bytes = new TextEncoder().encode(payload)
         // Write via the streaming API — feed the source ReadableStream
@@ -193,7 +197,7 @@ export function registerFtpTests(
       })
       const client = await openDaemonClient(daemon)
       try {
-        const path = `${cfg.serverDir}/.ftp-stream-multichunk-${Date.now()}.bin`
+        const path = `.ftp-stream-multichunk-${Date.now()}.bin`
         // 5 MiB split into 32 KiB frames — forces the coalescing
         // loop in FtpHost's writeFileStream to flush several PIECE_SIZE
         // (~2 MiB) upload-piece requests back-to-back.
@@ -250,7 +254,7 @@ export function registerFtpTests(
       })
       const client = await openDaemonClient(daemon)
       try {
-        const path = `${cfg.serverDir}/.ftp-stream-missing-${Date.now()}.txt`
+        const path = `.ftp-stream-missing-${Date.now()}.txt`
         // FTP's fast-fail on `size()` means the dispatch throws
         // synchronously and the readFile RPC error envelope arrives
         // before `readFileStream` can resolve — so the surface-level
@@ -293,7 +297,7 @@ export function registerFtpTests(
         const sub = await client.attachLog()
         const received: string[] = []
         sub.onLines((lines) => {
-          for (const line of lines) received.push(line)
+          for (const l of lines) received.push(l.line)
         })
         try {
           const tag = `ftplog${Date.now()}`

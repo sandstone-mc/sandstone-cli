@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 
 import { Client as DaemonClient } from '../commands/connect/client.js'
+import { NULL_LOGGER } from '../commands/connect/logger.js'
 import { endpointStatus, endpointPath, readEndpoint } from '../commands/connect/endpoint-file.js'
 import type { LogPattern } from '../commands/connect/wait-log.js'
 import {
@@ -56,7 +57,7 @@ export class McpBridge {
 
     this.invalidate()
 
-    const client = await DaemonClient.open({ endpoint })
+    const client = await DaemonClient.open({ endpoint, logger: NULL_LOGGER })
     this.cachedClient = client
     this.cachedPid = endpoint.pid
 

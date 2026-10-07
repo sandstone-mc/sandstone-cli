@@ -308,7 +308,7 @@ export function registerSshTests(
           const sub = await client.attachLog()
           const received: string[] = []
           sub.onLines((lines) => {
-            for (const line of lines) received.push(line)
+            for (const l of lines) received.push(l.line)
           })
           try {
             const tag = `sshstream${Date.now()}`

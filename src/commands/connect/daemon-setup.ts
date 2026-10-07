@@ -17,8 +17,6 @@ export function prepareConnectSink(
   options: { headerText?: string, liveCallback?: (sink: LoggerSink) => void } = {},
 ): LoggerSink {
   const filePath = join(projectRoot, '.sandstone', 'connect.log')
-  // Re-registration of the same sink name closes the prior sink and
-  // reopens the file with a fresh header — fine for repeated calls.
   logger.registerSink('connect', filePath, options.headerText ?? 'Daemon')
   const sink = logger.sinks.connect
   if (options.liveCallback) {

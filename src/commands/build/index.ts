@@ -1,23 +1,18 @@
 import path from 'path'
 import { pathToFileURL } from 'url'
-import chalk from 'chalk'
+import chalk from 'chalk-template'
 import { split } from 'obliterator'
 
 import type { BuildResult, ResourceCounts } from '../../ui/types.js'
-import { logger, type LoggerSink } from '../../utils/logger.js'
-import { add, hash } from '../../utils/index.js'
+import { Logger, logger, type LoggerSink } from '../../utils/logger.js'
+import { add, hash, printSplash } from '../../utils/index.js'
 import * as fs from '../../utils/fs.js'
 import { resolveStackTrace } from '../../utils/source-map.js'
 import { syncLinkedLibraries } from '../link.js'
-import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../../utils/updateCheck.js'
+import { getMCVersionHeader, runAllUpdateChecks } from '../../utils/updateCheck.js'
 
 let activeSink: LoggerSink = logger.sinks.console
 const log = (...a: unknown[]) => activeSink.log(...a)
-const logInfo = (...a: unknown[]) => activeSink.logInfo(...a)
-const logDebug = (...a: unknown[]) => activeSink.logDebug(...a)
-const logWarn = (...a: unknown[]) => activeSink.logWarn(...a)
-const logError = (e: unknown) => activeSink.logError(e)
-const setSilent = (v: boolean) => activeSink.setSilent(v)
 
 import {
   type SandstoneCache,
@@ -244,8 +239,7 @@ async function _buildProject(
   cliOptions: BuildOptions,
   folder: string,
   silent = false,
-  existingContext?: BuildContext,
-  watching = false
+  existingContext?: BuildContext
 ): Promise<BuildProjectResult | undefined> {
   await syncLinkedLibraries(folder, activeSink)
   const syncLinkedLibrariesForLocal: (projectPath: string) => Promise<number> =
@@ -619,7 +613,7 @@ async function _buildProject(
           await local.fs.remove(path.join(local.outputFolder, file))
         } catch (e: any) {
           if (e.code !== 'ENOENT') throw e
-          log(chalk.yellow('Warning:'), `Cached file not found during cleanup: ${file}`)
+          log(chalk`{yellow Warning}{gray :} Cached file not found during cleanup: ${file}`)
         }
 
         let dir: string | undefined = undefined
@@ -670,13 +664,12 @@ async function _buildProject(
 export async function _buildCommand(
   opts: BuildOptions,
   _folder?: string,
-  existingContext?: BuildContext,
-  watching = false
+  existingContext?: BuildContext
 ): Promise<BuildResult> {
   const folder = _folder ?? opts.path
 
   try {
-    const result = await _buildProject(opts, folder, true, existingContext, watching)
+    const result = await _buildProject(opts, folder, true, existingContext)
     return {
       success: true,
       resourceCounts: result?.resourceCounts ?? { functions: 0, other: 0 },
@@ -709,45 +702,28 @@ export async function _buildCommand(
   }
 }
 
-export async function buildCommand(opts: BuildOptions, _?: string): Promise<void>
-export async function buildCommand(opts: BuildOptions, _folder: string | undefined, silent: true): Promise<BuildResult>
-export async function buildCommand(opts: BuildOptions, _folder?: string, silent = false): Promise<BuildResult | void> {
-  const folder = (typeof _folder === 'string') ? _folder : opts.path
+export async function buildCommand(opts: BuildOptions) {
+  const folder = opts.path
 
   activeSink = logger.sinks.console
-  setSilent(silent)
+  Logger.setupConsoleSink()
+  printSplash()
 
   let closeDebugLog: (() => Promise<void>) | undefined
-  let restoreConsole: (() => void) | undefined
   if (opts.debug) {
     closeDebugLog = logger.registerSink('build', path.join(folder, '.sandstone', 'build-debug.log'), 'Build debug')
     activeSink = logger.sinks.build
-    restoreConsole = captureConsoleToFile()
   }
 
-  const headerPromise = getMCHeaderAsync(folder)
-  const checkPromise = runAllUpdateChecks(folder)
-  const mcHeader = await headerPromise
+  const mcVersionHeader = getMCVersionHeader(folder)
+  const mcHeader = await mcVersionHeader
   if (mcHeader) log(mcHeader)
 
+  let errored = false
+
+  const updates = runAllUpdateChecks(folder)
   try {
-    const result = await _buildProject(opts, folder, silent)
-    const agg = await checkPromise
-    const lines = aggregateToLines(agg)
-    if (lines.length > 0) {
-      log(chalk.yellow('⚠ Updates available — run:'))
-      for (const line of lines) log(`  ${chalk.green('$')} ${line}`)
-    }
-    if (silent) {
-      return {
-        success: true,
-        resourceCounts: result?.resourceCounts ?? { functions: 0, other: 0 },
-        timestamp: Date.now(),
-        sandstoneConfig: result?.sandstoneConfig,
-        sandstonePack: result?.sandstonePack,
-        resetSandstonePack: result?.resetSandstonePack,
-      }
-    }
+    await _buildProject(opts, folder)
   } catch (err: any) {
     const errorMessage = err.message || String(err)
     const stack = (err.stack as string) || ''
@@ -761,48 +737,16 @@ export async function buildCommand(opts: BuildOptions, _folder?: string, silent 
 
     const resolvedStackTrace = await resolveStackTrace(stackTrace)
     const formattedError = resolvedStackTrace ? `${errorMessage}\n${resolvedStackTrace}` : errorMessage
-    // Update notifications always print, even when silent (programmatic
-    // callers should still see them).
-    const agg = await checkPromise
-    const lines = aggregateToLines(agg)
-    if (lines.length > 0) {
-      log(chalk.yellow('⚠ Updates available — run:'))
-      for (const line of lines) log(`  ${chalk.green('$')} ${line}`)
-    }
-    if (!silent) {
-      log(chalk.bgRed.white('BuildError') + chalk.gray(':'), formattedError)
-      process.exit(1)
-    }
-    return {
-      success: false,
-      error: formattedError,
-      resourceCounts: { functions: 0, other: 0 },
-      timestamp: Date.now(),
-    }
-  } finally {
-    restoreConsole?.()
-    await closeDebugLog?.()
+    log(chalk`{bgRed {white BuildError}{gray :}`, formattedError)
+    errored = true
   }
-}
-
-function captureConsoleToFile(): () => void {
-  const originalLog = console.log.bind(console)
-  const originalInfo = console.info.bind(console)
-  const originalWarn = console.warn.bind(console)
-  const originalError = console.error.bind(console)
-  const originalDebug = console.debug.bind(console)
-
-  ;(console as any).log = (...a: unknown[]) => log(...a)
-  ;(console as any).info = (...a: unknown[]) => logInfo(...a)
-  ;(console as any).warn = (...a: unknown[]) => logWarn(...a)
-  ;(console as any).error = (...a: unknown[]) => logError(a.map((x) => (typeof x === 'string' ? x : String(x))).join(' '))
-  ;(console as any).debug = (...a: unknown[]) => logDebug(...a)
-
-  return () => {
-    ;(console as any).log = originalLog
-    ;(console as any).info = originalInfo
-    ;(console as any).warn = originalWarn
-    ;(console as any).error = originalError
-    ;(console as any).debug = originalDebug
-  }
+  try {
+    const updateCommands = await updates
+    if (updateCommands.length > 0) {
+      log(chalk`{yellow ⚠ Updates available — run:`)
+      for (const command of updateCommands) log(chalk`  {green $} ${command}`)
+    }
+  } catch {}
+  await closeDebugLog?.()
+  if (errored) process.exit(1)
 }

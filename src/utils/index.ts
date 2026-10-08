@@ -9,10 +9,9 @@ import * as fs from './fs.js'
 import { run } from './shell.js'
 
 /**
- * Print the "Sandstone" ASCII banner. Long-running interactive commands
- * (`sand connect`, `sand create`) call this once at startup so the
- * operator sees the splash; one-shot commands (`sand build`, `sand run`,
- * `sand install`, etc.) skip it.
+ * Print the "Sandstone" ASCII banner. Skip it from commands that 
+ * reserve stdout for structured output (eg. `sand run` command response 
+ * message & `sand test --json` JSON lines); show it everywhere else.
  */
 export function printSplash(): void {
   console.log(figlet.textSync('Sandstone'))

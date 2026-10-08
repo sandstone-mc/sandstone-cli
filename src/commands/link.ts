@@ -1,23 +1,11 @@
 import path from 'path'
-import { format } from 'util'
 
 import { detectPackageManager, sha256File } from '../utils/index.js'
-import { logger, type LoggerSink } from '../utils/logger.js'
+import { Logger, type LoggerSink } from '../utils/logger.js'
 import * as fs from '../utils/fs.js'
 import { run } from '../utils/shell.js'
 
 export type PackageManager = 'bun' | 'pnpm' | 'yarn' | 'npm'
-
-function setupConsoleSink() {
-  logger.registerSink('console')
-  const sink = logger.sinks.console
-  sink.setLiveCallback((level, args) => {
-    const text = args.map((a) => (typeof a === 'string' ? a : format(a))).join(' ')
-    if (level) process.stdout.write(`[${level}] ${text}\n`)
-    else process.stdout.write(text + '\n')
-  })
-  return sink
-}
 
 type LinkEntry = {
   packageName: string
@@ -344,7 +332,7 @@ export type LinkCommandOptions = {
 }
 
 export async function linkCommand(opts: LinkCommandOptions): Promise<void> {
-  const sink = setupConsoleSink()
+  const sink = Logger.setupConsoleSink()
   try {
     if (opts.libraryPath) {
       await linkConsumer(opts.path, opts.libraryPath, sink)
@@ -364,7 +352,7 @@ export type UnlinkCommandOptions = {
 }
 
 export async function unlinkCommand(opts: UnlinkCommandOptions): Promise<void> {
-  const sink = setupConsoleSink()
+  const sink = Logger.setupConsoleSink()
   try {
     if (opts.target) {
       await unlinkProject(opts.path, opts.target, sink)

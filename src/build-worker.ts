@@ -78,7 +78,6 @@ self.onmessage = async (event: { data: WorkerRequest }) => {
   const entryPath = data.entryPath
   const optsJson = data.optsJson
   const folder = data.folder
-  const watching = data.watching
   const resolvedFolder = data.resolvedFolder || ''
   const resolvedRoot = data.resolvedRoot || ''
   const lastBuildFailed = !!data.lastBuildFailed
@@ -101,7 +100,7 @@ self.onmessage = async (event: { data: WorkerRequest }) => {
     }
     const mod = (await import(entryPath)) as unknown as ModShape
     const opts = JSON.parse(optsJson) as unknown
-    const result = await mod._buildCommand(opts, folder, storedBuildContext, watching)
+    const result = await mod._buildCommand(opts, folder, storedBuildContext)
     if (result && result.success && result.sandstoneConfig) {
       storedBuildContext = {
         sandstoneConfig: result.sandstoneConfig,

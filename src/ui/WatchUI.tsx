@@ -5,7 +5,7 @@ import { format } from 'util'
 import type { WatchStatus, TrackedChange, BuildResult, WatchUIAPI, ChangeCategory } from './types.js'
 import { logger } from '../utils/logger.js'
 import { UpdateCheckIndicator, type IndicatorState } from './UpdateCheckIndicator.jsx'
-import { getMCHeaderAsync, runAllUpdateChecks, aggregateToLines } from '../utils/updateCheck.js'
+import { getMCVersionHeader, runAllUpdateChecks } from '../utils/updateCheck.js'
 
 const MAX_CONTENT_LINES = 8
 
@@ -183,12 +183,12 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDe
   useEffect(() => {
     if (!cwd) return
     let cancelled = false
-    void getMCHeaderAsync(cwd).then((h) => {
+    void getMCVersionHeader(cwd).then((h) => {
       if (!cancelled) setMcHeader(h)
     })
-    void runAllUpdateChecks(cwd).then((agg) => {
+    void runAllUpdateChecks(cwd).then((updates) => {
       if (cancelled) return
-      const lines = aggregateToLines(agg)
+      const lines = updates
       setUpdateCheckState(lines.length > 0 ? { kind: 'commands', lines } : { kind: 'silent' })
     }).catch(() => {
       if (!cancelled) setUpdateCheckState({ kind: 'silent' })
@@ -348,7 +348,7 @@ export function WatchUI({ manual, onManualRebuild, exit, cwd, onRunUpdates, onDe
   if (logLines.length > effectiveContentLines || (isError && buildResult?.error && buildResult.error.split('\n').length > effectiveContentLines)) {
     footerParts.push('↑↓: scroll')
   }
-  footerParts.push('U: update+exit')
+  if (updateCheckState.kind === 'commands') footerParts.push('U: update+exit')
   if (deployAvailable && deployHasChanges) footerParts.push('D: deploy')
   footerParts.push('Q: exit')
 

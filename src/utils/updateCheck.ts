@@ -467,9 +467,7 @@ export async function runCrossInstanceUpdateCheck(projectDir: string): Promise<C
   }
 }
 
-// ---------- MC header (async; reads installed version) ----------
-
-export async function getMCHeaderAsync(projectDir: string): Promise<string | null> {
+export async function getMCVersionHeader(projectDir: string): Promise<string | null> {
   let installed: string
   try {
     const raw = await fs.readText(
@@ -486,35 +484,15 @@ export async function getMCHeaderAsync(projectDir: string): Promise<string | nul
   return `[sand] Building for Minecraft ${mc} (sandstone ${installed})`
 }
 
-// ---------- Combine ----------
-
-export interface AggregatedCheck {
-  sandstone: SandstoneUpdateInfo | null
-  cli: CLIUpdateInfo | null
-  cross: CrossInstanceUpdateInfo | null
-}
-
-export async function runAllUpdateChecks(projectDir: string): Promise<AggregatedCheck> {
+export async function runAllUpdateChecks(projectDir: string) {
   const [sandstone, cli, cross] = await Promise.all([
     runUpdateCheck(projectDir),
     runSelfUpdateCheck(projectDir),
     runCrossInstanceUpdateCheck(projectDir),
   ])
-  return { sandstone, cli, cross }
-}
-
-/**
- * Pure helper: convert an AggregatedCheck into the lines to print, or []
- * when there's nothing to show.
- *
- * Deduplicated: the self and cross checks can legitimately land on the same
- * command (e.g. both installs are behind and share a package manager), and
- * printing it twice just looks broken.
- */
-export function aggregateToLines(agg: AggregatedCheck): string[] {
-  const out: string[] = []
-  if (agg.sandstone) out.push(agg.sandstone.command)
-  if (agg.cli) out.push(agg.cli.command)
-  if (agg.cross) out.push(agg.cross.command)
-  return [...new Set(out)]
+  const commands: string[] = []
+  if (sandstone) commands.push(sandstone.command)
+  if (cli) commands.push(cli.command)
+  if (cross) commands.push(cross.command)
+  return commands
 }

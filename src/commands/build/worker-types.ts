@@ -36,7 +36,6 @@ export interface ModShape {
     opts: unknown, // TODO: Typessss
     folder: string,
     ctx: unknown, // TODO: Typesss
-    watching: boolean,
   ) => Promise<{
     success: boolean,
     error?: string,

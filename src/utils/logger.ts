@@ -128,6 +128,17 @@ export class Logger {
     }
   }
 
+  static setupConsoleSink(include?: (level: LogLevel, args: unknown[]) => void): LoggerSink {
+    const sink = logger.sinks.console
+    sink.setLiveCallback((level, args) => {
+      const text = args.map((a) => (typeof a === 'string' ? a : format(a))).join(' ')
+      const stream = level === 'ERROR' ? process.stderr : process.stdout
+      stream.write(text + '\n')
+      include?.(level, args)
+    })
+    return sink
+  }
+
   private async writeTo(name: string, state: SinkState, level: LogLevel, ...args: unknown[]): Promise<void> {
     if (!state.silent) {
       if (state.liveReady) {

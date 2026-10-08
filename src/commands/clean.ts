@@ -1,23 +1,11 @@
 import path from 'path'
-import { format } from 'util'
 import { loadSandstoneConfig } from '../utils/sandstoneConfig.js'
 import chalk from 'chalk'
 
-import { logger, type LoggerSink } from '../utils/logger.js'
+import { Logger } from '../utils/logger.js'
 import { getClientPath, type SandstoneCache } from './build/export.js'
 import * as fs from '../utils/fs.js'
 import type * as sandstone from 'sandstone'
-
-function setupConsoleSink(): LoggerSink {
-  logger.registerSink('console')
-  const sink = logger.sinks.console
-  sink.setLiveCallback((level, args) => {
-    const text = args.map((a) => (typeof a === 'string' ? a : format(a))).join(' ')
-    if (level) process.stdout.write(`[${level}] ${text}\n`)
-    else process.stdout.write(text + '\n')
-  })
-  return sink
-}
 
 // `clean` doesn't import sandstone's pack class instances (it never runs a
 // build), so the standard layouts are duplicated here.
@@ -42,7 +30,7 @@ export type CleanOptions = {
 }
 
 export async function cleanCommand(opts: CleanOptions) {
-  const sink = setupConsoleSink()
+  const sink = Logger.setupConsoleSink()
   const log = (...args: unknown[]) => sink.log(...args)
   const folder = opts.path
 

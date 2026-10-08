@@ -37,10 +37,33 @@ export type ParsedFailureLog = {
   tick: number | null
 }
 
+/**
+ * Parses lines from a Minecraft server log reporting a single test passing.
+ *
+ * Lines look like:
+ *
+ *   [Server thread/INFO]: default:not_funny passed at 6, 0, 3 on tick 0!
+ *
+ * The trailing `!` is required and emitted by PackTest when a test
+ * successfully completes. Without it the line is malformed and rejected.
+ */
+export type ParsedPassLog = {
+  /** Source, e.g. `default:not_funny`. */
+  source: string,
+  /** Pass x-coordinate. */
+  x: number,
+  /** Pass y-coordinate. */
+  y: number,
+  /** Pass z-coordinate. */
+  z: number,
+  /** Tick the test passed on. */
+  tick: number,
+}
+
 const LEVEL_END = ']:'
 const OPTIONAL_PREFIX = '(optional) '
 const FAILED_AT = ' failed at '
-const ON_LINE = ' On line '
+const ON_LINE = ' on line '
 const TICK_SUFFIX = ' on tick '
 
 /**
@@ -167,24 +190,39 @@ export const parseFailureLog = (line: string): ParsedFailureLog | null => {
   const sepChar = line.charCodeAt(sepIdx)
   if (sepChar !== 33 /* ! */ && sepChar !== 46 /* . */) return null
 
-  // Two message shapes follow:
-  //   - Normal: `<sep> On line N: <msg>[ on tick T]`
-  //   - Java exception from PackTest's failure handler:
-  //     `<sep> <exception message>` — no `On line N: ` prefix. Treat
+  // After `<sep>` the body has one of these shapes:
+  //   - PackTest (new): `<sep> "<cmd>" on line N: <msg>[ on tick T]`
+  //   - PackTest (old): `<sep> On line N: <msg>[ on tick T]`
+  //   - Java exception: `<sep> <exception message>` — no `On line N: ` prefix. Treat
   //     the whole remainder as the message with `line = 0` so the
   //     runner still registers this as a failure.
   let lineNumber = 0
   let rest: string
-  if (line.startsWith(ON_LINE, sepIdx + 1)) {
-    cursor = sepIdx + 1 + ON_LINE.length
-    const colonIdx = line.indexOf(': ', cursor)
+  let bodyCursor = sepIdx + 1
+  while (bodyCursor < line.length) {
+    const c = line.charCodeAt(bodyCursor)
+    if (c !== 32 /* space */ && c !== 9 /* tab */) break
+    bodyCursor++
+  }
+  // Optional `"<cmd>"` prefix from the current PackTest format.
+  if (line.charCodeAt(bodyCursor) === 34 /* " */) {
+    const closeQuote = line.indexOf('"', bodyCursor + 1)
+    if (closeQuote < 0) return null
+    bodyCursor = closeQuote + 1
+  }
+  if (
+    bodyCursor + ON_LINE.length <= line.length
+    && line.substring(bodyCursor, bodyCursor + ON_LINE.length).toLowerCase() === ON_LINE
+  ) {
+    bodyCursor += ON_LINE.length
+    const colonIdx = line.indexOf(': ', bodyCursor)
     if (colonIdx < 0) return null
-    const parsedLine = readInt(line, cursor)
+    const parsedLine = readInt(line, bodyCursor)
     if (!parsedLine || parsedLine.end !== colonIdx) return null
     lineNumber = parsedLine.value
     rest = line.substring(colonIdx + 2)
   } else {
-    rest = line.substring(sepIdx + 1).trimStart()
+    rest = line.substring(bodyCursor)
   }
 
   // Rest = message, optionally terminated by ` on tick N`.
@@ -216,5 +254,61 @@ export const parseFailureLog = (line: string): ParsedFailureLog | null => {
     line: lineNumber,
     message,
     tick,
+  }
+}
+
+const PASSED_AT = ' passed at '
+const ON_TICK_BANG_SUFFIX = ' on tick '
+const TICK_BANG = '!'
+
+export const parsePassLog = (line: string): ParsedPassLog | null => {
+  // Mirror `parseFailureLog`'s header check so we only consume log lines
+  // emitted from a server thread with an uppercase level (e.g. `INFO`).
+  const headerEnd = line.indexOf(LEVEL_END)
+  if (headerEnd < 0) return null
+  const slashIdx = line.lastIndexOf('/', headerEnd)
+  if (slashIdx < 0) return null
+  const level = line.substring(slashIdx + 1, headerEnd)
+  if (!isAllUpperAlpha(level)) return null
+
+  let cursor = headerEnd + LEVEL_END.length
+  while (cursor < line.length) {
+    const c = line.charCodeAt(cursor)
+    if (c !== 32 /* space */ && c !== 9 /* tab */) break
+    cursor++
+  }
+
+  const passedAtIdx = line.indexOf(PASSED_AT, cursor)
+  if (passedAtIdx < 0) return null
+  const source = line.substring(cursor, passedAtIdx)
+  if (source.length === 0) return null
+  cursor = passedAtIdx + PASSED_AT.length
+
+  const x = readCoord(line, cursor)
+  if (!x) return null
+  const sepX1 = line.indexOf(', ', x.end)
+  if (sepX1 < 0) return null
+  const y = readCoord(line, sepX1 + 2)
+  if (!y) return null
+  const sepX2 = line.indexOf(', ', y.end)
+  if (sepX2 < 0) return null
+  const z = readCoord(line, sepX2 + 2)
+  if (!z) return null
+
+  // `<coords> on tick <int>!` — both `on tick ` and trailing `!` are
+  // required; without them PackTest hasn't actually reported a result.
+  if (!line.startsWith(ON_TICK_BANG_SUFFIX, z.end)) return null
+  cursor = z.end + ON_TICK_BANG_SUFFIX.length
+  const tick = readInt(line, cursor)
+  if (!tick) return null
+  if (tick.end + TICK_BANG.length !== line.length) return null
+  if (line.charCodeAt(tick.end) !== 33 /* ! */) return null
+
+  return {
+    source,
+    x: x.value,
+    y: y.value,
+    z: z.value,
+    tick: tick.value,
   }
 }

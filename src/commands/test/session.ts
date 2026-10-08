@@ -2,8 +2,7 @@ import * as path from 'path'
 import chalk from 'chalk-template'
 import { flushPendingLogs, pairDebugTrace, pairLogLine, startDebugWatcher } from './debug.js'
 import { emitError, emitStatus } from './events.js'
-import { formatTestResult } from './format.js'
-import { parseFailureLog, type ParsedFailureLog } from './logParser.js'
+import { parseFailureLog, parsePassLog, type ParsedFailureLog } from './logParser.js'
 import type { HostLogHandler, HostType, LogSubscription } from '../../hosts/types.js'
 import type { ExecuteRawCommandResult } from '../connect/rpc.js'
 import type {
@@ -16,6 +15,7 @@ import type {
   TestsManifest,
   ThrowableEntry,
 } from './types.js'
+import { add } from 'src/utils/index.js'
 
 const TRIGGER_PREFIX = 'Running test environment'
 const COMPLETE_PREFIX = 'Game Test complete!'
@@ -42,17 +42,19 @@ export async function runSession(
   const state: CollectionState = {
     collecting: false,
     failed: new Set<string>(),
-    failedRecap: [],
-    optionalErrors: new Set<string>(),
+    seen: new Set<string>(),
     pendingLogs: new Map(),
     pendingDebugs: new Map(),
   }
 
-  const debugWatcher = await startDebugWatcher(hostType, projectRoot, (debug) => {
-    const key = debug.content.trace as `${number}`
-    const extras = manifest.log_traces[key]?.extras
-    pairDebugTrace(state, debug, extras, onEvent)
-  })
+  const debugLog = (msg: string): void => emitStatus(msg, onEvent)
+  const debugWatcher = await startDebugWatcher(
+    hostType,
+    projectRoot,
+    (traceId) => manifest.log_traces[traceId as `${number}`]?.extras,
+    (debug) => pairDebugTrace(state, debug, onEvent, debugLog),
+    debugLog,
+  )
   let resolveComplete!: () => void
   let rejectAborted!: (err: Error) => void
   const completed = new Promise<void>((resolve, reject) => {
@@ -67,7 +69,7 @@ export async function runSession(
   const subscription = await session.attachLog((lines) => {
     if (signal?.aborted === true) return
     for (const entry of lines) {
-      processLine(entry.line, state, manifest, onEvent)
+      processLine(entry.line, state, manifest, onEvent, debugLog)
       if (entry.line.includes(COMPLETE_PREFIX) && !state.collecting) {
         resolveComplete()
       }
@@ -105,6 +107,7 @@ function processLine(
   state: CollectionState,
   manifest: TestsManifest,
   onEvent: TestEventSink,
+  debugLog: (msg: string) => void,
 ): void {
   if (line.includes(TRIGGER_PREFIX)) {
     state.collecting = true
@@ -119,12 +122,13 @@ function processLine(
   const parsed = parseFailureLog(line)
   if (parsed) {
     const entry = manifest.tests.find((t) => t.name === parsed.source)
-    const optional = parsed.optional || entry?.optional === true
-    if (optional) {
-      state.optionalErrors.add(parsed.source)
-    } else {
+    if (entry === undefined) return
+    const optional = entry.optional === true
+    const { description } = entry
+    if (!optional) {
       state.failed.add(parsed.source)
     }
+    state.seen.add(parsed.source)
     const throwableKey = findThrowableKey(parsed, manifest.throwables)
     const throwable = throwableKey !== undefined ? manifest.throwables[throwableKey] : undefined
     const [namespace, id] = parsed.source.split(':')
@@ -140,7 +144,7 @@ function processLine(
     onEvent({
       event: 'test_result',
       name: parsed.source,
-      ...(entry?.description !== undefined ? { description: entry.description } : {}),
+      ...add({ description }),
       passed: optional,
       optional,
       ticks_elapsed: parsed.tick ?? 0,
@@ -151,10 +155,24 @@ function processLine(
         ...(buildTrace !== undefined ? { build_trace: buildTrace } : {}),
       },
     })
+    return
+  }
 
-    if (!parsed.optional) {
-      state.failedRecap.push(formatTestResult(entry, parsed.source, optional, optional, parsed.tick))
-    }
+  const passParsed = parsePassLog(line)
+  if (passParsed !== null) {
+    const entry = manifest.tests.find((t) => t.name === passParsed.source)
+    if (entry === undefined) return
+    const { description, sourceFile, optional } = entry
+    state.seen.add(passParsed.source)
+    onEvent({
+      event: 'test_result',
+      name: passParsed.source,
+      ...add({ description }),
+      passed: true,
+      optional: optional === true,
+      ticks_elapsed: passParsed.tick,
+      ...add({ source_file: sourceFile }),
+    })
     return
   }
 
@@ -176,7 +194,7 @@ function processLine(
         }
         if (payload.debug) {
           delete payload.trace
-          pairLogLine(state, traceId, payload, manifest.log_traces[traceId]?.extras, onEvent)
+          pairLogLine(state, traceId, payload, onEvent, debugLog)
           return
         }
       }
@@ -209,7 +227,7 @@ function findThrowableKey(
 
 function buildTraceFromFailure(
   throwable: ThrowableEntry | undefined,
-  entry: TestEntry | undefined,
+  entry: TestEntry,
 ): ErrorTrace | undefined {
   if (throwable?.trace?.file !== undefined) {
     return {
@@ -219,7 +237,7 @@ function buildTraceFromFailure(
       column: throwable.trace.column ?? 0,
     }
   }
-  if (entry?.sourceFile === undefined) return undefined
+  if (entry.sourceFile === undefined) return undefined
   return {
     blame: 'Test#create',
     file: entry.sourceFile,
@@ -241,26 +259,36 @@ function printSummary(
     else requiredCount++
   }
 
-  const failedSources = state.failed
-  const allErroredSources = new Set<string>([...failedSources, ...state.optionalErrors])
-
-  const total = manifest.tests.length
-  const fail = failedSources.size
-  const pass = total - fail
-  const fileCount = new Set(manifest.tests.map((t) => t.sourceFile ?? '')).size
-
-  for (const t of manifest.tests) {
-    if (allErroredSources.has(t.name)) continue
+  for (const test of manifest.tests) {
+    const { name, description, optional, sourceFile, sourceLine, sourceColumn } = test
+    if (state.seen.has(name)) continue
+    state.failed.add(name)
     onEvent({
       event: 'test_result',
-      name: t.name,
-      ...(t.description !== undefined ? { description: t.description } : {}),
-      passed: true,
-      optional: t.optional === true,
+      name: name,
+      ...add({ description}),
+      passed: false,
+      optional: optional === true,
       ticks_elapsed: 0,
-      ...(t.sourceFile !== undefined ? { source_file: t.sourceFile } : {}),
+      error: {
+        message: 'Missing test result',
+        position: [0, 0, 0],
+        ...(sourceFile !== undefined ? {
+          build_trace: {
+            blame: 'Test#create',
+            file: sourceFile,
+            line: sourceLine ?? 1,
+            column: sourceColumn ?? 0,
+          },
+        } : {}),
+      },
+      ...add({ source_file: sourceFile }),
     })
   }
+
+  const total = manifest.tests.length
+  const fail = state.failed.size
+  const pass = total - fail
 
   onEvent({
     event: 'summary',
@@ -270,6 +298,6 @@ function printSummary(
     required_count: requiredCount,
     optional_count: optionalCount,
     elapsed_ms: elapsedMs,
-    file_count: fileCount,
+    file_count: manifest.tests.length,
   })
 }

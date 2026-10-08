@@ -2,12 +2,11 @@ import chalk from 'chalk-template'
 import { formatDebugTraceValues } from './debug.js'
 import { formatDiagnostic, formatMs, formatTestResult } from './format.js'
 import type {
-  DebugTraceValue,
   ErrorTrace,
-  TestEntry,
   TestEvent,
   TestEventSink,
 } from './types.js'
+import { add } from 'src/utils/index.js'
 
 export function emitStatus(
   message: string,
@@ -18,7 +17,7 @@ export function emitStatus(
   onEvent({
     event: 'status',
     message,
-    ...(type !== undefined ? { type } : {}),
+    ...add({ type }),
     ...(fields ?? {}),
   } as TestEvent)
 }
@@ -39,34 +38,27 @@ export function renderTestEvent(event: TestEvent): string[] {
     }
     case 'test_log': {
       const level = typeof event.level === 'string' ? event.level : 'info'
-      const values = Array.isArray(
-        event.debug_trace?.values,
-      )
-        ? (event as { debug_trace: { values: DebugTraceValue[] } }).debug_trace.values
-        : []
-      const footer = formatDebugTraceValues(values, undefined, level)
       const out = formatDiagnostic(
         typeof event.message === 'string' ? event.message : '',
         [
-          event.server_trace as ErrorTrace,
+          ...(event.server_trace !== undefined ? [event.server_trace as ErrorTrace] : []),
           ...(event.build_trace !== undefined ? [event.build_trace as ErrorTrace] : []),
         ],
         {
           keyword: level,
           keywordColor: level === 'warning' ? 'yellow' : level === 'info' ? 'white' : 'red',
-          ...(footer !== '' ? { footer: '\n' + footer } : {}),
+          ...add({ extra: event.debug_trace?.variables?.length ? formatDebugTraceValues(event.debug_trace.variables, level) : undefined }),
         },
       )
       return [out]
     }
     case 'test_result': {
-      const entry: TestEntry | undefined = undefined
-      const line = formatTestResult(
-        entry,
+      const line = '\n' + formatTestResult(
         event.name,
         event.passed,
         event.optional,
         event.ticks_elapsed || null,
+        event.description
       )
       if (event.error !== undefined) {
         const trace: ErrorTrace[] = []
@@ -79,12 +71,12 @@ export function renderTestEvent(event: TestEvent): string[] {
             keyword: 'error',
             keywordColor: 'red',
             position: event.error.position,
-            footer: '\n' + line,
+            footer: line,
           },
         )
         return [diag]
       }
-      return ['\n' + line]
+      return [line]
     }
     case 'server_log': {
       const level = event.level

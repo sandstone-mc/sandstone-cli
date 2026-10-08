@@ -13,6 +13,16 @@ export async function testCommand(opts: TestCommandOptions): Promise<void> {
   const json = opts.json === true
   if (!json) printSplash()
   const closeTestLog = logger.registerSink('test', path.join(opts.path, '.sandstone', 'test.log'), 'Test')
+  logger.sinks.test.setLiveCallback((_level, args) => {
+    const line = args
+      .map((a) =>
+        typeof a === 'string' ? a
+        : Array.isArray(a) ? a.join('')
+        : String(a)
+      )
+      .join(' ')
+    console.log(line)
+  })
   const logInfo = logger.sinks.test.logInfo
   const sink: TestEventSink = json
     ? (e) => { logInfo(JSON.stringify(e)) }

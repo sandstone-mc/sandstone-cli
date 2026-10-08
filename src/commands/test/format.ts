@@ -3,18 +3,18 @@ import chalk from 'chalk-template'
 import type { ErrorTrace, TestEntry } from './types.js'
 
 export function formatTestResult(
-  entry: TestEntry | undefined,
   source: string,
   passed: boolean,
   optional: boolean,
   tick: number | null,
+  description?: string
 ): string {
   let header = ''
   header += passed ? chalk`{green ✔} ` : chalk`{red ✗} `
   header += chalk`{yellowBright ${source}}`
   if (optional) header += chalk` {gray (optional)}`
   header += chalk` {gray >} `
-  header += entry?.description ? chalk`{bold ${entry.description}}` : '(no description)'
+  header += description ? chalk`{bold ${description}}` : '(no description)'
   if (tick !== null) header += chalk` {gray [${tick}t]}`
   return header
 }
@@ -26,6 +26,7 @@ export function formatDiagnostic(
     keyword?: string,
     keywordColor?: string,
     position?: [number, number, number],
+    extra?: string,
     footer?: string,
   }
 ): string {
@@ -35,6 +36,9 @@ export function formatDiagnostic(
   if (options?.position !== undefined) {
     const [ x, y, z ] = options.position
     out += chalk`\n  pos{gray :} {greenBright ${x} ${y} ${z}}{gray ,}\n`
+  }
+  if (options?.extra !== undefined && options.extra !== '') {
+    out += `\n${options.extra}`
   }
   for (const trace of stackTrace) {
     let frame = chalk`\n${' '.repeat(6)}{gray at} {bold {italic ${trace.blame ?? '<anonymous>'}}} `

@@ -29,7 +29,7 @@ export type TestEvent = (
     error?: {
       message: string,
       position: [number, number, number],
-      server_trace: ErrorTrace,
+      server_trace?: ErrorTrace,
       build_trace?: ErrorTrace,
     },
     source_file?: string,
@@ -54,7 +54,7 @@ export type TestLogPayload = Omit<Extract<TestEvent, { event: 'test_log' }>, 'ev
 
 export interface DebugTraceContent {
   trace: string,
-  values?: DebugTraceValue[],
+  variables?: DebugVariable[],
 }
 
 export type TestEventSink = (event: TestEvent) => void
@@ -91,8 +91,7 @@ export interface TestsManifest {
 export interface CollectionState {
   collecting: boolean
   failed: Set<string>
-  failedRecap: string[]
-  optionalErrors: Set<string>
+  seen: Set<string>
   pendingLogs: Map<`${number}`, PendingLog>
   pendingDebugs: Map<`${number}`, PendingDebug>
 }
@@ -111,11 +110,23 @@ export interface DebugWatcher {
   close: () => Promise<void>
 }
 
-export interface DebugTraceValue {
-  command: string
-  snbt?: string
-  result?: string
-}
+export type DebugVariable = (
+  | {
+      type: 'data',
+      name: string,
+      source: string,
+      target: string,
+      snbt: string,
+      return_value: number,
+    }
+  | {
+      type: 'score',
+      name: string,
+      source: string,
+      target: string,
+      return_value: number,
+    }
+)
 
 export interface ErrorTrace {
   blame: string

@@ -280,8 +280,17 @@ export const parsePassLog = (line: string): ParsedPassLog | null => {
 
   const passedAtIdx = line.indexOf(PASSED_AT, cursor)
   if (passedAtIdx < 0) return null
-  const source = line.substring(cursor, passedAtIdx)
+  let source = line.substring(cursor, passedAtIdx)
   if (source.length === 0) return null
+  // PackTest 2.7.0+ embeds the description in pass log lines, between
+  // parentheses after the source name, e.g.
+  //   `integration_tests:math_trivial_pass (Smoke test...) passed at 8, ...`
+  // Strip the parenthesized description so `source` is just the test name.
+  const descIdx = source.indexOf(' (')
+  if (descIdx >= 0 && source.endsWith(')')) {
+    source = source.substring(0, descIdx)
+    if (source.length === 0) return null
+  }
   cursor = passedAtIdx + PASSED_AT.length
 
   const x = readCoord(line, cursor)

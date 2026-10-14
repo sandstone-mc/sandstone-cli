@@ -10,6 +10,7 @@ import * as fs from '../../utils/fs.js'
 import { resolveStackTrace } from '../../utils/source-map.js'
 import { syncLinkedLibraries } from '../link.js'
 import { getMCVersionHeader, runAllUpdateChecks } from '../../utils/updateCheck.js'
+import { buildTestManifest } from '../test/manifest.js'
 
 let activeSink: LoggerSink = logger.sinks.console
 const log = (...a: unknown[]) => activeSink.log(...a)
@@ -457,36 +458,9 @@ async function _buildProject(
   const packTypesArray = [...packTypes]
 
   if (cliOptions.test) {
-    const testEntries: Array<{
-      name: string
-      description?: string
-      optional?: boolean
-      sourceFile?: string
-      /** Line + column of `Test.create(...)` for fallback `build_trace`
-       *  when a runtime failure can't be tied to a specific line. */
-      sourceLine?: number
-      sourceColumn?: number
-    }> = []
-    const throwables: Record<string, unknown> = {}
-    const tests = local.sandstonePack.Test.tests
-    tests.forEach((node) => {
-      const resource = node.resource
-      testEntries.push({
-        name: resource.name,
-        description: resource.description,
-        optional: resource.directives?.optional,
-        sourceFile: resource.sourceFile,
-        sourceLine: resource.sourceLine,
-        sourceColumn: resource.sourceColumn,
-      })
-      for (const [key, entry] of node.throwableStack) {
-        throwables[key] = entry
-      }
-    })
     const testsJsonPath = path.join(local.outputFolder, '..', 'tests.json')
     await local.fs.ensureDir(path.dirname(testsJsonPath))
-    const logTraces = Object.fromEntries(local.sandstonePack.Test.logTraces)
-    await local.fs.writeJSON(testsJsonPath, { tests: testEntries, throwables, log_traces: logTraces }, { pretty: true })
+    await local.fs.writeJSON(testsJsonPath, buildTestManifest(local.sandstonePack), { pretty: true })
   }
 
   if (!cliOptions.production) {

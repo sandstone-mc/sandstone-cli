@@ -8,6 +8,7 @@
     },
     "strict": true,
     "target": "ES2024",
+    "allowImportingTsExtensions": true,
     "lib": [
       "ES2024"
     ],

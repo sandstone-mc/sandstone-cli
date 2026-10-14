@@ -135,7 +135,14 @@ export class Daemon {
     onShutdown?: () => Promise<void> | void
   }): Promise<DaemonHandle> {
     const daemon = new Daemon(opts.host, opts.fullConfig, opts.logger)
-    const handle = await daemon.enableWsServer(opts)
+    // Always trigger full teardown on the shutdown RPC — without this, the
+    // request handler's `queueMicrotask(() => onShutdown?.())` is a no-op
+    // and `disableWsServer` never runs, leaving the daemon's WS server
+    // and host alive after a clean `--shutdown`.
+    const handle = await daemon.enableWsServer({
+      ...opts,
+      onShutdown: () => daemon.disableWsServer(),
+    })
     daemon.logger.info(chalk`{cyan [connect]} listening on {bold ${handle.url}} (pid ${handle.endpoint.pid})`)
     daemon.logger.info(chalk`{cyan [connect]} endpoint file: ${opts.projectRoot + '/.sandstone/connect.url'}`)
     return handle
@@ -1167,9 +1174,20 @@ export class Daemon {
       try { await this.host.disconnect() } catch (err) {  this.logger.error('[connect] host disconnect failed:', err) }
       this.logger.info(`[connect] daemon shutdown complete`)
       this.resolveDone?.()
+      // Give the file logger a moment to flush its final writes before we
+      // hard-exit. Without this the last lines (notably `daemon shutdown
+      // complete`) get truncated when the process is killed.
+      await new Promise<void>((r) => setTimeout(r, 50))
+      // Tear-down is the last thing this process does. Nothing else in the
+      // event loop should be alive, but `process.exit(0)` is the only way
+      // to guarantee the process actually terminates — without it the
+      // event loop lingers on a `setTimeout` / signal listener and the
+      // daemon stays as a zombie until something kills it.
+      process.exit(0)
     } catch (err) {
        this.logger.error('[connect] teardown error:', err)
       this.resolveDone?.()
+      process.exit(1)
     }
   }
 

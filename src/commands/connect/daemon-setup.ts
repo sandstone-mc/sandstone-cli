@@ -52,7 +52,7 @@ export async function bootstrapWithShimLogger(opts: {
       config: opts.hostConfig,
       silent: true,
       userProvidedHostSettings: opts.userProvidedHostSettings,
-      logger: createDaemonLogger(opts.sink),
+      sink: opts.sink,
     })
     host = result.host
     spawnedByUs = result.spawnedByUs

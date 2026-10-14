@@ -28,7 +28,7 @@ export type TestEvent = (
     ticks_elapsed: number,
     error?: {
       message: string,
-      position: [number, number, number],
+      position?: [number, number, number],
       server_trace?: ErrorTrace,
       build_trace?: ErrorTrace,
     },

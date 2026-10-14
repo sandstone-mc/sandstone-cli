@@ -7,6 +7,7 @@ import type {
   TestsManifest,
 } from './types.js'
 import type { HostProvider, HostType, LogSubscription } from '../../hosts/types.js'
+import type { LoggerSink } from '../../utils/logger.js'
 import { DEFAULT_HOST_TYPE } from '../connect/index.js'
 import { BootstrapError, bootstrapHost } from '../connect/bootstrap.js'
 import { Client as DaemonClient } from '../connect/client.js'
@@ -164,6 +165,10 @@ async function runDirect(
       hostType: resolvedHostType,
       config: hostConfig,
       silent: true,
+      // Route host log lines through the test event sink so they become
+      // structured `status` events instead of leaking to stdout via the
+      // daemon logger's live callback.
+      sink: testSinkToLogSink(onEvent),
       userProvidedHostSettings,
     })
     host = result.host
@@ -208,6 +213,41 @@ async function runDirect(
     projectRoot,
     signal,
   )
+}
+
+/**
+ * Adapt a `TestEventSink` to a `LoggerSink` for the bootstrapper to use
+ * as its event sink. Each host log call (`info` / `warn` / `error`) is
+ * emitted as a `status` event with type `host_bootstrap_log`, prefixed by
+ * the log level so JSON output preserves severity.
+ */
+function testSinkToLogSink(testSink: TestEventSink): LoggerSink {
+  const emit = (level: 'info' | 'warn' | 'error', ...args: unknown[]) => {
+    // Pass log args through unchanged — the raw ANSI / VT escapes stay
+    // in the JSON payload so downstream consumers can re-render them
+    // through chalk if they want to pipe the stream back out to a
+    // console. Stripping would be lossy.
+    const message = args
+      .map((a) =>
+        typeof a === 'string' ? a
+        : Array.isArray(a) ? a.join('')
+        : String(a)
+      )
+      .join(' ')
+    emitStatus(message, testSink, 'host_bootstrap_log', { level })
+  }
+  return {
+    logDebug: async (...args) => { emit('info', ...args) },
+    logInfo: async (...args) => { emit('info', ...args) },
+    logWarn: async (...args) => { emit('warn', ...args) },
+    logError: async (...args) => { emit('error', ...args) },
+    log: async (...args) => { emit('info', ...args) },
+    logTrace: async (...args) => { emit('info', ...args) },
+    setLiveCallback: () => {},
+    drainBuffer: () => {},
+    setSilent: () => {},
+    name: 'test-event-sink-adapter',
+  }
 }
 
 async function safeDisconnect(host: HostProvider): Promise<void> {

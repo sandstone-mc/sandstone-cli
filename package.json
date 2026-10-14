@@ -3,7 +3,17 @@
   "version": "2.6.9",
   "description": "The CLI for Sandstone - the minecraft pack creation library.",
   "type": "module",
-  "exports": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./connect": {
+      "types": "./src/connect-api.ts",
+      "default": "./src/connect-api.ts"
+    },
+    "./test": {
+      "types": "./src/test-api.ts",
+      "default": "./src/test-api.ts"
+    }
+  },
   "bin": {
     "sand": "./lib/index.js",
     "create-sandstone": "./lib/create.js"

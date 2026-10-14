@@ -1,6 +1,7 @@
 import { resolve } from 'path'
 import { Client } from './client.js'
 import { prepareConnectSink, resolveHostAndConfig, startInProcessDaemon } from './daemon-setup.js'
+import { Logger } from '../../utils/logger.js'
 import { readEndpoint, pidAlive } from './endpoint-file.js'
 import { Capability, capabilitiesToRecord, type HostType } from '../../hosts/types.js'
 import type { LoggerSink } from '../../utils/logger.js'
@@ -29,6 +30,19 @@ export interface ConnectCommandOptions {
 export async function connectCommand(opts: ConnectCommandOptions): Promise<void> {
   const projectRoot = resolve(opts.path)
 
+  // `--shutdown` and `--reload` are one-shot commands against an existing
+  // daemon — no file sink needed, just write to stdout/stderr.
+  if (opts.shutdown) {
+    const sink = Logger.setupConsoleSink()
+    await runShutdown(projectRoot, sink)
+    return
+  }
+  if (opts.reload) {
+    const sink = Logger.setupConsoleSink()
+    await runReloadResources(projectRoot, sink)
+    return
+  }
+
   const connectSink = prepareConnectSink(projectRoot, {
     liveCallback: (sink) => {
       sink.setLiveCallback((level, args) => {
@@ -44,11 +58,6 @@ export async function connectCommand(opts: ConnectCommandOptions): Promise<void>
   })
   const logInfo = connectSink.logInfo
   const logError = connectSink.logError
-
-  if (opts.shutdown) {
-    await runShutdown(projectRoot, connectSink)
-    return
-  }
 
   if (opts.reload) {
     await runReloadResources(projectRoot, connectSink)

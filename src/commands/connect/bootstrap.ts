@@ -6,7 +6,8 @@ import * as fs from '../../utils/fs.js'
 import { getAvailableSandstoneVersions } from '../versionDiscovery.js'
 import { getProvider } from '../../hosts/registry.js'
 import { loadSandstoneConfig } from '../../utils/sandstoneConfig.js'
-import { CONSOLE_LOGGER, type DaemonLogger } from './logger.js'
+import { CONSOLE_LOGGER, createDaemonLogger, type DaemonLogger } from './logger.js'
+import type { LoggerSink } from '../../utils/logger.js'
 import type { HostConfigInput, HostProvider, HostType } from '../../hosts/types.js'
 import { loadActiveConfigFromDisk } from './active-config.js'
 
@@ -19,7 +20,12 @@ export interface BootstrapOptions {
    *  flags. Suppresses the bootstrap auto-config lookup. */
   userProvidedHostSettings?: boolean
   silent?: boolean
-  logger?: DaemonLogger
+  /**
+   * Optional event sink to route host log lines through. The test runner
+   * passes its `TestEventSink` so each `[bootstrap] / [integrated]` log
+   * becomes a structured `status` event instead of leaking to stdout.
+   */
+  sink?: LoggerSink
 }
 
 export interface BootstrapResult {
@@ -40,7 +46,9 @@ export class BootstrapError extends Error {
  */
 export async function bootstrapHost(opts: BootstrapOptions): Promise<BootstrapResult> {
   const hostType = opts.hostType
-  const logger = opts.logger ?? CONSOLE_LOGGER
+  const logger: DaemonLogger = opts.sink
+    ? createDaemonLogger(opts.sink)
+    : CONSOLE_LOGGER
   let config = await resolveDefaults(hostType, opts.config, logger)
 
   const autocfg = await loadSandstoneConfig(process.cwd())

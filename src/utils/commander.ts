@@ -40,6 +40,7 @@ const options = {
   world: opt('-w, --world <name>', 'The name of the world to save the packs in. Override the value specified in the configuration file.'),
   clientPath: opt('-c, --client-path <path>', 'Path of the client folder. Override the value specified in the configuration file.'),
   serverPath: opt('--server-path <path>', 'Path of the server folder. Override the value specified in the configuration file.'),
+  outputDir: opt('--output-dir <path>', 'Directory holding the rendered pack tree (`<output>/datapack/data/<ns>/...` + `<output>/data/<ns>/...`). Used to resolve test source paths for runtime error traces. Defaults to `<path>/.sandstone/output` — where `sand build` writes.', { env: 'SANDSTONE_OUTPUT_DIR' }),
 
   // Connect (sand connect) — used to start a persistent host daemon.
   hostType: opt('--host-type <type>', 'Host provider type for `sand connect` (ssh|rcon|ftp|local-client|integrated|mcsmanager-login).', { env: 'HOST_TYPE' }),

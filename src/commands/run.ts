@@ -399,7 +399,7 @@ async function compileTypescriptFile(filePath: string): Promise<string[]> {
 
   let resources: Map<string, string>
   try {
-    resources = pack.compile(ROOT, fn as () => void)
+    resources = pack.compile({ name: ROOT, callback: fn as () => void, inline: true })
   } catch (err) {
     console.error(
       chalk`{red Error:} {cyan ${abs}} threw during compilation: ${err instanceof Error ? err.message : String(err)}`,

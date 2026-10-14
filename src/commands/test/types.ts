@@ -65,6 +65,19 @@ export interface TestCommandOptions {
   hostConfigFile?: string
   path: string
   json?: boolean
+  /**
+   * Absolute path to the directory containing the rendered datapack
+   * tree (the `<pack>/datapack/data/<ns>/...` and `<pack>/data/<ns>/...`
+   * structure that PackTest reads at runtime). Defaults to
+   * `<path>/.sandstone/output` — the directory `sand build` writes to.
+   *
+   * Override this when the framework writes test mcfunctions to a
+   * different location (e.g. `tests/integrated/.server/.sandstone/mc-server/world/datapacks/<pack>`).
+   * The path is used to resolve test source paths for runtime error
+   * traces; if it doesn't match the actual on-disk path the trace points
+   * at a non-existent file.
+   */
+  outputDir?: string
 }
 
 export interface TestEntry {

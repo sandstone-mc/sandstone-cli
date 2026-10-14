@@ -36,6 +36,7 @@ export async function runSession(
   onEvent: TestEventSink,
   hostType: HostType,
   projectRoot: string,
+  outputDir: string,
   signal?: AbortSignal,
 ): Promise<number> {
   const startMs = Date.now()
@@ -69,7 +70,7 @@ export async function runSession(
   const subscription = await session.attachLog((lines) => {
     if (signal?.aborted === true) return
     for (const entry of lines) {
-      processLine(entry.line, state, manifest, onEvent, debugLog)
+      processLine(entry.line, state, manifest, onEvent, debugLog, outputDir)
       if (entry.line.includes(COMPLETE_PREFIX) && !state.collecting) {
         resolveComplete()
       }
@@ -108,6 +109,7 @@ function processLine(
   manifest: TestsManifest,
   onEvent: TestEventSink,
   debugLog: (msg: string) => void,
+  outputDir: string,
 ): void {
   if (line.includes(TRIGGER_PREFIX)) {
     state.collecting = true
@@ -135,7 +137,7 @@ function processLine(
     const anonymous = parsed.line === 0
     const serverTrace = {
       blame: anonymous ? '<anonymous>' : 'fail',
-      file: path.join(process.cwd(), '.sandstone', 'output', 'datapack', 'data', namespace, 'test', `${id.replaceAll('/', path.sep)}.mcfunction`),
+      file: path.join(outputDir, 'data', namespace, 'test', `${id.replaceAll('/', path.sep)}.mcfunction`),
       line: parsed.line || 1,
       column: 0,
     }

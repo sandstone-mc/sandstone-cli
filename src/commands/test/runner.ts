@@ -30,6 +30,7 @@ export async function runTests(
   existingSurface?: TestSurface,
 ): Promise<number> {
   const projectRoot = path.resolve(opts.path)
+  const outputDir = path.resolve(opts.outputDir ?? path.join(projectRoot, '.sandstone', 'output'))
   const sink: TestEventSink = onEvent ?? ((e) => console.log(JSON.stringify(e)))
 
   let manifest: TestsManifest | null = null
@@ -46,7 +47,7 @@ export async function runTests(
 
   if (existingSurface) {
     emitStatus(chalk`Using watcher-owned \`sand connect\` surface`, sink, 'daemon_connected', { url: '' })
-    return runDaemon(undefined, manifest, sink, projectRoot, signal, existingSurface)
+    return runDaemon(undefined, manifest, sink, projectRoot, outputDir, signal, existingSurface)
   }
 
   const endpoint = await readEndpoint(projectRoot)
@@ -96,10 +97,10 @@ export async function runTests(
   const resolvedHostType: HostType = hostType ?? DEFAULT_HOST_TYPE
 
   if (daemonAlive && endpoint) {
-    return runDaemon(endpoint, manifest, sink, projectRoot, signal)
+    return runDaemon(endpoint, manifest, sink, projectRoot, outputDir, signal)
   }
 
-  return runDirect(projectRoot, resolvedHostType, opts, userProvidedHostSettings, manifest, sink, signal)
+  return runDirect(projectRoot, outputDir, resolvedHostType, opts, userProvidedHostSettings, manifest, sink, signal)
 }
 
 async function runDaemon(
@@ -107,6 +108,7 @@ async function runDaemon(
   manifest: TestsManifest,
   onEvent: TestEventSink,
   projectRoot: string,
+  outputDir: string,
   signal?: AbortSignal,
   existingSurface?: TestSurface,
 ): Promise<number> {
@@ -141,12 +143,14 @@ async function runDaemon(
     onEvent,
     hostType,
     projectRoot,
+    outputDir,
     signal,
   )
 }
 
 async function runDirect(
   projectRoot: string,
+  outputDir: string,
   resolvedHostType: HostType,
   opts: import('./types.js').TestCommandOptions,
   userProvidedHostSettings: boolean,
@@ -211,6 +215,7 @@ async function runDirect(
     onEvent,
     host.type,
     projectRoot,
+    outputDir,
     signal,
   )
 }

@@ -163,6 +163,7 @@ minified JSON object: {event, ...} — events are "status" (lifecycle),
   .addOption(BuildOptions.get('hostType'))
   .addOption(BuildOptions.get('hostConfig'))
   .addOption(BuildOptions.get('hostConfigFile'))
+  .addOption(BuildOptions.get('outputDir'))
   .addOption(BuildOptions.get('json'))
   .action(testCommand)
 

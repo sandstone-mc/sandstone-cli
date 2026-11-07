@@ -524,6 +524,7 @@ export class Client {
 
   executeRawCommand(params: rpc.ExecuteRawCommandParams, signal?: AbortSignal) { return this.call('executeRawCommand', params, signal) }
   reloadResources(signal?: AbortSignal) { return this.call('reloadResources', undefined, signal) }
+  clearSandstoneMCState(signal?: AbortSignal) { return this.call('clearSandstoneMCState', undefined, signal) }
   waitForLog(params: rpc.WaitForLogParams, signal?: AbortSignal) {
     const client = this
     return this.call('waitForLog', params, signal).then((res) => {

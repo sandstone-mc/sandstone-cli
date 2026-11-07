@@ -21,10 +21,12 @@ import { encodeRpc, encodeStreamChunk, newStreamId, streamIdHex, hexToBytes, dec
 import { LogMatcher, type LogPattern } from './wait-log.js'
 import { Capability, capabilitiesToRecord, type HostLogHandler, type HostLogLine, type HostProvider } from '../../hosts/types.js'
 import { loadActiveConfigFromDisk, type ActiveConfig } from './active-config.js'
-import type { SandstoneConfig } from 'sandstone'
+import { NBT, type SandstoneConfig } from 'sandstone'
+import { parseNBT } from 'sandstone/variables'
 import { add } from 'src/utils/index.js'
 import { deleteEndpoint, endpointStatus, generateSecret, writeEndpoint, type EndpointFile } from './endpoint-file.js'
 import { NULL_LOGGER, type DaemonLogger } from './logger.js'
+import type { RootNBT } from 'sandstone/arguments'
 
 const MAX_PAYLOAD = 128 * 1024 * 1024
 const MAX_DIR_ENTRIES_DEFAULT = 1000
@@ -65,6 +67,24 @@ function rpcError(code: number, message: string): RpcHandlerError {
 
 function unsupportedCap(cap: Capability | string): RpcHandlerError {
   return rpcError(RpcErrorCode.MethodNotFound, `Host does not support ${cap}`)
+}
+
+/**
+ * Extract the top-level keys of the `__sandstone:variable` compound from
+ * the output of `data get storage __sandstone:variable`. MC prefixes
+ * the value with `Storage '...' has the following contents: ` and
+ * reports `No data was found.` for empty storage.
+ */
+function readSandstoneVariableKeys(raw: string) {
+  if (!raw.startsWith('Storage __sandstone:variable has the following contents: {')) return {}
+  const snbt = raw.slice(57)
+  let parsed: RootNBT
+  try {
+    parsed = parseNBT(NBT, snbt) as RootNBT
+  } catch (e) {
+    return {}
+  }
+  return parsed
 }
 
 export interface DaemonHandle {
@@ -304,6 +324,21 @@ export class Daemon {
       result.patternUUID = matcherHandle.patternUUIDs[0]
     }
     return result
+  }
+
+  async clearSandstoneMCState(): Promise<rpc.ClearSandstoneMCStateResult> {
+    if (!this.host.executeRawCommand) throw unsupportedCap(Capability.ExecuteRawCommand)
+
+    this.logger.info(chalk`{cyan [connect]} clearSandstoneMCState: resetting scoreboard + variable storage`)
+
+    await this.executeRawCommand({ command: 'scoreboard players reset *' })
+
+    const listing = await this.executeRawCommand({ command: 'data get storage __sandstone:variable' })
+    const paths = Object.keys(readSandstoneVariableKeys(listing.output))
+    for (const path of paths) {
+      await this.executeRawCommand({ command: `data remove storage __sandstone:variable ${path}` })
+    }
+    return { removedKeys: paths.length }
   }
 
   async reloadResources(): Promise<void> {

@@ -22,6 +22,7 @@ export interface RpcMethodParams {
   writeFile: WriteFileParams
   executeRawCommand: ExecuteRawCommandParams
   reloadResources: void
+  clearSandstoneMCState: void
   waitForLog: WaitForLogParams
   unwaitForLog: UnwaitForLogParams
   publishTriggerBuild: void
@@ -66,6 +67,7 @@ export interface RpcMethodResults {
   writeFile: WriteFileResult
   executeRawCommand: ExecuteRawCommandResult
   reloadResources: void
+  clearSandstoneMCState: ClearSandstoneMCStateResult
   waitForLog: WaitForLogResult
   unwaitForLog: void
   publishTriggerBuild: PublishTriggerBuildResult
@@ -106,6 +108,7 @@ export type RpcMethod =
   | 'writeFile'
   | 'executeRawCommand'
   | 'reloadResources'
+  | 'clearSandstoneMCState'
   | 'waitForLog'
   | 'unwaitForLog'
   | 'publishTriggerBuild'
@@ -139,6 +142,7 @@ export type RpcResult =
   | PingResult
   | RpcReadFileStream
   | ExecuteRawCommandResult
+  | ClearSandstoneMCStateResult
   | WaitForLogResult
   | AttachLogResult
   | GetActiveConfigResult
@@ -288,6 +292,14 @@ export interface ExecuteRawCommandResult {
   cancel?: () => Promise<void>,
   /** Populated only when `params.waitFor` was set. UUID for the registered pattern. */
   patternUUID?: string,
+}
+
+export interface ClearSandstoneMCStateResult {
+  /**
+   * Number of top-level paths removed from `__sandstone:variable`.
+   * Scoreboard reset is unconditional, so it's not counted here.
+   */
+  removedKeys: number,
 }
 
 export interface WaitForLogParams {

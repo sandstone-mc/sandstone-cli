@@ -522,6 +522,8 @@ export class Client {
     return { bytesWritten: (await result.done).bytesWritten }
   }
 
+  deleteEntry(params: rpc.DeleteEntryParams) { return this.call('deleteEntry', params) }
+
   executeRawCommand(params: rpc.ExecuteRawCommandParams, signal?: AbortSignal) { return this.call('executeRawCommand', params, signal) }
   reloadResources(signal?: AbortSignal) { return this.call('reloadResources', undefined, signal) }
   clearSandstoneMCState(signal?: AbortSignal) { return this.call('clearSandstoneMCState', undefined, signal) }

@@ -20,6 +20,7 @@ export interface RpcMethodParams {
   stopServer: void
   readFile: ReadFileParams
   writeFile: WriteFileParams
+  deleteEntry: DeleteEntryParams
   executeRawCommand: ExecuteRawCommandParams
   reloadResources: void
   clearSandstoneMCState: void
@@ -65,6 +66,7 @@ export interface RpcMethodResults {
   stopServer: void
   readFile: RpcReadFileStream
   writeFile: WriteFileResult
+  deleteEntry: void
   executeRawCommand: ExecuteRawCommandResult
   reloadResources: void
   clearSandstoneMCState: ClearSandstoneMCStateResult
@@ -106,6 +108,7 @@ export type RpcMethod =
   | 'stopServer'
   | 'readFile'
   | 'writeFile'
+  | 'deleteEntry'
   | 'executeRawCommand'
   | 'reloadResources'
   | 'clearSandstoneMCState'
@@ -247,6 +250,11 @@ export interface WriteFileParams {
 export interface WriteFileResult {
   /** 16-byte streamId hex-encoded. */
   streamId: string
+}
+
+export interface DeleteEntryParams {
+  /** Path of the file or directory to remove, relative to the server directory. */
+  path: string
 }
 
 export interface StreamEndEvent {

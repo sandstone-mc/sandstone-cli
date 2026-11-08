@@ -1,3 +1,4 @@
+export { benchCommand, type BenchCommandOptions } from './bench/index.js'
 export { buildCommand } from './build/index.js'
 export { cleanCommand, type CleanOptions } from './clean.js'
 export { connectCommand, type ConnectCommandOptions } from './connect/index.js'

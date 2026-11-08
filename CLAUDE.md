@@ -10,6 +10,95 @@ Command-line interface for Sandstone projects. Provides `sand` (project commands
 | `sand build` | Build the datapack/resourcepack |
 | `sand watch` | Build and rebuild on file changes |
 | `sand refresh` | Clear library cache |
+| `sand test` | Run GameTests on the configured server |
+| `sand bench <config.json>` | Compare the in-game cost of two mcfunctions |
+
+## `sand bench`
+
+Profiles the server while two mcfunctions run and reports which is more
+expensive. Implemented in `src/commands/bench/`.
+
+| File | Role |
+|------|------|
+| `types.ts` | Config + result types |
+| `config.ts` | Parses and validates the JSON config |
+| `datapack.ts` | Generates the temporary datapack deployed into the server |
+| `profile.ts` | Parses `server/profiling.txt` out of the profiling archive |
+| `runner.ts` | Connects to the host, deploys, profiles, cleans up |
+| `format.ts` | Human-readable and `--json` output |
+
+The config file names the two functions to compare, plus optional one-shot
+`setup` / `cleanup` mcfunctions:
+
+```json
+{
+  "a": "mypack:fn_a",
+  "b": "mypack:fn_b",
+  "iterationsPerTick": 100,
+  "setup": "mypack:reset_state"
+}
+```
+
+`setup` and `cleanup` are run through the server console as
+`function <id>` — once each, not every tick. `setup` runs before the
+measured window, `cleanup` after it.
+
+| Option | Meaning |
+|--------|---------|
+| `--iterations <n>` | Overrides the config's `iterationsPerTick`. |
+| `--settle <seconds>` | How long to wait after `setup` before measuring. Default 10. The setup may do things that land asynchronously (forceloading a region, removing entities), and the functions need a moment to be compiled. |
+| `--runs <n>` | How many profiling runs to average over. Default 1. The setup function runs once before the first run and the cleanup once after the last — the functions under test keep running throughout, so whatever they accumulate carries from one profile into the next. |
+| `--json` | Also print the report to stdout. |
+
+**The report is always saved** to `<project>/.sandstone/bench-result.json` —
+next to the connect endpoint file — whether or not `--json` is passed.
+`--json` only controls whether it is *also* printed.
+
+**Averaging** (`src/commands/bench/average.ts`) happens over the runs, not
+over the raw profiler percentages: each target gets the mean of its
+`msPerTick` across the runs, the sample standard deviation, the min and
+max, and the individual samples. The breakdown is grouped by section name
+first, so a command that appears in every run stays one entry.
+
+**How the measurement works.** The CLI writes a temporary datapack into the
+server's `world/datapacks/sandstone_bench/` folder. Each target gets a
+wrapper mcfunction that calls the target N times per tick, and *both wrappers
+are registered directly in `#minecraft:tick`*.
+
+That placement is the whole trick: Minecraft only gives a function its own
+`function <id>` section in the profiling report when the function is executed
+straight from a function tag. A function called from inside another function
+is not sectioned — its commands fold into the caller's section — so two
+targets sharing one wrapper could not be told apart afterwards.
+
+The CLI then runs `perf start`, waits for the archive to be announced in the
+server log (`Compressed to debug/profiling/<name>.zip`), reads it back with
+`adm-zip`, and parses `server/profiling.txt`. Percentages in that report are
+relative to the whole window, so `global% × timeSpanMs / tickSpan` gives
+milliseconds per tick.
+
+**Cleanup.** The temporary datapack is removed once the run is over. Hosts
+that implement the `deleteEntry` capability (integrated, ssh, ftp) get the
+whole `world/datapacks/sandstone_bench/` folder deleted; the rest fall back
+to emptying the tick tag and blanking the wrappers, so the pack is left on
+disk but inert. Either way the server is reloaded afterwards — a pack
+deleted from disk stays live until the next reload.
+
+The `deleteEntry` capability (`src/hosts/types.ts`) removes a file *or* a
+directory and everything inside it, relative to the server directory. SFTP
+and FTP have no recursive delete, so those providers walk the tree
+themselves.
+
+**What the profiler can and cannot attribute.** A function's own section
+captures the commands it runs — including the whole cost of `summon`
+(entity construction + registration) and `kill` (selector scan + the
+synchronous unlink that `Entity.setRemoved` performs). What it does *not*
+capture is the ongoing lifetime of what the function created: the entity's
+per-tick cost lands on the level's `entities` section, entity section
+load/unload bookkeeping lands on `entityManagement`, and the entity data is
+written to the chunk by the IO worker at save time. A datapack that spawns
+entities and leaves them alive therefore hides its real cost in the level's
+tick, where no function owns it.
 
 ## Project Structure
 

@@ -43,6 +43,7 @@ export abstract class HostProvider {
   readFileStream?(path: string): Promise<{ stream: ReadableStream<Uint8Array>; size?: number }>
   writeFile?(path: string, data: Buffer | string): Promise<void>
   writeFileStream?(path: string, opts?: { size?: number }): Promise<WritableStream<Uint8Array>>
+  deleteEntry?(path: string): Promise<void>
   attachLog?(onChunk: HostLogHandler): Promise<LogSubscription>
   /** Minecraft console command */
   executeRawCommand?(command: string): Promise<string | undefined>
@@ -55,6 +56,7 @@ export const Capability = {
   ReadFile: 'readFile',
   WriteFile: 'writeFile',
   WriteFileStream: 'writeFileStream',
+  DeleteEntry: 'deleteEntry',
   AttachLog: 'attachLog',
   ExecuteRawCommand: 'executeRawCommand',
   ExecuteRawCommandHasResponse: 'executeRawCommandHasResponse',
@@ -91,6 +93,7 @@ export interface CapabilityMethods {
   stopServer(): Promise<void>
   readFile(path: string): Promise<Buffer>
   writeFile(path: string, data: Buffer | string): Promise<void>
+  deleteEntry(path: string): Promise<void>
   attachLog(onChunk: HostLogHandler): Promise<LogSubscription>
   executeRawCommand(command: string): Promise<string | undefined>
 }
@@ -101,6 +104,7 @@ export const ALL_CAPABILITIES: ReadonlySet<Capability> = new Set<Capability>([
   Capability.ReadFile,
   Capability.WriteFile,
   Capability.WriteFileStream,
+  Capability.DeleteEntry,
   Capability.AttachLog,
   Capability.ExecuteRawCommand,
   Capability.ExecuteRawCommandHasResponse,

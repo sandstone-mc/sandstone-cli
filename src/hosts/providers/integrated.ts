@@ -56,6 +56,7 @@ export class IntegratedHost extends HostProvider {
     Capability.StopServer,
     Capability.ReadFile,
     Capability.WriteFile,
+    Capability.DeleteEntry,
     Capability.AttachLog,
     Capability.ExecuteRawCommand,
     Capability.ExecuteRawCommandHasResponse,
@@ -531,6 +532,12 @@ export class IntegratedHost extends HostProvider {
     const { createWriteStream } = await import('node:fs')
     const node = createWriteStream(full)
     return Writable.toWeb(node) as WritableStream<Uint8Array>
+  }
+
+  async deleteEntry(filePath: string): Promise<void> {
+    this.requireConnected('integrated')
+    // `fs.remove` is recursive and force-tolerant: a missing path is a no-op.
+    await fs.remove(path.join(this.serverDir, filePath))
   }
 
   private detectLogLine(pattern: RegExp): Promise<string> {

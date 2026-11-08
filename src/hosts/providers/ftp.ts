@@ -6,7 +6,18 @@ import { RconClient } from '../rcon-client.js'
 import { attachRconIfConfigured } from '../_shared/attach-rcon.js'
 import { HostProvider, Capability } from '../types.js'
 
+import type { FileInfo } from 'basic-ftp'
 import type { DaemonLogger, FtpHostConfig, HostCapabilities, HostLogLine, HostLogHandler, LogSubscription } from '../types.js'
+
+/**
+ * Whether an FTP error means "that path isn't there".
+ *
+ * `550` is the standard "requested action not taken / file unavailable"
+ * reply that servers use for missing files and directories.
+ */
+function isFtpMissing(err: unknown): boolean {
+  return (err as { code?: number } | null)?.code === 550
+}
 
 export class FtpHost extends HostProvider {
   readonly type = 'ftp' as const
@@ -16,6 +27,7 @@ export class FtpHost extends HostProvider {
       Capability.ReadFile,
       Capability.WriteFile,
       Capability.WriteFileStream,
+      Capability.DeleteEntry,
       Capability.AttachLog,
     ])
     return set
@@ -133,6 +145,40 @@ export class FtpHost extends HostProvider {
       )
       return web
     })
+  }
+
+  async deleteEntry(path: string): Promise<void> {
+    this.requireConnected('ftp')
+    await this.ftpSerialize(async () => {
+      await this.removeFtpEntry(this.resolvePath(path))
+    })
+  }
+
+  private async removeFtpEntry(remotePath: string): Promise<void> {
+    try {
+      await this.client.size(remotePath)
+      await this.client.remove(remotePath)
+      return
+    } catch (err) {
+      if (isFtpMissing(err)) return
+    }
+
+    let entries: FileInfo[]
+    try {
+      entries = await this.client.list(remotePath)
+    } catch (err) {
+      if (isFtpMissing(err)) return
+      throw err
+    }
+
+    for (const entry of entries) {
+      if (entry.isDirectory) {
+        await this.removeFtpEntry(`${remotePath}/${entry.name}`)
+        await this.client.removeDir(`${remotePath}/${entry.name}`)
+      } else {
+        await this.client.remove(`${remotePath}/${entry.name}`)
+      }
+    }
   }
 
   async attachLog(onChunk: HostLogHandler): Promise<LogSubscription> {

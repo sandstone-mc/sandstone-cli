@@ -221,6 +221,11 @@ export class Daemon {
     return opts?.encode === 'utf-8' ? new TextDecoder('utf-8').decode(buf) : buf
   }
 
+  async deleteEntry(params: rpc.DeleteEntryParams): Promise<void> {
+    if (!this.host.deleteEntry) throw unsupportedCap(Capability.DeleteEntry)
+    await this.host.deleteEntry(params.path)
+  }
+
   async readFileStream(path: string): Promise<{ streamId: string; stream: ReadableStream<Uint8Array>; totalSize?: number; done: Promise<{ bytesRead: number }> }> {
     if (!this.host.readFileStream) throw unsupportedCap('readFileStream')
     const info = await this.host.readFileStream(path)

@@ -3,7 +3,7 @@ import { Argument, Command } from 'commander'
 import chalk from 'chalk-template'
 
 import { CLI_VERSION } from './version.js'
-import { buildCommand, createCommand, watchCommand, installNativeCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand, testCommand, mcpCommand } from './commands/index.js'
+import { buildCommand, createCommand, watchCommand, installNativeCommand, cleanCommand, linkCommand, unlinkCommand, connectCommand, runCommand, testCommand, benchCommand, mcpCommand } from './commands/index.js'
 import { _buildCommand } from './commands/build/index.js'
 import { BuildOptions } from './utils/commander.js'
 
@@ -166,6 +166,50 @@ minified JSON object: {event, ...} — events are "status" (lifecycle),
   .addOption(BuildOptions.get('outputDir'))
   .addOption(BuildOptions.get('json'))
   .action(testCommand)
+
+CLI
+  .command('bench')
+  .description('Compare the in-game cost of two mcfunctions. Deploys a temporary datapack that calls each function a number of times per tick, profiles the server with `perf start`, and reports the per-tick cost of each. ⛏')
+  .addHelpText('after', `
+Examples:
+  $ sand bench bench.json
+  $ sand bench bench.json --iterations 500
+  $ sand bench bench.json --json | jq
+
+The config file names the two functions to compare:
+  {
+    "a": "mypack:slow_function",
+    "b": "mypack:fast_function",
+    "iterationsPerTick": 100
+  }
+
+"a" and "b" may also be objects with their own "iterationsPerTick":
+  {
+    "a": { "function": "mypack:fn_a", "iterationsPerTick": 100 },
+    "b": { "function": "mypack:fn_b", "iterationsPerTick": 100 }
+  }
+
+Optional "setup" and "cleanup" mcfunctions run once around the measurement:
+  {
+    "a": "mypack:fn_a",
+    "b": "mypack:fn_b",
+    "setup": "mypack:reset_state",
+    "cleanup": "mypack:report_state"
+  }
+
+All four functions must exist in a datapack the server has loaded. The
+temporary datapack is written into the server's world/datapacks/sandstone_bench
+folder and removed again once the run is over.`)
+  .addOption(BuildOptions.get('path'))
+  .addOption(BuildOptions.get('hostType'))
+  .addOption(BuildOptions.get('hostConfig'))
+  .addOption(BuildOptions.get('hostConfigFile'))
+  .addOption(BuildOptions.get('iterations'))
+  .addOption(BuildOptions.get('settle'))
+  .addOption(BuildOptions.get('runs'))
+  .addOption(BuildOptions.get('json'))
+  .action((config: string, opts: { path: string; hostType?: string; hostConfig?: string; hostConfigFile?: string; iterations?: string; settle?: string; runs?: string; json?: boolean }) => benchCommand({ ...opts, config }))
+  .addArgument(new Argument('<config>', 'Path to the JSON file describing the two functions to compare.'))
 
 CLI
   .command('mcp')

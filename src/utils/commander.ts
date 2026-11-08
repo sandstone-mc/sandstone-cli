@@ -62,6 +62,15 @@ const options = {
   // tests...") still go to stdout as plain text.
   json: opt('--json', 'With `sand test`, emit one minified JSON object per test event and one for the summary, instead of formatted+colored output.'),
 
+  // sand bench — how many times per tick each benchmarked function runs.
+  iterations: opt('--iterations <n>', 'With `sand bench`, how many times per tick each function is called. Overrides the `iterationsPerTick` value in the config file.', { env: 'BENCH_ITERATIONS' }),
+
+  // sand bench — how long to let the server settle after the setup function.
+  settle: opt('--settle <seconds>', 'With `sand bench`, seconds to wait after the setup function before the measured window starts. Gives the server time to settle (finish forceloading chunks, apply entity removals, compile the functions). Default 10.', { env: 'BENCH_SETTLE' }),
+
+  // sand bench — how many profiling runs to average over.
+  runs: opt('--runs <n>', 'With `sand bench`, how many profiling runs to average over. The setup function runs once before the first run and the cleanup once after the last; the functions under test keep running throughout. Default 1.', { env: 'BENCH_RUNS' }),
+
   // TODO: ssh
 
   // Watch-specific

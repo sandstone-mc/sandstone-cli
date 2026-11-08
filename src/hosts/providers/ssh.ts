@@ -9,6 +9,20 @@ import { HostProvider, Capability } from '../types.js'
 import type { Config as NodeSshConfig } from 'node-ssh'
 import type { DaemonLogger, SshHostConfig, HostCapabilities, HostLogHandler } from '../types.js'
 
+/**
+ * The part of the SFTP channel we use.
+ *
+ * `node-ssh` hands back an `ssh2` `SFTPWrapper`, but `@types/ssh2` isn't a
+ * direct dependency of this package, so the shape is spelled out here
+ * instead.
+ */
+interface SftpHandle {
+  stat(path: string, callback: (err: Error | undefined, stats: { isDirectory(): boolean }) => void): void
+  readdir(path: string, callback: (err: Error | undefined, list: Array<{ filename: string }>) => void): void
+  unlink(path: string, callback: (err?: Error) => void): void
+  rmdir(path: string, callback: (err?: Error) => void): void
+}
+
 export class SshHost extends HostProvider {
   readonly type = 'ssh' as const
   readonly displayName = 'SSH'
@@ -18,6 +32,7 @@ export class SshHost extends HostProvider {
     Capability.ReadFile,
     Capability.WriteFile,
     Capability.WriteFileStream,
+    Capability.DeleteEntry,
     Capability.AttachLog,
   ])
 
@@ -167,6 +182,61 @@ export class SshHost extends HostProvider {
     const node = sftp.createWriteStream(this.resolvePath(path))
     node.on('error', () => {})
     return Writable.toWeb(node) as WritableStream<Uint8Array>
+  }
+
+  async deleteEntry(path: string): Promise<void> {
+    this.requireConnected('ssh')
+    const sftp = await this.ssh.requestSFTP()
+    await this.removeSftpEntry(sftp, this.resolvePath(path))
+  }
+
+  private async removeSftpEntry(sftp: SftpHandle, remotePath: string): Promise<void> {
+    const stats = await new Promise<{ isDirectory(): boolean } | undefined>((resolve, reject) => {
+      sftp.stat(remotePath, (err, entry) => {
+        if (err) {
+          // A path that isn't there is already deleted.
+          if ((err as { code?: number }).code === 2) {
+            resolve(undefined)
+            return
+          }
+          reject(err)
+          return
+        }
+        resolve(entry)
+      })
+    })
+    if (!stats) return
+
+    if (!stats.isDirectory()) {
+      await new Promise<void>((resolve, reject) => {
+        sftp.unlink(remotePath, (err) => {
+          if (err) reject(err)
+          else resolve()
+        })
+      })
+      return
+    }
+
+    const entries = await new Promise<Array<{ filename: string }>>((resolve, reject) => {
+      sftp.readdir(remotePath, (err, list) => {
+        if (err) {
+          reject(err)
+          return
+        }
+        resolve(list ?? [])
+      })
+    })
+
+    for (const entry of entries) {
+      await this.removeSftpEntry(sftp, `${remotePath}/${entry.filename}`)
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      sftp.rmdir(remotePath, (err) => {
+        if (err) reject(err)
+        else resolve()
+      })
+    })
   }
 
   async executeRawCommand(command: string) {
